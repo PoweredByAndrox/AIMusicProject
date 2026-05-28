@@ -1,0 +1,37 @@
+# Data directories (huge - 86GB+)
+docker_data/
+storage/
+
+# allin1 byproducts inside ml_worker_improved (spectrograms + demix stems)
+ml_worker_improved/spec/
+ml_worker_improved/demix/
+ml_worker_improved/storage/
+ml_worker_improved/faiss_index/
+ml_worker_improved/models/
+ml_worker_improved/.hypothesis/
+ml_worker_improved/.pytest_cache/
+
+# Dependencies
+node_modules/
+vendor/
+
+# Version control
+.git/
+
+# IDE / editor
+.idea/
+.vscode/
+.kiro/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.log
+
+# Temporary files
+*.tmp
+*.bak

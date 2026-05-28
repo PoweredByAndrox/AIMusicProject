@@ -1,0 +1,95 @@
+{
+  "cases": [
+    {
+      "expected_similar_track_ids": [
+        4696,
+        4646,
+        6030,
+        6187,
+        5349
+      ],
+      "name": "seed_4599",
+      "seed_track_id": 4599
+    },
+    {
+      "expected_similar_track_ids": [
+        4702,
+        4338,
+        5584,
+        5567,
+        5006
+      ],
+      "name": "seed_4762",
+      "seed_track_id": 4762
+    },
+    {
+      "expected_similar_track_ids": [
+        4407,
+        5050,
+        4685,
+        4441,
+        5201
+      ],
+      "name": "seed_6179",
+      "seed_track_id": 6179
+    },
+    {
+      "expected_similar_track_ids": [
+        5719,
+        5235,
+        5066,
+        4474,
+        5542
+      ],
+      "name": "seed_6180",
+      "seed_track_id": 6180
+    },
+    {
+      "expected_similar_track_ids": [
+        5394,
+        5083,
+        5956,
+        5177,
+        6172
+      ],
+      "name": "seed_6181",
+      "seed_track_id": 6181
+    },
+    {
+      "expected_similar_track_ids": [
+        5208,
+        5497,
+        4844,
+        5982,
+        5402
+      ],
+      "name": "seed_6182",
+      "seed_track_id": 6182
+    },
+    {
+      "expected_similar_track_ids": [
+        6197,
+        5078,
+        5064,
+        4776,
+        5978
+      ],
+      "name": "seed_6183",
+      "seed_track_id": 6183
+    },
+    {
+      "expected_similar_track_ids": [
+        5122,
+        4338,
+        5006,
+        5644,
+        4418
+      ],
+      "name": "seed_6184",
+      "seed_track_id": 6184
+    }
+  ],
+  "expected_per_seed": 5,
+  "generated_at": "2026-03-14T08:53:11",
+  "k": 25
+}

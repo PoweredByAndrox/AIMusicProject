@@ -1,0 +1,24 @@
+{
+  "services": [
+    {
+      "id": "demucs-worker",
+      "role": "coarse_and_rhythm_specialist"
+    },
+    {
+      "id": "bsroformer-worker",
+      "role": "coarse_6stem_and_cleanup_specialist"
+    },
+    {
+      "id": "audio-separator-worker",
+      "role": "ensemble_and_community_preset_specialist"
+    },
+    {
+      "id": "querysep-worker",
+      "role": "prompt_or_query_based_long_tail_extraction"
+    },
+    {
+      "id": "restoration-worker",
+      "role": "targeted_stem_restoration"
+    }
+  ]
+}

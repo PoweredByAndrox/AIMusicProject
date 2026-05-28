@@ -1,0 +1,311 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+    color-scheme: light;
+    --app-ink: #0f172a;
+    --app-soft-ink: #475569;
+    --app-line: rgba(148, 163, 184, 0.24);
+    --app-panel: rgba(255, 255, 255, 0.84);
+    --app-panel-strong: rgba(255, 255, 255, 0.94);
+    --app-highlight: #2563eb;
+    --app-highlight-soft: rgba(37, 99, 235, 0.12);
+    --app-success-soft: rgba(16, 185, 129, 0.12);
+    --app-warning-soft: rgba(245, 158, 11, 0.14);
+    --app-danger-soft: rgba(239, 68, 68, 0.14);
+}
+
+@layer base {
+    html {
+        min-height: 100%;
+        background:
+            radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 34%),
+            radial-gradient(circle at top right, rgba(14, 165, 233, 0.16), transparent 28%),
+            linear-gradient(180deg, #edf4ff 0%, #f8fbff 42%, #f5f7fb 100%);
+    }
+
+    body {
+        min-height: 100vh;
+        margin: 0;
+        color: var(--app-ink);
+        font-family: 'Manrope', sans-serif;
+        background: transparent;
+    }
+
+    #app {
+        min-height: 100vh;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4,
+    h5,
+    h6 {
+        font-family: 'Space Grotesk', sans-serif;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+        font: inherit;
+    }
+
+    button {
+        transition:
+            transform 0.18s ease,
+            box-shadow 0.18s ease,
+            border-color 0.18s ease,
+            background-color 0.18s ease,
+            color 0.18s ease;
+    }
+
+    button:disabled {
+        cursor: not-allowed;
+    }
+}
+
+@layer components {
+    .app-shell {
+        @apply min-h-screen px-3 pb-44 pt-3 sm:px-6 sm:pb-32 sm:pt-4 lg:px-8;
+    }
+
+    .shell-panel {
+        backdrop-filter: blur(20px);
+        background: var(--app-panel);
+        border: 1px solid var(--app-line);
+        box-shadow:
+            0 24px 80px rgba(15, 23, 42, 0.08),
+            inset 0 1px 0 rgba(255, 255, 255, 0.45);
+        @apply mx-auto w-full rounded-[1.5rem] sm:rounded-[2rem];
+    }
+
+    .app-navbar {
+        @apply sticky top-3 z-40 mb-4 px-4 py-3 sm:top-4 sm:mb-6 sm:px-6 sm:py-4;
+    }
+
+    .app-content {
+        @apply mx-auto w-full;
+    }
+
+    .brand-mark {
+        background: linear-gradient(135deg, #1d4ed8 0%, #0284c7 100%);
+        box-shadow: 0 14px 30px rgba(37, 99, 235, 0.28);
+        @apply inline-flex h-10 w-10 items-center justify-center rounded-[1.1rem] text-base font-bold text-white sm:h-11 sm:w-11 sm:rounded-2xl sm:text-lg;
+    }
+
+    .brand-title {
+        @apply text-lg font-semibold tracking-tight text-slate-950 sm:text-xl;
+    }
+
+    .brand-copy {
+        @apply text-xs font-medium uppercase tracking-[0.24em] text-slate-500;
+    }
+
+    .nav-chip {
+        @apply inline-flex items-center whitespace-nowrap rounded-full border border-transparent px-3.5 py-2 text-[0.82rem] font-semibold text-slate-600 transition sm:px-4 sm:text-sm;
+    }
+
+    .nav-chip:hover {
+        border-color: rgba(148, 163, 184, 0.24);
+        background: rgba(255, 255, 255, 0.86);
+        color: var(--app-ink);
+        transform: translateY(-1px);
+    }
+
+    .nav-chip-active {
+        background: linear-gradient(135deg, rgba(37, 99, 235, 0.18), rgba(2, 132, 199, 0.12));
+        border-color: rgba(37, 99, 235, 0.18);
+        color: #1d4ed8;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    }
+
+    .surface-card {
+        background: var(--app-panel-strong);
+        border: 1px solid var(--app-line);
+        box-shadow:
+            0 24px 80px rgba(15, 23, 42, 0.08),
+            inset 0 1px 0 rgba(255, 255, 255, 0.45);
+        @apply rounded-[1.5rem] p-4 sm:rounded-[2rem] sm:p-8;
+    }
+
+    .metric-card {
+        @apply rounded-[1.25rem] border border-white/70 bg-white/80 p-4 shadow-[0_18px_48px_rgba(15,23,42,0.08)] sm:rounded-[1.6rem] sm:p-5;
+    }
+
+    .section-kicker {
+        @apply text-xs font-semibold uppercase tracking-[0.34em] text-sky-700;
+    }
+
+    .page-title {
+        @apply mt-3 text-2xl font-semibold tracking-tight text-slate-950 sm:text-4xl;
+    }
+
+    .page-copy {
+        @apply mt-3 max-w-3xl text-sm leading-6 text-slate-600 sm:text-base sm:leading-7;
+    }
+
+    .field-label {
+        @apply mb-2 block text-xs font-semibold uppercase tracking-[0.22em] text-slate-500;
+    }
+
+    .field-control,
+    .field-select,
+    .field-textarea {
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(148, 163, 184, 0.26);
+        box-shadow: inset 0 1px 2px rgba(148, 163, 184, 0.08);
+        @apply w-full rounded-2xl px-4 py-3 text-sm text-slate-900 outline-none transition;
+    }
+
+    .field-control:focus,
+    .field-select:focus,
+    .field-textarea:focus {
+        border-color: rgba(37, 99, 235, 0.32);
+        box-shadow:
+            0 0 0 4px rgba(59, 130, 246, 0.12),
+            inset 0 1px 2px rgba(148, 163, 184, 0.08);
+    }
+
+    .field-checkbox {
+        @apply h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500;
+    }
+
+    .action-primary {
+        background: linear-gradient(135deg, #1d4ed8 0%, #0284c7 100%);
+        box-shadow: 0 16px 30px rgba(37, 99, 235, 0.24);
+        @apply inline-flex items-center justify-center rounded-2xl px-5 py-3 text-sm font-semibold text-white;
+    }
+
+    .action-primary:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 18px 34px rgba(37, 99, 235, 0.3);
+    }
+
+    .action-secondary {
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        @apply inline-flex items-center justify-center rounded-2xl px-5 py-3 text-sm font-semibold text-slate-700;
+    }
+
+    .action-secondary:hover:not(:disabled) {
+        transform: translateY(-1px);
+        background: white;
+        border-color: rgba(100, 116, 139, 0.32);
+    }
+
+    .action-danger {
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(248, 113, 113, 0.28);
+        color: #b91c1c;
+        @apply inline-flex items-center justify-center rounded-2xl px-5 py-3 text-sm font-semibold;
+    }
+
+    .action-danger:hover:not(:disabled) {
+        transform: translateY(-1px);
+        background: #fff5f5;
+    }
+
+    .table-shell {
+        @apply overflow-hidden rounded-[1.35rem] border border-slate-200/80 bg-white/90 sm:rounded-[1.75rem];
+    }
+
+    .table-header {
+        @apply bg-slate-50/90 text-xs font-semibold uppercase tracking-[0.22em] text-slate-500;
+    }
+
+    .table-row {
+        @apply transition hover:bg-sky-50/70;
+    }
+
+    .table-meta {
+        @apply text-sm text-slate-500;
+    }
+
+    .empty-state {
+        @apply rounded-[1.6rem] border border-dashed border-slate-300/80 bg-slate-50/70 px-6 py-12 text-center;
+    }
+
+    .status-pill {
+        @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em];
+    }
+
+    .status-pill--ready {
+        background: var(--app-success-soft);
+        color: #047857;
+    }
+
+    .status-pill--working {
+        background: rgba(59, 130, 246, 0.12);
+        color: #1d4ed8;
+    }
+
+    .status-pill--queued {
+        background: var(--app-warning-soft);
+        color: #b45309;
+    }
+
+    .status-pill--failed {
+        background: var(--app-danger-soft);
+        color: #b91c1c;
+    }
+
+    .badge-soft {
+        @apply inline-flex items-center rounded-full border border-slate-200 bg-white/80 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500;
+    }
+
+    .tab-button {
+        @apply inline-flex items-center justify-center rounded-full border px-4 py-2 text-sm font-semibold transition;
+    }
+
+    .tab-button--active {
+        background: linear-gradient(135deg, rgba(37, 99, 235, 0.14), rgba(14, 165, 233, 0.14));
+        border-color: rgba(37, 99, 235, 0.22);
+        color: #1d4ed8;
+    }
+
+    .tab-button--idle {
+        @apply border-slate-200 bg-white/70 text-slate-500;
+    }
+
+    .tab-button--idle:hover {
+        @apply border-slate-300 bg-white text-slate-700;
+    }
+}
+
+.waveform-container {
+    @apply rounded-[1.5rem] border border-slate-800/60 bg-slate-950 p-4 text-white shadow-[0_20px_60px_rgba(15,23,42,0.45)];
+}
+
+.track-card {
+    background: var(--app-panel-strong);
+    border: 1px solid var(--app-line);
+    box-shadow:
+        0 24px 80px rgba(15, 23, 42, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    @apply rounded-[2rem] p-6 sm:p-8;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #1d4ed8 0%, #0284c7 100%);
+    box-shadow: 0 16px 30px rgba(37, 99, 235, 0.24);
+    @apply inline-flex items-center justify-center rounded-2xl px-5 py-3 text-sm font-semibold text-white;
+}
+
+.btn-secondary {
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    @apply inline-flex items-center justify-center rounded-2xl px-5 py-3 text-sm font-semibold text-slate-700;
+}
+
+.btn-like {
+    @apply text-slate-400 transition hover:text-rose-500;
+}
+
+.btn-like.liked {
+    @apply text-rose-500;
+}

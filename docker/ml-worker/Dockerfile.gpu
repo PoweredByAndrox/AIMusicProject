@@ -1,0 +1,141 @@
+# ML Worker Dockerfile - GPU Version (PyTorch)
+# Python 3.11+ with PyTorch CUDA, torchaudio, FAISS, yt-dlp, allin1
+# Requirements: 3.1, 13.1
+#
+# Full GPU acceleration - all audio processing on GPU via PyTorch
+# Includes All-In-One music structure analyzer (natten + allin1)
+
+FROM nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    TF_CPP_MIN_LOG_LEVEL=2 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    NATTEN_CUDA_ARCH="8.9"
+
+# Install Python 3.11 and system dependencies (including cmake for natten)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    libpq5 \
+    libpq-dev \
+    build-essential \
+    curl \
+    cmake \
+    git \
+    # CUDA 11 libraries for TensorFlow/Essentia compatibility
+    libcudart11.0 \
+    libcublas11 \
+    libcublaslt11 \
+    libcufft10 \
+    libcusparse11 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements file
+COPY docker/ml-worker/requirements-gpu.txt /app/requirements.txt
+COPY docker/ml-worker/patch_mamba_ssm_compat.py /app/patch_mamba_ssm_compat.py
+
+# Install Python dependencies with CUDA support
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# BS-Mamba2 vendor checkpoints require mamba_ssm. Build against the already-installed
+# torch/CUDA stack and patch the package top-level import to avoid unused Mamba3/Triton drift.
+ARG MAMBA_SSM_VERSION=2.3.2.post1
+ARG MAMBA_TORCH_CUDA_ARCH_LIST=8.9
+ARG MAMBA_BUILD_MAX_JOBS=4
+RUN pip install --no-cache-dir ninja \
+    && TORCH_CUDA_ARCH_LIST="${MAMBA_TORCH_CUDA_ARCH_LIST}" \
+       MAX_JOBS="${MAMBA_BUILD_MAX_JOBS}" \
+       MAMBA_FORCE_BUILD=TRUE \
+       pip install --no-cache-dir --no-deps --no-build-isolation "mamba-ssm==${MAMBA_SSM_VERSION}" \
+    && python /app/patch_mamba_ssm_compat.py \
+    && python -c "import importlib.util; assert importlib.util.find_spec('mamba_ssm') is not None; print('mamba_ssm package available')"
+
+# TEMPORARY third-party workaround:
+# basic-pitch metadata hard-pins tensorflow<2.15.1, but this image keeps a newer
+# TensorFlow stack for Essentia/Discogs-EffNet. Install it without re-resolving
+# TensorFlow, then add only the runtime dependencies its note-extraction path needs.
+# Real fix path: replace basic-pitch note extraction or move it to an isolated
+# sidecar runtime with a compatible TensorFlow stack.
+RUN pip install --no-cache-dir --no-deps basic-pitch==0.4.0 \
+    && pip install --no-cache-dir "pretty_midi>=0.2.9" "mir_eval>=0.6" "resampy>=0.2.2,<0.4.3" onnxruntime-gpu
+
+# Audio Separator requires numpy>=2 and newer beartype, while the main worker
+# keeps the CUDA/PyTorch/TensorFlow stack isolated for existing routes.
+RUN python -m venv /opt/audio-separator-venv \
+    && /opt/audio-separator-venv/bin/python -m pip install --upgrade pip \
+    && /opt/audio-separator-venv/bin/pip install --no-cache-dir audio-separator==0.44.2 onnxruntime-gpu \
+    && /opt/audio-separator-venv/bin/python -c "from audio_separator.separator import Separator; print(Separator.__name__)" \
+    && /opt/audio-separator-venv/bin/python -c "import onnxruntime as ort; providers = ort.get_available_providers(); assert 'CUDAExecutionProvider' in providers, f'Audio Separator GPU runtime must expose CUDAExecutionProvider, got {providers}'"
+ENV AUDIO_SEPARATOR_PYTHON=/opt/audio-separator-venv/bin/python
+
+# Install madmom from GitHub (has Python 3.10+ compatibility fix)
+# PyPI version 0.16.1 has collections.MutableSequence issue with Python 3.10+
+RUN pip install --no-cache-dir --no-build-isolation git+https://github.com/CPJKU/madmom.git
+
+# Install natten from prebuilt wheels (torch 2.6.0 + cu126)
+# Using natten 0.17.5 because allin1 uses head_dim=12 which is not supported by natten 0.20+
+# (natten 0.20+ CUTLASS requires head_dim multiple of 8)
+RUN pip install natten==0.17.5+torch260cu126 -f https://whl.natten.org
+
+# Note: natten is optional for allin1 - it will use PyTorch Flex Attention backend
+# If you need natten for better performance, install manually after build:
+# pip install natten -f https://shi-labs.com/natten/wheels/cu128/torch2.9/index.html
+
+# Install allin1 (All-In-One Music Structure Analyzer)
+RUN pip install allin1
+
+# Apply patch for allin1 to work with natten 0.17.x API
+# allin1 expects old natten API (natten1dqkrpb, natten1dav)
+# natten 0.17.x uses new API (na1d_qk, na1d_av with rpb parameter)
+COPY docker/ml-worker/patch_allin1_natten017.py /tmp/patch_allin1_natten017.py
+RUN python /tmp/patch_allin1_natten017.py && rm /tmp/patch_allin1_natten017.py
+
+# Pre-download models to cache them in the image
+# This avoids downloading on first run (~100MB total)
+RUN python -c "\
+from demucs.pretrained import get_model; \
+get_model('htdemucs'); \
+print('Demucs model cached')"
+
+# Note: allin1 models (~100MB) will be downloaded on first run
+# Cannot cache during build because natten requires CUDA even for import
+# Models are cached in /root/.cache/torch/hub/checkpoints/
+
+# Create necessary directories
+RUN mkdir -p /app/storage \
+    /app/faiss_index \
+    /app/models \
+    /app/logs \
+    /app/spec \
+    /app/demix
+
+# Set permissions
+RUN chmod -R 755 /app
+
+# Health check - simple process check (CUDA check can timeout when GPU is busy)
+# Using longer timeout and checking if main process is running
+HEALTHCHECK --interval=60s --timeout=30s --start-period=60s --retries=5 \
+    CMD pgrep -f "worker.main" > /dev/null || exit 1
+
+# Default command - run the queue worker
+CMD ["python", "-m", "worker.main"]

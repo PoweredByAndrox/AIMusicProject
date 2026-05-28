@@ -1,0 +1,7 @@
+vendor/query-bandit/.git
+vendor/query-bandit/.github
+vendor/query-bandit/.idea
+vendor/query-bandit/assets
+vendor/query-bandit/notebooks
+vendor/query-bandit/reproducibility
+__pycache__

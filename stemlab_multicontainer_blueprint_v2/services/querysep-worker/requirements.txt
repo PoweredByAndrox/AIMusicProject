@@ -1,0 +1,14 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+numpy<2
+scipy==1.14.1
+soundfile==0.12.1
+librosa==0.10.2.post1
+transformers==4.46.3
+torch
+torchaudio
+pytorch-lightning==2.5.0
+torchmetrics==1.6.1
+omegaconf==2.3.0
+hear21passt==0.0.26

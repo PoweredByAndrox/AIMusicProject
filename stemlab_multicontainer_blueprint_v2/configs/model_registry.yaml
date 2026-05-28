@@ -1,0 +1,113 @@
+services:
+  demucs-worker:
+    role: coarse_and_rhythm_specialist
+    strengths:
+      - drums
+      - bass
+      - coarse_vdbo
+    url_env: WORKER_DEMUCS_URL
+
+  bsroformer-worker:
+    role: coarse_6stem_and_cleanup_specialist
+    strengths:
+      - vocals
+      - guitar
+      - piano
+      - 6stem_backbone
+      - resurrection
+      - dereverb
+    url_env: WORKER_BSROFORMER_URL
+
+  audio-separator-worker:
+    # R12: this worker is misnamed for legacy reasons. It does NOT use the
+    # `audio-separator` PyPI package and does NOT load any UVR models. It is
+    # a deterministic ffmpeg-based bus mixer / EQ. Honest functional name is
+    # `bus-mixer-worker`. The legacy slug is kept for back-compat so that
+    # existing presets keep working; new presets should prefer
+    # restoration-worker stem_ensemble (R9) and wiener_postfilter (R8) for
+    # learned multi-stem fusion, or fine_grained_14stem.yaml for the actual
+    # querysep-worker (Banquet) long-tail decoder.
+    role: heuristic_bus_mixer
+    honest_name: bus-mixer-worker
+    package_installed: false
+    strengths:
+      - bus_assembly
+      - per_bus_eq
+      - preset_testing
+    url_env: WORKER_AUDIO_SEPARATOR_URL
+
+  querysep-worker:
+    role: prompt_or_query_based_long_tail_extraction
+    strengths:
+      - strings
+      - synth
+      - brass_woodwinds
+      - organ_reeds
+      - fx
+    url_env: WORKER_QUERYSEP_URL
+
+  restoration-worker:
+    role: targeted_stem_restoration
+    strengths:
+      - dereverb
+      - artifact_repair
+      - stem_specific_cleanup
+    url_env: WORKER_RESTORATION_URL
+
+  lyrics-worker:
+    role: lyrics_transcription_and_alignment
+    strengths:
+      - word_level_timestamps
+      - aligned_reference_lyrics
+      - lrc_srt_json_export
+      - vocals_first_transcription
+    url_env: WORKER_LYRICS_URL
+
+recommended_models:
+  coarse_backbone:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-sw-by-jarredou
+
+  coarse_validator:
+    service: demucs-worker
+    model: htdemucs_ft
+
+  vocals_cleanup:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-vocals-resurrection-by-unwa
+
+  instrumental_cleanup:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-instrumental-resurrection-by-unwa
+
+  dereverb:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-de-reverb
+
+  # R10: SCNet medium is now an opt-in third backbone for the per-stem
+  # ensemble (R9). Weights are not bundled - place them under
+  # ${MODELS_ROOT}/scnet-medium-vocals-by-zfturbo/ together with the matching
+  # config.yaml from Politrees/UVR_resources before flipping a preset onto
+  # this entry. The bsroformer-worker auto-detects SCNet configs and tries
+  # `scnet`, `scnet.scnet`, `models.scnet`, and the vendored MSST root in
+  # priority order.
+  scnet_medium_vocals:
+    service: bsroformer-worker
+    model: scnet-medium-vocals-by-zfturbo
+    optional: true
+    notes: >-
+      Manual setup required. See docs/02_MODEL_STRATEGY_RU.md for the
+      pip-install / vendor-drop instructions and the recommended use as a
+      third candidate in the per-stem ensemble (R9).
+
+  ensemble_harmonic_cleanup:
+    service: audio-separator-worker
+    preset: instrumental_balanced
+
+  lyrics_transcription:
+    service: lyrics-worker
+    model: whisperx-large-v2
+
+  lyrics_alignment:
+    service: lyrics-worker
+    model: stable-ts-large-v3

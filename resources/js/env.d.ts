@@ -1,0 +1,1 @@
+declare const __FRONTEND_RUNTIME_VERSION__: string

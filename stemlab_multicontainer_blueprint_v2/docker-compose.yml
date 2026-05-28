@@ -1,0 +1,294 @@
+services:
+  api:
+    build:
+      context: ./apps/api
+    env_file:
+      - .env
+    environment:
+      API_PORT: ${API_PORT:-8000}
+      DRY_RUN: ${DRY_RUN:-true}
+      DATA_ROOT: /app/data
+      CONFIG_ROOT: /app/configs
+      MEDIA_PREFIX: /media
+      WORKER_DEMUCS_URL: ${WORKER_DEMUCS_URL:-http://demucs-worker:8000}
+      WORKER_BSROFORMER_URL: ${WORKER_BSROFORMER_URL:-http://bsroformer-worker:8000}
+      WORKER_BSROFORMER_SW_URL: ${WORKER_BSROFORMER_SW_URL:-http://bsroformer-sw-worker:8000}
+      WORKER_BSROFORMER_DEREVERB_URL: ${WORKER_BSROFORMER_DEREVERB_URL:-http://bsroformer-dereverb-worker:8000}
+      WORKER_AUDIO_SEPARATOR_URL: ${WORKER_AUDIO_SEPARATOR_URL:-http://audio-separator-worker:8000}
+      WORKER_QUERYSEP_URL: ${WORKER_QUERYSEP_URL:-http://querysep-worker:8000}
+      WORKER_RESTORATION_URL: ${WORKER_RESTORATION_URL:-http://restoration-worker:8000}
+      WORKER_LYRICS_URL: ${WORKER_LYRICS_URL:-http://lyrics-worker:8000}
+      STEMLAB_API_BASE: ${STEMLAB_API_BASE:-http://127.0.0.1:8000}
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs:ro
+      - ./scripts:/app/scripts:ro
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      - demucs-worker
+      - bsroformer-worker
+      - bsroformer-sw-worker
+      - bsroformer-dereverb-worker
+      - audio-separator-worker
+      - querysep-worker
+      - restoration-worker
+      - lyrics-worker
+
+  frontend:
+    build:
+      context: ./apps/frontend
+    environment:
+      VITE_API_URL: http://127.0.0.1:${API_PORT:-8000}
+      VITE_APP_TITLE: StemLab
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      - api
+
+  demucs-worker:
+    build:
+      context: ./services/demucs-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      DEMUCS_PREFETCH_ON_START: ${DEMUCS_PREFETCH_ON_START:-false}
+      DEMUCS_PREFETCH_MODELS: ${DEMUCS_PREFETCH_MODELS:-htdemucs_ft,htdemucs_6s}
+      DEMUCS_CACHE_ROOT: /app/models/demucs-worker-cache
+      TORCH_HOME: /app/models/demucs-worker-cache/torch
+      XDG_CACHE_HOME: /app/models/demucs-worker-cache/xdg
+      MPLCONFIGDIR: /app/models/demucs-worker-cache/matplotlib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  bsroformer-worker:
+    build:
+      context: ./services/bsroformer-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      BSROFORMER_PREFETCH_ON_START: ${BSROFORMER_PREFETCH_ON_START:-false}
+      BSROFORMER_PREFETCH_MODELS: ${BSROFORMER_PREFETCH_MODELS:-roformer-model-bs-roformer-vocals-resurrection-by-unwa,roformer-model-bs-roformer-instrumental-resurrection-by-unwa}
+      BSROFORMER_RUNTIME_DEVICE: ${BSROFORMER_RUNTIME_DEVICE:-auto}
+      BSROFORMER_RUNTIME_DEVICE_IDS: ${BSROFORMER_RUNTIME_DEVICE_IDS:-}
+      BSROFORMER_MAX_CACHED_MODELS: ${BSROFORMER_MAX_CACHED_MODELS:-2}
+      BSROFORMER_IDLE_UNLOAD_SECONDS: ${BSROFORMER_IDLE_UNLOAD_SECONDS:-900}
+      # R6 Test-Time Augmentation: off | standard (2x, +polarity) | aggressive (4x, +polarity+L/R swap).
+      # `standard` is the accuracy_max default; flip to `off` if you need the legacy 1-pass timing.
+      BSR_TTA: ${BSR_TTA:-standard}
+      MELBAND_VENDOR_ROOT: /app/vendor/mel_band_roformer_vocal_model
+      # R10: optional SCNet vendor drop-in. Bind-mount the
+      # Music-Source-Separation-Training repo to this path to enable SCNet
+      # medium without rebuilding the worker image.
+      SCNET_VENDOR_ROOT: ${SCNET_VENDOR_ROOT:-/app/vendor/scnet}
+      BSROFORMER_CACHE_ROOT: /app/models/bsroformer-worker-cache
+      TORCH_HOME: /app/models/bsroformer-worker-cache/torch
+      HF_HOME: /app/models/bsroformer-worker-cache/hf
+      HUGGINGFACE_HUB_CACHE: /app/models/bsroformer-worker-cache/hf/hub
+      XDG_CACHE_HOME: /app/models/bsroformer-worker-cache/xdg
+      MPLCONFIGDIR: /app/models/bsroformer-worker-cache/matplotlib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ../ml_worker_improved/vendor/mel_band_roformer_vocal_model:/app/vendor/mel_band_roformer_vocal_model:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  bsroformer-sw-worker:
+    build:
+      context: ./services/bsroformer-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      BSROFORMER_PREFETCH_ON_START: ${BSROFORMER_PREFETCH_ON_START:-false}
+      BSROFORMER_PREFETCH_MODELS: ${BSROFORMER_SW_PREFETCH_MODELS:-roformer-model-bs-roformer-sw-by-jarredou}
+      BSROFORMER_RUNTIME_DEVICE: ${BSROFORMER_RUNTIME_DEVICE:-auto}
+      BSROFORMER_RUNTIME_DEVICE_IDS: ${BSROFORMER_RUNTIME_DEVICE_IDS:-}
+      BSROFORMER_MAX_CACHED_MODELS: ${BSROFORMER_SW_MAX_CACHED_MODELS:-1}
+      BSROFORMER_IDLE_UNLOAD_SECONDS: ${BSROFORMER_IDLE_UNLOAD_SECONDS:-900}
+      BSR_TTA: ${BSR_TTA:-standard}
+      BSROFORMER_CACHE_ROOT: /app/models/bsroformer-sw-worker-cache
+      TORCH_HOME: /app/models/bsroformer-sw-worker-cache/torch
+      HF_HOME: /app/models/bsroformer-sw-worker-cache/hf
+      HUGGINGFACE_HUB_CACHE: /app/models/bsroformer-sw-worker-cache/hf/hub
+      XDG_CACHE_HOME: /app/models/bsroformer-sw-worker-cache/xdg
+      MPLCONFIGDIR: /app/models/bsroformer-sw-worker-cache/matplotlib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  bsroformer-dereverb-worker:
+    build:
+      context: ./services/bsroformer-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      BSROFORMER_PREFETCH_ON_START: ${BSROFORMER_PREFETCH_ON_START:-false}
+      BSROFORMER_PREFETCH_MODELS: ${BSROFORMER_DEREVERB_PREFETCH_MODELS:-roformer-model-bs-roformer-de-reverb}
+      BSROFORMER_RUNTIME_DEVICE: ${BSROFORMER_RUNTIME_DEVICE:-auto}
+      BSROFORMER_RUNTIME_DEVICE_IDS: ${BSROFORMER_RUNTIME_DEVICE_IDS:-}
+      BSROFORMER_MAX_CACHED_MODELS: ${BSROFORMER_DEREVERB_MAX_CACHED_MODELS:-1}
+      BSROFORMER_IDLE_UNLOAD_SECONDS: ${BSROFORMER_IDLE_UNLOAD_SECONDS:-900}
+      BSR_TTA: ${BSR_TTA:-standard}
+      BSROFORMER_CACHE_ROOT: /app/models/bsroformer-dereverb-worker-cache
+      TORCH_HOME: /app/models/bsroformer-dereverb-worker-cache/torch
+      HF_HOME: /app/models/bsroformer-dereverb-worker-cache/hf
+      HUGGINGFACE_HUB_CACHE: /app/models/bsroformer-dereverb-worker-cache/hf/hub
+      XDG_CACHE_HOME: /app/models/bsroformer-dereverb-worker-cache/xdg
+      MPLCONFIGDIR: /app/models/bsroformer-dereverb-worker-cache/matplotlib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  audio-separator-worker:
+    build:
+      context: ./services/audio-separator-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  querysep-worker:
+    build:
+      context: ./services/querysep-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      QUERYSEP_RUNTIME_DEVICE: ${QUERYSEP_RUNTIME_DEVICE:-auto}
+      QUERYSEP_MODEL_ID: ${QUERYSEP_MODEL_ID:-laion/clap-htsat-unfused}
+      QUERYSEP_BACKEND_DEFAULT: ${QUERYSEP_BACKEND_DEFAULT:-auto}
+      QUERYSEP_BANQUET_ENABLED: ${QUERYSEP_BANQUET_ENABLED:-true}
+      QUERYSEP_BANQUET_DOWNLOAD_ON_START: ${QUERYSEP_BANQUET_DOWNLOAD_ON_START:-true}
+      QUERYSEP_BANQUET_CKPT_PATH: /app/models/query-bandit/ev-pre-aug.ckpt
+      QUERYSEP_BANQUET_CKPT_URL: ${QUERYSEP_BANQUET_CKPT_URL:-https://zenodo.org/api/records/13694558/files/ev-pre-aug.ckpt/content}
+      QUERYSEP_BANQUET_CKPT_MD5: ${QUERYSEP_BANQUET_CKPT_MD5:-4dfb91d6d27c2dfd4992a15070915541}
+      QUERYSEP_BANQUET_VENDOR_ROOT: /app/vendor/query-bandit
+      QUERYSEP_BANQUET_CONFIG_ROOT: /app/vendor/query-bandit/config
+      QUERYSEP_BANQUET_EXPT_CONFIG: /app/vendor/query-bandit/expt/bandit-everything-test.yml
+      QUERYSEP_BANQUET_BATCH_SIZE: ${QUERYSEP_BANQUET_BATCH_SIZE:-4}
+      QUERYSEP_BANQUET_QUERY_TOP_K: ${QUERYSEP_BANQUET_QUERY_TOP_K:-3}
+      QUERYSEP_PREFETCH_ON_START: ${QUERYSEP_PREFETCH_ON_START:-false}
+      QUERYSEP_IDLE_UNLOAD_SECONDS: ${QUERYSEP_IDLE_UNLOAD_SECONDS:-900}
+      QUERYSEP_CACHE_ROOT: /app/models/querysep-worker-cache
+      HF_HOME: /app/models/querysep-worker-cache/hf
+      HUGGINGFACE_HUB_CACHE: /app/models/querysep-worker-cache/hf/hub
+      TORCH_HOME: /app/models/querysep-worker-cache/torch
+      XDG_CACHE_HOME: /app/models/querysep-worker-cache/xdg
+      MPLCONFIGDIR: /app/models/querysep-worker-cache/matplotlib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  restoration-worker:
+    build:
+      context: ./services/restoration-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  lyrics-worker:
+    build:
+      context: ./services/lyrics-worker
+    environment:
+      DRY_RUN: ${DRY_RUN:-true}
+      MODELS_ROOT: /app/models
+      DATA_ROOT: /app/data
+      LYRICS_DEVICE: ${LYRICS_DEVICE:-auto}
+      LYRICS_COMPUTE_TYPE: ${LYRICS_COMPUTE_TYPE:-auto}
+      LYRICS_BATCH_SIZE: ${LYRICS_BATCH_SIZE:-8}
+      LYRICS_WHISPERX_MODEL: ${LYRICS_WHISPERX_MODEL:-large-v3}
+      LYRICS_ALIGN_MODEL: ${LYRICS_ALIGN_MODEL:-large-v3}
+      LYRICS_PREFETCH_ON_START: ${LYRICS_PREFETCH_ON_START:-true}
+      LYRICS_PREFETCH_LANGUAGE: ${LYRICS_PREFETCH_LANGUAGE:-en}
+      LYRICS_CACHE_ROOT: /app/models/lyrics-worker-cache
+      HF_HOME: /app/models/lyrics-worker-cache/hf
+      HUGGINGFACE_HUB_CACHE: /app/models/lyrics-worker-cache/hf/hub
+      TORCH_HOME: /app/models/lyrics-worker-cache/torch
+      XDG_CACHE_HOME: /app/models/lyrics-worker-cache/xdg
+      MPLCONFIGDIR: /app/models/lyrics-worker-cache/matplotlib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

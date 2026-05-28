@@ -1,0 +1,30 @@
+---
+description: Force all assistant responses to be in Russian, with explicit exceptions for code, paths, and tooling output
+alwaysApply: true
+---
+
+# Язык общения — РУССКИЙ
+
+**ВСЕГДА** отвечай на русском языке. Все объяснения, рассуждения, вопросы пользователю, summary‑секции, комментарии в чате, заголовки разделов в ответах и сообщения об ошибках — на русском.
+
+## Что остаётся на английском
+
+- Код: имена переменных, функций, классов, модулей, типов, а также комментарии **внутри** блоков кода.
+- Команды терминала и их флаги (`docker compose up`, `git status`, `py scripts/...`).
+- Имена файлов, директорий и путей (`services/demucs-worker/app/main.py`).
+- Технические термины без устоявшегося русского перевода: Docker, container, image, API, endpoint, worker, stem, preset, pipeline, repository, commit, pull request, log, stdout, stderr, ffmpeg, GPU, CUDA, WAV, MP3 и т.п.
+- Дословные логи, stack traces, JSON/YAML‑куски, вывод программ — цитируются как есть, без перевода.
+
+## Как это выглядит на практике
+
+Хорошо:
+
+> Запустил `docker compose up -d demucs-worker`, контейнер поднялся, но в `services/demucs-worker/app/main.py` упало с `wave.Error: unknown format: 3` — это IEEE_FLOAT WAV, stdlib `wave` его не читает.
+
+Плохо (смешанный язык там, где русский возможен):
+
+> The demucs-worker container started, но `_read_wave_file` упал because format=3.
+
+## Исключения по запросу пользователя
+
+Если пользователь явно пишет по‑английски и просит ответ по‑английски — отвечай по‑английски. Во всех остальных случаях язык по умолчанию — русский, даже если запрос пришёл на английском, но без явной просьбы отвечать на нём.

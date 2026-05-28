@@ -1,0 +1,91 @@
+name: lyrics_sync_from_track_demucs_tuned
+description: >
+  Extract 6 stems from a raw track with Demucs first, then run a real ffmpeg-based
+  restoration/presence-lift pass to reduce muffling before lyrics transcription.
+  Use this when you like the Demucs separation but want a more open and less veiled result.
+settings:
+  dry_run: false
+  sample_rate: 44100
+  output_format: wav
+  save_intermediate: true
+
+targets:
+  - vocals
+  - drums
+  - bass
+  - guitar
+  - piano
+  - other
+  - instrumental_mix
+  - lyrics_json
+  - lyrics_txt
+  - lyrics_lrc
+  - lyrics_srt
+
+phases:
+  - id: vocals_extract
+    label: Extract 6 stems first
+    steps:
+      - stem: vocals
+        service: demucs-worker
+        task: coarse_6stem
+        model: htdemucs_6s
+
+  - id: restoration
+    label: Reduce muffling and open the stems
+    steps:
+      - stem: vocals
+        service: restoration-worker
+        task: presence_lift
+        recipe: vocals_open
+
+      - stem: drums
+        service: restoration-worker
+        task: presence_lift
+        recipe: drums_unmuffle
+
+      - stem: bass
+        service: restoration-worker
+        task: presence_lift
+        recipe: bass_unmuffle
+
+      - stem: guitar
+        service: restoration-worker
+        task: presence_lift
+        recipe: harmonic_unmuffle
+
+      - stem: piano
+        service: restoration-worker
+        task: presence_lift
+        recipe: harmonic_unmuffle
+
+      - stem: other
+        service: restoration-worker
+        task: presence_lift
+        recipe: music_unmuffle
+
+      - stem: instrumental_mix
+        service: restoration-worker
+        task: presence_lift
+        recipe: instrumental_polish
+
+  - id: lyrics_transcription
+    label: Word-level lyrics transcription from tuned vocals
+    steps:
+      - stem: lyrics_wordlevel
+        service: lyrics-worker
+        task: transcribe_wordlevel
+        model: whisperx-large-v2
+        input_bus: vocals
+
+  - id: lyrics_alignment
+    label: Exact-text alignment (optional)
+    steps:
+      - stem: lyrics_aligned
+        service: lyrics-worker
+        task: align_reference_lyrics
+        model: stable-ts-large-v3
+        input_bus: vocals
+        build_from:
+          include: [lyrics_json]
+        only_if_reference_lyrics: true

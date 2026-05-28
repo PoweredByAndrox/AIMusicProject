@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "name": "Build Frontend & Update Version",
+  "description": "Automatically rebuilds frontend, updates version in App.vue, and restarts Vite when Vue/TS files are modified",
+  "version": "2",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "resources/js/**/*.vue",
+      "resources/js/**/*.ts"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "1. Update the BUILD_VERSION in resources/js/App.vue to current date and increment version number (format: YYYY-MM-DD-vN where N is incremented). 2. Run `docker compose exec app npx vite build` to rebuild. 3. Run `docker restart music-node` to apply changes."
+  }
+}

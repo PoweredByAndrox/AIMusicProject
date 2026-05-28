@@ -1,0 +1,89 @@
+{
+  "track_a_path": "/app/storage/audio/yt_69c5378c53437.mp3",
+  "track_b_path": "/app/storage/audio/yt_69c539eece2a7.mp3",
+  "window_a": [
+    55.0,
+    78.0
+  ],
+  "window_b": [
+    8.0,
+    60.0
+  ],
+  "separator_model": "htdemucs_6s",
+  "frame_hop_sec": 0.25,
+  "pair_expectations": {
+    "overall_melodic_similarity_range": [
+      0.63,
+      0.65
+    ],
+    "stems": {
+      "other": {
+        "melodic_source_mode": "other_orchestral_proxy",
+        "melodic_event_chain_count_a_min": 45,
+        "melodic_event_chain_count_b_min": 190,
+        "phrase_count_a_min": 5,
+        "phrase_count_b_min": 14,
+        "beat_sync_pitch_class_similarity_range": [
+          0.69,
+          0.72
+        ],
+        "contour_similarity_range": [
+          0.78,
+          0.82
+        ],
+        "structural_similarity_range": [
+          0.67,
+          0.69
+        ],
+        "melodic_layer_similarity_range": [
+          0.67,
+          0.69
+        ],
+        "motif_similarity_range": [
+          0.88,
+          0.9
+        ],
+        "phrase_similarity_range": [
+          0.8,
+          0.83
+        ],
+        "shared_top_note_classes_contains": [
+          "A",
+          "C",
+          "D",
+          "F",
+          "G"
+        ]
+      },
+      "bass": {
+        "melodic_source_mode": "stem_note_events",
+        "melodic_event_chain_count_a_min": 8,
+        "melodic_event_chain_count_b_min": 90,
+        "phrase_count_a_min": 0,
+        "phrase_count_a_max": 0,
+        "phrase_count_b_min": 3,
+        "structural_similarity_range": [
+          0.54,
+          0.57
+        ],
+        "melodic_layer_similarity_range": [
+          0.69,
+          0.71
+        ],
+        "motif_similarity_range": [
+          0.82,
+          0.84
+        ],
+        "phrase_similarity_range": [
+          0.0,
+          0.01
+        ],
+        "shared_top_note_classes_contains": [
+          "A",
+          "D",
+          "F"
+        ]
+      }
+    }
+  }
+}

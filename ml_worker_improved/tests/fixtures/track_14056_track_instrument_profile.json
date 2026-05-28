@@ -1,0 +1,118 @@
+{
+  "audio_path": "/app/storage/audio/yt_69c43f0c3f181.mp3",
+  "separator_model": "htdemucs_6s",
+  "expected_stems": [
+    "bass",
+    "drums",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "global_note_classes_contains": [
+    "A",
+    "E",
+    "C",
+    "F",
+    "D"
+  ],
+  "warning_substrings": [
+    "guitar stem still looks mixed/noisy",
+    "piano stem still looks mixed/noisy"
+  ],
+  "stems": {
+    "bass": {
+      "energy_ratio_range": [
+        0.2,
+        0.26
+      ],
+      "top_role": "bass",
+      "top_role_score_min": 0.55,
+      "transcription_mode": "basic_pitch_subprocess",
+      "note_event_count_min": 800,
+      "note_classes_contains": [
+        "A",
+        "F",
+        "D",
+        "C",
+        "E"
+      ]
+    },
+    "drums": {
+      "energy_ratio_range": [
+        0.28,
+        0.35
+      ],
+      "top_role": "percussion",
+      "top_role_score_min": 0.9,
+      "transcription_mode": "skipped_percussion",
+      "note_event_count_exact": 0
+    },
+    "other": {
+      "energy_ratio_range": [
+        0.17,
+        0.23
+      ],
+      "top_role": "melody",
+      "second_role": "chords",
+      "top_role_score_min": 0.4,
+      "transcription_mode": "basic_pitch_subprocess",
+      "note_event_count_min": 1800,
+      "jamendo_contains": [
+        "synthesizer"
+      ],
+      "note_classes_contains": [
+        "A",
+        "E",
+        "F",
+        "C"
+      ]
+    },
+    "vocals": {
+      "energy_ratio_range": [
+        0.22,
+        0.28
+      ],
+      "top_role": "melody",
+      "top_role_score_min": 0.55,
+      "transcription_mode": "basic_pitch_subprocess",
+      "note_event_count_min": 450,
+      "note_classes_contains": [
+        "C",
+        "A",
+        "D",
+        "E"
+      ]
+    },
+    "guitar": {
+      "energy_ratio_range": [
+        0.0,
+        0.01
+      ],
+      "top_role": "fx",
+      "top_role_score_min": 0.5,
+      "transcription_mode": "basic_pitch_subprocess",
+      "note_event_count_min": 200,
+      "note_classes_contains": [
+        "A",
+        "C",
+        "E"
+      ]
+    },
+    "piano": {
+      "energy_ratio_range": [
+        0.0,
+        0.01
+      ],
+      "top_role": "fx",
+      "top_role_score_min": 0.5,
+      "transcription_mode": "basic_pitch_subprocess",
+      "note_event_count_min": 400,
+      "note_classes_contains": [
+        "A",
+        "C",
+        "E"
+      ]
+    }
+  }
+}

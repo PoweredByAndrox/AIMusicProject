@@ -1,0 +1,4 @@
+# file: /app/worker/dj_analyzer.py
+# hypothesis_version: 6.151.3
+
+[0.0, 0.06, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.23, 2.29, 2.33, 2.39, 2.52, 2.54, 2.6, 2.68, 2.69, 2.88, 3.17, 3.34, 3.48, 3.52, 3.53, 3.66, 3.98, 4.09, 4.38, 4.75, 5.19, 5.38, 6.33, 6.35, 10.0, 120.0, 180.0, 100, 120, 140, 180, 200, 5000, 22050, 44100, '10A', '10B', '11A', '11B', '12A', '12B', '1A', '1B', '2A', '2B', '3A', '3B', '4A', '4B', '5A', '5B', '6A', '6B', '7A', '7B', '8A', '8B', '9A', '9B', 'A', 'A#', 'Ab', 'B', 'Bb', 'C', 'C#', 'D', 'D#', 'Db', 'E', 'Eb', 'F', 'F#', 'G', 'G#', 'Gb', '^(1[0-2]|[1-9])[AB]$', 'ab', 'bb', 'bpm', 'bpm_diff_percent', 'bpm_score', 'camelot_key', 'compatibility_score', 'db', 'eb', 'energy', 'energy_level', 'energy_score', 'gb', 'id', 'key', 'key_score', 'major', 'min', 'minor', 'multifeature']

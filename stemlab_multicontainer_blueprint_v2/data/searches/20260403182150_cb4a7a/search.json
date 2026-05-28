@@ -1,0 +1,16 @@
+{
+  "search_id": "20260403182150_cb4a7a",
+  "status": "failed",
+  "request": {
+    "base_job_id": "595fb9f1c83f",
+    "max_candidates": 1,
+    "lyrics_validate_top_k": 0
+  },
+  "output_root": "/app/data/searches/20260403182150_cb4a7a",
+  "created_at": "2026-04-03T18:21:50.350809+00:00",
+  "updated_at": "2026-04-03T18:21:51.026199+00:00",
+  "result": null,
+  "stdout_tail": "",
+  "stderr_tail": "Traceback (most recent call last):\n  File \"/app/scripts/search_tandem_presets.py\", line 13, in <module>\n    from analyze_tandem_job import analyze_job, write_report\n  File \"/app/scripts/analyze_tandem_job.py\", line 13, in <module>\n    import numpy as np\nModuleNotFoundError: No module named 'numpy'\n",
+  "error": "search runner failed with exit code 1"
+}

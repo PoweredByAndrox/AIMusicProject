@@ -1,0 +1,1108 @@
+{
+  "job_id": "394a626918e2",
+  "status": "completed",
+  "request": {
+    "track_name": "Demo Track",
+    "input_path": "/app/data/inputs/demo.wav",
+    "preset_name": "fine_grained_14stem",
+    "notes": "Тестовый dry-run пайплайна"
+  },
+  "preset": {
+    "name": "fine_grained_14stem",
+    "description": "Coarse 6-stem backbone plus long-tail melodic/orchestral extraction. Built to support per-stem architecture selection and future query-based refinement.\n",
+    "settings": {
+      "dry_run": true,
+      "sample_rate": 44100,
+      "output_format": "flac",
+      "save_intermediate": true
+    },
+    "targets": [
+      "vocals",
+      "drums",
+      "bass",
+      "guitar",
+      "piano",
+      "strings_orchestra",
+      "synth_lead",
+      "synth_pad",
+      "arps_plucks",
+      "brass_woodwinds",
+      "organ_reeds",
+      "fx_risers_impacts",
+      "ambience_residual",
+      "instrumental_mix"
+    ],
+    "phases": [
+      {
+        "id": "coarse_split",
+        "label": "Coarse split",
+        "steps": [
+          {
+            "service": "bsroformer-worker",
+            "task": "coarse_6stem",
+            "model": "roformer-model-bs-roformer-sw-by-jarredou",
+            "output_bus": "coarse_6stem",
+            "outputs": [
+              "vocals",
+              "drums",
+              "bass",
+              "guitar",
+              "piano",
+              "other"
+            ]
+          },
+          {
+            "service": "demucs-worker",
+            "task": "coarse_vdbo_validation",
+            "model": "htdemucs_ft",
+            "output_bus": "demucs_validation",
+            "outputs": [
+              "vocals",
+              "drums",
+              "bass",
+              "other"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "specialist_refine",
+        "label": "Stem-specific refine",
+        "steps": [
+          {
+            "stem": "vocals",
+            "service": "bsroformer-worker",
+            "task": "vocals_resurrection",
+            "model": "roformer-model-bs-roformer-vocals-resurrection-by-unwa"
+          },
+          {
+            "stem": "drums",
+            "service": "demucs-worker",
+            "task": "drums_focus",
+            "model": "htdemucs_ft"
+          },
+          {
+            "stem": "bass",
+            "service": "demucs-worker",
+            "task": "bass_focus",
+            "model": "htdemucs_ft"
+          },
+          {
+            "stem": "guitar",
+            "service": "bsroformer-worker",
+            "task": "guitar_refine_from_6stem",
+            "model": "roformer-model-bs-roformer-sw-by-jarredou"
+          },
+          {
+            "stem": "piano",
+            "service": "bsroformer-worker",
+            "task": "piano_refine_from_6stem",
+            "model": "roformer-model-bs-roformer-sw-by-jarredou"
+          },
+          {
+            "stem": "harmonic_residual",
+            "service": "audio-separator-worker",
+            "task": "harmonic_bus_cleanup",
+            "preset": "instrumental_balanced",
+            "build_from": {
+              "include": [
+                "other",
+                "guitar",
+                "piano"
+              ],
+              "exclude": [
+                "vocals",
+                "drums",
+                "bass"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "long_tail_split",
+        "label": "Long-tail extraction",
+        "steps": [
+          {
+            "stem": "strings_orchestra",
+            "service": "querysep-worker",
+            "task": "prompt_extract",
+            "prompt": "strings_orchestra",
+            "input_bus": "harmonic_residual"
+          },
+          {
+            "stem": "synth_lead",
+            "service": "querysep-worker",
+            "task": "prompt_extract",
+            "prompt": "synth_lead",
+            "input_bus": "harmonic_residual"
+          },
+          {
+            "stem": "synth_pad",
+            "service": "querysep-worker",
+            "task": "prompt_extract",
+            "prompt": "synth_pad",
+            "input_bus": "harmonic_residual"
+          },
+          {
+            "stem": "arps_plucks",
+            "service": "querysep-worker",
+            "task": "prompt_extract",
+            "prompt": "arps_plucks",
+            "input_bus": "harmonic_residual"
+          },
+          {
+            "stem": "brass_woodwinds",
+            "service": "querysep-worker",
+            "task": "prompt_extract",
+            "prompt": "brass_woodwinds",
+            "input_bus": "harmonic_residual"
+          },
+          {
+            "stem": "organ_reeds",
+            "service": "querysep-worker",
+            "task": "prompt_extract",
+            "prompt": "organ_reeds",
+            "input_bus": "harmonic_residual"
+          },
+          {
+            "stem": "fx_risers_impacts",
+            "service": "querysep-worker",
+            "task": "prompt_extract",
+            "prompt": "fx_risers_impacts",
+            "input_bus": "harmonic_residual"
+          },
+          {
+            "stem": "ambience_residual",
+            "service": "querysep-worker",
+            "task": "residual_export",
+            "prompt": "ambience_residual",
+            "input_bus": "harmonic_residual"
+          }
+        ]
+      },
+      {
+        "id": "restoration",
+        "label": "Restoration and cleanup",
+        "steps": [
+          {
+            "stem": "vocals",
+            "service": "restoration-worker",
+            "task": "dereverb_cleanup",
+            "recipe": "vocals_clean"
+          },
+          {
+            "stem": "strings_orchestra",
+            "service": "restoration-worker",
+            "task": "harmonic_smoothing",
+            "recipe": "strings_clean"
+          },
+          {
+            "stem": "synth_lead",
+            "service": "restoration-worker",
+            "task": "harmonic_smoothing",
+            "recipe": "synth_clean"
+          },
+          {
+            "stem": "synth_pad",
+            "service": "restoration-worker",
+            "task": "harmonic_smoothing",
+            "recipe": "synth_clean"
+          },
+          {
+            "stem": "instrumental_mix",
+            "service": "bsroformer-worker",
+            "task": "instrumental_resurrection",
+            "model": "roformer-model-bs-roformer-instrumental-resurrection-by-unwa",
+            "build_from": {
+              "include": [
+                "drums",
+                "bass",
+                "guitar",
+                "piano",
+                "strings_orchestra",
+                "synth_lead",
+                "synth_pad",
+                "arps_plucks",
+                "brass_woodwinds",
+                "organ_reeds",
+                "fx_risers_impacts",
+                "ambience_residual"
+              ],
+              "exclude": [
+                "vocals"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "invocations": [
+    {
+      "phase_id": "coarse_split",
+      "stem": null,
+      "service": "bsroformer-worker",
+      "task": "coarse_6stem",
+      "model": "roformer-model-bs-roformer-sw-by-jarredou",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "service": "bsroformer-worker",
+        "task": "coarse_6stem",
+        "model": "roformer-model-bs-roformer-sw-by-jarredou",
+        "output_bus": "coarse_6stem",
+        "outputs": [
+          "vocals",
+          "drums",
+          "bass",
+          "guitar",
+          "piano",
+          "other"
+        ]
+      }
+    },
+    {
+      "phase_id": "coarse_split",
+      "stem": null,
+      "service": "demucs-worker",
+      "task": "coarse_vdbo_validation",
+      "model": "htdemucs_ft",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "service": "demucs-worker",
+        "task": "coarse_vdbo_validation",
+        "model": "htdemucs_ft",
+        "output_bus": "demucs_validation",
+        "outputs": [
+          "vocals",
+          "drums",
+          "bass",
+          "other"
+        ]
+      }
+    },
+    {
+      "phase_id": "specialist_refine",
+      "stem": "vocals",
+      "service": "bsroformer-worker",
+      "task": "vocals_resurrection",
+      "model": "roformer-model-bs-roformer-vocals-resurrection-by-unwa",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "vocals",
+        "service": "bsroformer-worker",
+        "task": "vocals_resurrection",
+        "model": "roformer-model-bs-roformer-vocals-resurrection-by-unwa"
+      }
+    },
+    {
+      "phase_id": "specialist_refine",
+      "stem": "drums",
+      "service": "demucs-worker",
+      "task": "drums_focus",
+      "model": "htdemucs_ft",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "drums",
+        "service": "demucs-worker",
+        "task": "drums_focus",
+        "model": "htdemucs_ft"
+      }
+    },
+    {
+      "phase_id": "specialist_refine",
+      "stem": "bass",
+      "service": "demucs-worker",
+      "task": "bass_focus",
+      "model": "htdemucs_ft",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "bass",
+        "service": "demucs-worker",
+        "task": "bass_focus",
+        "model": "htdemucs_ft"
+      }
+    },
+    {
+      "phase_id": "specialist_refine",
+      "stem": "guitar",
+      "service": "bsroformer-worker",
+      "task": "guitar_refine_from_6stem",
+      "model": "roformer-model-bs-roformer-sw-by-jarredou",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "guitar",
+        "service": "bsroformer-worker",
+        "task": "guitar_refine_from_6stem",
+        "model": "roformer-model-bs-roformer-sw-by-jarredou"
+      }
+    },
+    {
+      "phase_id": "specialist_refine",
+      "stem": "piano",
+      "service": "bsroformer-worker",
+      "task": "piano_refine_from_6stem",
+      "model": "roformer-model-bs-roformer-sw-by-jarredou",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "piano",
+        "service": "bsroformer-worker",
+        "task": "piano_refine_from_6stem",
+        "model": "roformer-model-bs-roformer-sw-by-jarredou"
+      }
+    },
+    {
+      "phase_id": "specialist_refine",
+      "stem": "harmonic_residual",
+      "service": "audio-separator-worker",
+      "task": "harmonic_bus_cleanup",
+      "model": null,
+      "preset": "instrumental_balanced",
+      "prompt": null,
+      "input_bus": null,
+      "build_from": {
+        "include": [
+          "other",
+          "guitar",
+          "piano"
+        ],
+        "exclude": [
+          "vocals",
+          "drums",
+          "bass"
+        ]
+      },
+      "raw_step": {
+        "stem": "harmonic_residual",
+        "service": "audio-separator-worker",
+        "task": "harmonic_bus_cleanup",
+        "preset": "instrumental_balanced",
+        "build_from": {
+          "include": [
+            "other",
+            "guitar",
+            "piano"
+          ],
+          "exclude": [
+            "vocals",
+            "drums",
+            "bass"
+          ]
+        }
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "strings_orchestra",
+      "service": "querysep-worker",
+      "task": "prompt_extract",
+      "model": null,
+      "preset": null,
+      "prompt": "strings_orchestra",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "strings_orchestra",
+        "service": "querysep-worker",
+        "task": "prompt_extract",
+        "prompt": "strings_orchestra",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "synth_lead",
+      "service": "querysep-worker",
+      "task": "prompt_extract",
+      "model": null,
+      "preset": null,
+      "prompt": "synth_lead",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "synth_lead",
+        "service": "querysep-worker",
+        "task": "prompt_extract",
+        "prompt": "synth_lead",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "synth_pad",
+      "service": "querysep-worker",
+      "task": "prompt_extract",
+      "model": null,
+      "preset": null,
+      "prompt": "synth_pad",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "synth_pad",
+        "service": "querysep-worker",
+        "task": "prompt_extract",
+        "prompt": "synth_pad",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "arps_plucks",
+      "service": "querysep-worker",
+      "task": "prompt_extract",
+      "model": null,
+      "preset": null,
+      "prompt": "arps_plucks",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "arps_plucks",
+        "service": "querysep-worker",
+        "task": "prompt_extract",
+        "prompt": "arps_plucks",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "brass_woodwinds",
+      "service": "querysep-worker",
+      "task": "prompt_extract",
+      "model": null,
+      "preset": null,
+      "prompt": "brass_woodwinds",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "brass_woodwinds",
+        "service": "querysep-worker",
+        "task": "prompt_extract",
+        "prompt": "brass_woodwinds",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "organ_reeds",
+      "service": "querysep-worker",
+      "task": "prompt_extract",
+      "model": null,
+      "preset": null,
+      "prompt": "organ_reeds",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "organ_reeds",
+        "service": "querysep-worker",
+        "task": "prompt_extract",
+        "prompt": "organ_reeds",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "fx_risers_impacts",
+      "service": "querysep-worker",
+      "task": "prompt_extract",
+      "model": null,
+      "preset": null,
+      "prompt": "fx_risers_impacts",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "fx_risers_impacts",
+        "service": "querysep-worker",
+        "task": "prompt_extract",
+        "prompt": "fx_risers_impacts",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "long_tail_split",
+      "stem": "ambience_residual",
+      "service": "querysep-worker",
+      "task": "residual_export",
+      "model": null,
+      "preset": null,
+      "prompt": "ambience_residual",
+      "input_bus": "harmonic_residual",
+      "build_from": null,
+      "raw_step": {
+        "stem": "ambience_residual",
+        "service": "querysep-worker",
+        "task": "residual_export",
+        "prompt": "ambience_residual",
+        "input_bus": "harmonic_residual"
+      }
+    },
+    {
+      "phase_id": "restoration",
+      "stem": "vocals",
+      "service": "restoration-worker",
+      "task": "dereverb_cleanup",
+      "model": null,
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "vocals",
+        "service": "restoration-worker",
+        "task": "dereverb_cleanup",
+        "recipe": "vocals_clean"
+      }
+    },
+    {
+      "phase_id": "restoration",
+      "stem": "strings_orchestra",
+      "service": "restoration-worker",
+      "task": "harmonic_smoothing",
+      "model": null,
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "strings_orchestra",
+        "service": "restoration-worker",
+        "task": "harmonic_smoothing",
+        "recipe": "strings_clean"
+      }
+    },
+    {
+      "phase_id": "restoration",
+      "stem": "synth_lead",
+      "service": "restoration-worker",
+      "task": "harmonic_smoothing",
+      "model": null,
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "synth_lead",
+        "service": "restoration-worker",
+        "task": "harmonic_smoothing",
+        "recipe": "synth_clean"
+      }
+    },
+    {
+      "phase_id": "restoration",
+      "stem": "synth_pad",
+      "service": "restoration-worker",
+      "task": "harmonic_smoothing",
+      "model": null,
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": null,
+      "raw_step": {
+        "stem": "synth_pad",
+        "service": "restoration-worker",
+        "task": "harmonic_smoothing",
+        "recipe": "synth_clean"
+      }
+    },
+    {
+      "phase_id": "restoration",
+      "stem": "instrumental_mix",
+      "service": "bsroformer-worker",
+      "task": "instrumental_resurrection",
+      "model": "roformer-model-bs-roformer-instrumental-resurrection-by-unwa",
+      "preset": null,
+      "prompt": null,
+      "input_bus": null,
+      "build_from": {
+        "include": [
+          "drums",
+          "bass",
+          "guitar",
+          "piano",
+          "strings_orchestra",
+          "synth_lead",
+          "synth_pad",
+          "arps_plucks",
+          "brass_woodwinds",
+          "organ_reeds",
+          "fx_risers_impacts",
+          "ambience_residual"
+        ],
+        "exclude": [
+          "vocals"
+        ]
+      },
+      "raw_step": {
+        "stem": "instrumental_mix",
+        "service": "bsroformer-worker",
+        "task": "instrumental_resurrection",
+        "model": "roformer-model-bs-roformer-instrumental-resurrection-by-unwa",
+        "build_from": {
+          "include": [
+            "drums",
+            "bass",
+            "guitar",
+            "piano",
+            "strings_orchestra",
+            "synth_lead",
+            "synth_pad",
+            "arps_plucks",
+            "brass_woodwinds",
+            "organ_reeds",
+            "fx_risers_impacts",
+            "ambience_residual"
+          ],
+          "exclude": [
+            "vocals"
+          ]
+        }
+      }
+    }
+  ],
+  "run_log": [
+    {
+      "service": "bsroformer-worker",
+      "status": "dry_run_completed",
+      "task": "coarse_6stem",
+      "target_stem": null,
+      "command": [
+        "bs-roformer-infer",
+        "--config_path",
+        "/app/models/roformer-model-bs-roformer-sw-by-jarredou/model.yaml",
+        "--model_path",
+        "/app/models/roformer-model-bs-roformer-sw-by-jarredou/model.ckpt",
+        "--input_folder",
+        "/app/data/inputs",
+        "--store_dir",
+        "/app/data/outputs/394a626918e2"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/coarse_split/01_coarse_6stem/coarse_6stem.flac"
+      ],
+      "notes": "Dry-run wrapper around BS-RoFormer-Infer. Map config/model paths to real downloaded checkpoints."
+    },
+    {
+      "service": "demucs-worker",
+      "status": "dry_run_completed",
+      "task": "coarse_vdbo_validation",
+      "target_stem": null,
+      "command": [
+        "python",
+        "-m",
+        "demucs",
+        "-n",
+        "htdemucs_ft",
+        "--shifts",
+        "2",
+        "--overlap",
+        "0.25",
+        "/app/data/inputs/demo.wav"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/coarse_split/02_coarse_vdbo_validation/coarse_vdbo_validation.flac"
+      ],
+      "notes": "Dry-run wrapper around Demucs. Replace with subprocess.run for real execution."
+    },
+    {
+      "service": "bsroformer-worker",
+      "status": "dry_run_completed",
+      "task": "vocals_resurrection",
+      "target_stem": "vocals",
+      "command": [
+        "bs-roformer-infer",
+        "--config_path",
+        "/app/models/roformer-model-bs-roformer-vocals-resurrection-by-unwa/model.yaml",
+        "--model_path",
+        "/app/models/roformer-model-bs-roformer-vocals-resurrection-by-unwa/model.ckpt",
+        "--input_folder",
+        "/app/data/inputs",
+        "--store_dir",
+        "/app/data/outputs/394a626918e2"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/specialist_refine/03_vocals/vocals.flac"
+      ],
+      "notes": "Dry-run wrapper around BS-RoFormer-Infer. Map config/model paths to real downloaded checkpoints."
+    },
+    {
+      "service": "demucs-worker",
+      "status": "dry_run_completed",
+      "task": "drums_focus",
+      "target_stem": "drums",
+      "command": [
+        "python",
+        "-m",
+        "demucs",
+        "-n",
+        "htdemucs_ft",
+        "--two-stems",
+        "drums",
+        "--shifts",
+        "2",
+        "/app/data/inputs/demo.wav"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/specialist_refine/04_drums/drums.flac"
+      ],
+      "notes": "Dry-run wrapper around Demucs. Replace with subprocess.run for real execution."
+    },
+    {
+      "service": "demucs-worker",
+      "status": "dry_run_completed",
+      "task": "bass_focus",
+      "target_stem": "bass",
+      "command": [
+        "python",
+        "-m",
+        "demucs",
+        "-n",
+        "htdemucs_ft",
+        "--two-stems",
+        "bass",
+        "--shifts",
+        "2",
+        "/app/data/inputs/demo.wav"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/specialist_refine/05_bass/bass.flac"
+      ],
+      "notes": "Dry-run wrapper around Demucs. Replace with subprocess.run for real execution."
+    },
+    {
+      "service": "bsroformer-worker",
+      "status": "dry_run_completed",
+      "task": "guitar_refine_from_6stem",
+      "target_stem": "guitar",
+      "command": [
+        "bs-roformer-infer",
+        "--config_path",
+        "/app/models/roformer-model-bs-roformer-sw-by-jarredou/model.yaml",
+        "--model_path",
+        "/app/models/roformer-model-bs-roformer-sw-by-jarredou/model.ckpt",
+        "--input_folder",
+        "/app/data/inputs",
+        "--store_dir",
+        "/app/data/outputs/394a626918e2"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/specialist_refine/06_guitar/guitar.flac"
+      ],
+      "notes": "Dry-run wrapper around BS-RoFormer-Infer. Map config/model paths to real downloaded checkpoints."
+    },
+    {
+      "service": "bsroformer-worker",
+      "status": "dry_run_completed",
+      "task": "piano_refine_from_6stem",
+      "target_stem": "piano",
+      "command": [
+        "bs-roformer-infer",
+        "--config_path",
+        "/app/models/roformer-model-bs-roformer-sw-by-jarredou/model.yaml",
+        "--model_path",
+        "/app/models/roformer-model-bs-roformer-sw-by-jarredou/model.ckpt",
+        "--input_folder",
+        "/app/data/inputs",
+        "--store_dir",
+        "/app/data/outputs/394a626918e2"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/specialist_refine/07_piano/piano.flac"
+      ],
+      "notes": "Dry-run wrapper around BS-RoFormer-Infer. Map config/model paths to real downloaded checkpoints."
+    },
+    {
+      "service": "audio-separator-worker",
+      "status": "dry_run_completed",
+      "task": "harmonic_bus_cleanup",
+      "target_stem": "harmonic_residual",
+      "command": [
+        "audio-separator",
+        "/app/data/inputs/demo.wav",
+        "--ensemble_preset",
+        "instrumental_balanced"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/specialist_refine/08_harmonic_residual/harmonic_residual.flac"
+      ],
+      "notes": "Dry-run wrapper around Audio Separator. Good place for ensemble presets and UVR-style models."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "prompt_extract",
+      "target_stem": "strings_orchestra",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/strings_orchestra.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/09_strings_orchestra/strings_orchestra.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "prompt_extract",
+      "target_stem": "synth_lead",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/synth_lead.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/10_synth_lead/synth_lead.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "prompt_extract",
+      "target_stem": "synth_pad",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/synth_pad.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/11_synth_pad/synth_pad.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "prompt_extract",
+      "target_stem": "arps_plucks",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/arps_plucks.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/12_arps_plucks/arps_plucks.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "prompt_extract",
+      "target_stem": "brass_woodwinds",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/brass_woodwinds.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/13_brass_woodwinds/brass_woodwinds.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "prompt_extract",
+      "target_stem": "organ_reeds",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/organ_reeds.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/14_organ_reeds/organ_reeds.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "prompt_extract",
+      "target_stem": "fx_risers_impacts",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/fx_risers_impacts.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/15_fx_risers_impacts/fx_risers_impacts.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "querysep-worker",
+      "status": "dry_run_completed",
+      "task": "residual_export",
+      "target_stem": "ambience_residual",
+      "command": [
+        "python",
+        "train.py",
+        "inference_byoq",
+        "--input_path=/app/data/inputs/demo.wav",
+        "--output_path=/app/data/outputs/394a626918e2",
+        "--query_path=/app/queries/ambience_residual.wav",
+        "--use_cuda=true"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/long_tail_split/16_ambience_residual/ambience_residual.flac"
+      ],
+      "notes": "Stub service. Replace with Banquet/QSCNet/TUSS adapter and real checkpoints."
+    },
+    {
+      "service": "restoration-worker",
+      "status": "dry_run_completed",
+      "task": "dereverb_cleanup",
+      "target_stem": "vocals",
+      "command": [
+        "python",
+        "-m",
+        "restoration_stub",
+        "--input",
+        "/app/data/inputs/demo.wav",
+        "--output",
+        "/app/data/outputs/394a626918e2",
+        "--recipe",
+        "vocals_clean"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/restoration/17_vocals/vocals.flac"
+      ],
+      "notes": "Stub service for stem-specific restoration experts."
+    },
+    {
+      "service": "restoration-worker",
+      "status": "dry_run_completed",
+      "task": "harmonic_smoothing",
+      "target_stem": "strings_orchestra",
+      "command": [
+        "python",
+        "-m",
+        "restoration_stub",
+        "--input",
+        "/app/data/inputs/demo.wav",
+        "--output",
+        "/app/data/outputs/394a626918e2",
+        "--recipe",
+        "strings_clean"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/restoration/18_strings_orchestra/strings_orchestra.flac"
+      ],
+      "notes": "Stub service for stem-specific restoration experts."
+    },
+    {
+      "service": "restoration-worker",
+      "status": "dry_run_completed",
+      "task": "harmonic_smoothing",
+      "target_stem": "synth_lead",
+      "command": [
+        "python",
+        "-m",
+        "restoration_stub",
+        "--input",
+        "/app/data/inputs/demo.wav",
+        "--output",
+        "/app/data/outputs/394a626918e2",
+        "--recipe",
+        "synth_clean"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/restoration/19_synth_lead/synth_lead.flac"
+      ],
+      "notes": "Stub service for stem-specific restoration experts."
+    },
+    {
+      "service": "restoration-worker",
+      "status": "dry_run_completed",
+      "task": "harmonic_smoothing",
+      "target_stem": "synth_pad",
+      "command": [
+        "python",
+        "-m",
+        "restoration_stub",
+        "--input",
+        "/app/data/inputs/demo.wav",
+        "--output",
+        "/app/data/outputs/394a626918e2",
+        "--recipe",
+        "synth_clean"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/restoration/20_synth_pad/synth_pad.flac"
+      ],
+      "notes": "Stub service for stem-specific restoration experts."
+    },
+    {
+      "service": "bsroformer-worker",
+      "status": "dry_run_completed",
+      "task": "instrumental_resurrection",
+      "target_stem": "instrumental_mix",
+      "command": [
+        "bs-roformer-infer",
+        "--config_path",
+        "/app/models/roformer-model-bs-roformer-instrumental-resurrection-by-unwa/model.yaml",
+        "--model_path",
+        "/app/models/roformer-model-bs-roformer-instrumental-resurrection-by-unwa/model.ckpt",
+        "--input_folder",
+        "/app/data/inputs",
+        "--store_dir",
+        "/app/data/outputs/394a626918e2"
+      ],
+      "output_files": [
+        "/app/data/outputs/394a626918e2/restoration/21_instrumental_mix/instrumental_mix.flac"
+      ],
+      "notes": "Dry-run wrapper around BS-RoFormer-Infer. Map config/model paths to real downloaded checkpoints."
+    }
+  ],
+  "output_root": "/app/data/outputs/394a626918e2"
+}

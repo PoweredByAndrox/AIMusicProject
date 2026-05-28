@@ -1,0 +1,150 @@
+name: lyrics_sync_from_track_tandem_safe_other
+description: >
+  Real dual-backbone lyrics preset tuned by analyzer-guided search for lower warble in `other`
+  and less generic final smoothing over the BS-guided instrumental hybrid. This keeps the safer
+  balanced tandem profile, swaps `other` to a milder cleanup path, and preserves more of the
+  hybrid character in the final instrumental polish.
+settings:
+  dry_run: false
+  sample_rate: 44100
+  output_format: wav
+  save_intermediate: true
+
+targets:
+  - vocals
+  - drums
+  - bass
+  - guitar
+  - piano
+  - other
+  - instrumental_mix
+  - lyrics_json
+  - lyrics_txt
+  - lyrics_lrc
+  - lyrics_srt
+
+phases:
+  - id: dual_extract
+    label: Dual-backbone extraction
+    steps:
+      - stem: bs_backbone
+        service: bsroformer-worker
+        task: coarse_6stem
+        model: roformer-model-bs-roformer-sw-by-jarredou
+        artifact_keys:
+          vocals: bs_vocals
+          drums: bs_drums
+          bass: bs_bass
+          guitar: bs_guitar
+          piano: bs_piano
+          other: bs_other
+          instrumental_mix: bs_instrumental_mix
+
+      - stem: demucs_backbone_4stem
+        service: demucs-worker
+        task: coarse_4stem_ft
+        model: htdemucs_ft
+        artifact_keys:
+          vocals: demucs_vocals
+          drums: demucs_drums
+          bass: demucs_bass
+          other: demucs_other
+          instrumental_mix: demucs_instrumental_mix
+
+      - stem: demucs_backbone_extras
+        service: demucs-worker
+        task: coarse_6stem
+        model: htdemucs_6s
+        artifact_keys:
+          guitar: demucs_guitar
+          piano: demucs_piano
+
+  - id: tandem_cleanup
+    label: Real tandem cleanup and opening
+    steps:
+      - stem: vocals
+        service: bsroformer-worker
+        task: vocals_resurrection
+        model: roformer-model-bs-roformer-vocals-resurrection-by-unwa
+        input_bus: bs_vocals
+
+      - stem: drums
+        service: restoration-worker
+        task: presence_lift
+        recipe: drums_unmuffle
+        input_bus: demucs_drums
+
+      - stem: bass
+        service: restoration-worker
+        task: presence_lift
+        recipe: bass_unmuffle
+        input_bus: demucs_bass
+
+      - stem: guitar
+        service: restoration-worker
+        task: presence_lift
+        recipe: harmonic_unmuffle
+        input_bus: demucs_guitar
+
+      - stem: piano
+        service: restoration-worker
+        task: presence_lift
+        recipe: harmonic_unmuffle
+        input_bus: demucs_piano
+
+      - stem: other
+        service: restoration-worker
+        task: presence_lift
+        recipe: generic_cleanup
+        input_bus: demucs_other
+
+      - stem: bs_instrumental_seed
+        service: bsroformer-worker
+        task: instrumental_resurrection
+        model: roformer-model-bs-roformer-instrumental-resurrection-by-unwa
+        input_bus: bs_instrumental_mix
+        artifact_keys:
+          instrumental_mix: bs_resurrected_instrumental_mix
+
+      - stem: instrumental_mix
+        service: restoration-worker
+        task: tandem_instrumental_hybrid
+        input_bus: demucs_instrumental_mix
+        build_from:
+          include: [bs_instrumental_mix, bs_resurrected_instrumental_mix, vocals, bs_vocals]
+
+  - id: final_polish
+    label: Final opening pass on tandem outputs
+    steps:
+      - stem: vocals
+        service: restoration-worker
+        task: presence_lift
+        recipe: vocals_open
+        input_bus: vocals
+
+      - stem: instrumental_mix
+        service: restoration-worker
+        task: presence_lift
+        recipe: instrumental_polish_preserve_bs
+        input_bus: instrumental_mix
+
+  - id: lyrics_transcription
+    label: Word-level lyrics transcription from tandem vocals
+    steps:
+      - stem: lyrics_wordlevel
+        service: lyrics-worker
+        task: transcribe_wordlevel
+        model: whisperx-large-v3
+        input_bus: vocals
+
+  - id: lyrics_alignment
+    label: Exact-text alignment (optional)
+    steps:
+      - stem: lyrics_aligned
+        service: lyrics-worker
+        task: align_reference_lyrics
+        model: stable-ts-large-v3
+        input_bus: vocals
+        build_from:
+          include: [lyrics_json]
+        only_if_reference_lyrics: true

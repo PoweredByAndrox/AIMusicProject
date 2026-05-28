@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <style>
+    .box { fill:#f7f7f7; stroke:#333; stroke-width:2; rx:14; ry:14; }
+    .title { font-family:Arial, sans-serif; font-size:20px; font-weight:bold; }
+    .text { font-family:Arial, sans-serif; font-size:15px; }
+    .arrow { stroke:#555; stroke-width:2.5; fill:none; marker-end:url(#arrow); }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#555"/>
+    </marker>
+  </defs>
+
+  <rect class="box" x="40" y="40" width="220" height="90"/>
+  <text class="title" x="70" y="75">Frontend UI</text>
+  <text class="text" x="70" y="105">Jobs / Stems / AB test</text>
+
+  <rect class="box" x="320" y="40" width="250" height="90"/>
+  <text class="title" x="350" y="75">API Gateway</text>
+  <text class="text" x="350" y="105">Planner / Orchestrator</text>
+
+  <rect class="box" x="640" y="20" width="220" height="90"/>
+  <text class="title" x="675" y="55">Demucs Worker</text>
+  <text class="text" x="675" y="85">drums / bass / coarse</text>
+
+  <rect class="box" x="900" y="20" width="240" height="90"/>
+  <text class="title" x="925" y="55">BS-RoFormer Worker</text>
+  <text class="text" x="925" y="85">6-stem / vocals / cleanup</text>
+
+  <rect class="box" x="640" y="150" width="220" height="90"/>
+  <text class="title" x="655" y="185">Audio Separator</text>
+  <text class="text" x="655" y="215">ensemble / presets</text>
+
+  <rect class="box" x="900" y="150" width="240" height="90"/>
+  <text class="title" x="940" y="185">QuerySep Worker</text>
+  <text class="text" x="925" y="215">synth / strings / reeds</text>
+
+  <rect class="box" x="770" y="290" width="240" height="90"/>
+  <text class="title" x="805" y="325">Restoration Worker</text>
+  <text class="text" x="805" y="355">dereverb / repair</text>
+
+  <rect class="box" x="360" y="500" width="420" height="120"/>
+  <text class="title" x="400" y="540">Shared Data / Models / Artifacts</text>
+  <text class="text" x="400" y="575">inputs / outputs / manifests / model cache / previews</text>
+
+  <path class="arrow" d="M260 85 L320 85"/>
+  <path class="arrow" d="M570 70 L640 60"/>
+  <path class="arrow" d="M570 85 L900 65"/>
+  <path class="arrow" d="M570 105 L640 190"/>
+  <path class="arrow" d="M570 115 L900 190"/>
+  <path class="arrow" d="M860 240 L860 290"/>
+  <path class="arrow" d="M750 240 L810 290"/>
+  <path class="arrow" d="M710 110 L710 500"/>
+  <path class="arrow" d="M1020 110 L1020 500"/>
+  <path class="arrow" d="M460 130 L460 500"/>
+</svg>

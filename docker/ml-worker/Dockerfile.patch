@@ -1,0 +1,12 @@
+FROM aimusicproject-ml-worker:latest
+
+# Downgrade torchaudio to <2.9: torchaudio>=2.9 broke ta.save() by requiring torchcodec,
+# which Demucs (used by allin1) does not support yet.
+# TEMPORARY: real fix is Demucs updating to use torchcodec or torchaudio<2.9 compat shim.
+RUN pip install --no-cache-dir \
+    torch==2.5.1 \
+    torchaudio==2.5.1 \
+    torchvision==0.20.1
+
+COPY docker/ml-worker/patch_natten_compat.py /app/patch_natten_compat.py
+RUN python /app/patch_natten_compat.py

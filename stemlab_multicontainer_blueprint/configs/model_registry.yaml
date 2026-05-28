@@ -1,0 +1,70 @@
+services:
+  demucs-worker:
+    role: coarse_and_rhythm_specialist
+    strengths:
+      - drums
+      - bass
+      - coarse_vdbo
+    url_env: WORKER_DEMUCS_URL
+
+  bsroformer-worker:
+    role: coarse_6stem_and_cleanup_specialist
+    strengths:
+      - vocals
+      - guitar
+      - piano
+      - 6stem_backbone
+      - resurrection
+      - dereverb
+    url_env: WORKER_BSROFORMER_URL
+
+  audio-separator-worker:
+    role: ensemble_and_community_preset_specialist
+    strengths:
+      - ensemble
+      - preset_testing
+      - UVR_models
+    url_env: WORKER_AUDIO_SEPARATOR_URL
+
+  querysep-worker:
+    role: prompt_or_query_based_long_tail_extraction
+    strengths:
+      - strings
+      - synth
+      - brass_woodwinds
+      - organ_reeds
+      - fx
+    url_env: WORKER_QUERYSEP_URL
+
+  restoration-worker:
+    role: targeted_stem_restoration
+    strengths:
+      - dereverb
+      - artifact_repair
+      - stem_specific_cleanup
+    url_env: WORKER_RESTORATION_URL
+
+recommended_models:
+  coarse_backbone:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-sw-by-jarredou
+
+  coarse_validator:
+    service: demucs-worker
+    model: htdemucs_ft
+
+  vocals_cleanup:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-vocals-resurrection-by-unwa
+
+  instrumental_cleanup:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-instrumental-resurrection-by-unwa
+
+  dereverb:
+    service: bsroformer-worker
+    model: roformer-model-bs-roformer-de-reverb
+
+  ensemble_harmonic_cleanup:
+    service: audio-separator-worker
+    preset: instrumental_balanced

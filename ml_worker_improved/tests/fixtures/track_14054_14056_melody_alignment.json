@@ -1,0 +1,169 @@
+{
+  "track_a_path": "/app/storage/audio/yt_69c43f07b8602.mp3",
+  "track_b_path": "/app/storage/audio/yt_69c43f0c3f181.mp3",
+  "separator_model": "htdemucs_6s",
+  "frame_hop_sec": 0.25,
+  "pair_expectations": {
+    "overall_melodic_similarity_range": [
+      0.74,
+      0.77
+    ],
+    "stems": {
+      "other": {
+        "melodic_source_mode": "other_orchestral_proxy",
+        "event_count_a_min": 2100,
+        "event_count_b_min": 1400,
+        "melodic_event_chain_count_a_min": 500,
+        "melodic_event_chain_count_b_min": 250,
+        "phrase_count_a_min": 50,
+        "phrase_count_b_min": 18,
+        "pitch_class_dtw_similarity_range": [
+          0.83,
+          0.85
+        ],
+        "note_name_dtw_similarity_range": [
+          0.83,
+          0.86
+        ],
+        "combined_similarity_range": [
+          0.83,
+          0.85
+        ],
+        "beat_sync_pitch_class_similarity_range": [
+          0.75,
+          0.77
+        ],
+        "beat_sync_note_profile_similarity_range": [
+          0.45,
+          0.48
+        ],
+        "beat_sync_combined_similarity_range": [
+          0.64,
+          0.67
+        ],
+        "contour_similarity_range": [
+          0.88,
+          0.91
+        ],
+        "structural_similarity_range": [
+          0.77,
+          0.8
+        ],
+        "melodic_layer_similarity_range": [
+          0.73,
+          0.76
+        ],
+        "motif_similarity_range": [
+          0.99,
+          1.0
+        ],
+        "phrase_similarity_range": [
+          0.99,
+          1.0
+        ],
+        "best_transposition_semitones": 0,
+        "shared_top_note_classes_contains": [
+          "A",
+          "C",
+          "D",
+          "E",
+          "F",
+          "G"
+        ]
+      },
+      "bass": {
+        "melodic_source_mode": "stem_note_events",
+        "event_count_a_min": 900,
+        "event_count_b_min": 900,
+        "melodic_event_chain_count_a_min": 550,
+        "melodic_event_chain_count_b_min": 240,
+        "phrase_count_a_min": 5,
+        "phrase_count_b_min": 5,
+        "pitch_class_dtw_similarity_range": [
+          0.8,
+          0.84
+        ],
+        "note_name_dtw_similarity_range": [
+          0.85,
+          0.88
+        ],
+        "combined_similarity_range": [
+          0.82,
+          0.85
+        ],
+        "beat_sync_pitch_class_similarity_range": [
+          0.65,
+          0.68
+        ],
+        "beat_sync_note_profile_similarity_range": [
+          0.57,
+          0.6
+        ],
+        "beat_sync_combined_similarity_range": [
+          0.62,
+          0.65
+        ],
+        "contour_similarity_range": [
+          0.76,
+          0.79
+        ],
+        "structural_similarity_range": [
+          0.66,
+          0.68
+        ],
+        "melodic_layer_similarity_range": [
+          0.77,
+          0.8
+        ],
+        "motif_similarity_range": [
+          0.99,
+          1.0
+        ],
+        "phrase_similarity_range": [
+          0.99,
+          1.0
+        ],
+        "best_transposition_semitones": 0,
+        "shared_top_note_classes_contains": [
+          "A",
+          "C",
+          "D",
+          "E",
+          "F",
+          "G"
+        ]
+      }
+    }
+  },
+  "self_expectations": {
+    "overall_melodic_similarity_exact": 1.0,
+    "stems": {
+      "other": {
+        "pitch_class_dtw_similarity_exact": 1.0,
+        "note_name_dtw_similarity_exact": 1.0,
+        "combined_similarity_exact": 1.0,
+        "beat_sync_pitch_class_similarity_exact": 1.0,
+        "beat_sync_note_profile_similarity_exact": 1.0,
+        "beat_sync_combined_similarity_exact": 1.0,
+        "contour_similarity_exact": 1.0,
+        "structural_similarity_exact": 1.0,
+        "melodic_layer_similarity_exact": 1.0,
+        "motif_similarity_exact": 1.0,
+        "phrase_similarity_exact": 1.0
+      },
+      "bass": {
+        "pitch_class_dtw_similarity_exact": 1.0,
+        "note_name_dtw_similarity_exact": 1.0,
+        "combined_similarity_exact": 1.0,
+        "beat_sync_pitch_class_similarity_exact": 1.0,
+        "beat_sync_note_profile_similarity_exact": 1.0,
+        "beat_sync_combined_similarity_exact": 1.0,
+        "contour_similarity_exact": 1.0,
+        "structural_similarity_exact": 1.0,
+        "melodic_layer_similarity_exact": 1.0,
+        "motif_similarity_exact": 1.0,
+        "phrase_similarity_exact": 1.0
+      }
+    }
+  }
+}

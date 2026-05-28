@@ -1,0 +1,23 @@
+---
+description: Force production-grade adaptive audio work without per-track hardcodes or fake shortcuts
+alwaysApply: true
+---
+
+# Production Adaptive Audio Rule
+
+Всегда проектируй и запускай audio separation pipeline как обобщаемую production-систему, а не как одноразовый фикс под конкретный трек.
+
+## Обязательный contract
+
+- Не добавляй per-track hardcodes: имена треков, фиксированные timestamps, ручные EQ/threshold values или special-case ветки допустимы только как diagnostic artifacts, но не как production route.
+- Не подменяй adaptive routing быстрым single-candidate shortcut, если задача требует качества на разных треках.
+- Не используй silent fallback, который маскирует неудачный inference как успешный результат. Любой fallback должен быть явным, documented, quality-scored и отражённым в manifest.
+- Разрешён только quality-controlled model routing: несколько кандидатов, segment-level router, proxy metrics, issue diagnostics, feedback priors, provenance-safe reuse и repeatable Docker-only artifacts.
+- Разрешённые documented proxy/model-routing paths включают `--pure-base`, `--ir-instrumental-minus-path`, `--external-vocal-candidate`, `quality_consistent_ir_router` и provenance-safe reuse rejection. Это не fake fallback, если путь opt-in/manifest-logged/proxy-labeled и не подменяет canonical baseline.
+- Для clean-minus baseline не используй `build_vocal_guided_minus.py` как основной путь. Baseline должен идти через documented separation model route (`export_instrumental_resurrection_minus.py`) и self-only/pure-base repair, если repair вообще нужен.
+- Для vocal stem используй обобщаемый adaptive route: BS/FT/IR-residual/external candidates, debleed gates, segment-router, issue reports и feedback store. Backing vocals считаются vocal content.
+- Если качество недостаточно, улучшай общую архитектуру/метрики/router/scoring/tests/docs, а не добавляй ручной фикс под один файл.
+
+## Evidence requirement
+
+Перед изменением pipeline или запуском нового трека сначала сверяй production code, tests, docs, Docker commands, manifests и существующие artifacts. В итоговом отчёте указывай, какие файлы реально прочитаны и какие Docker validations выполнены.

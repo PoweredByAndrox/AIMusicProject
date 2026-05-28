@@ -1,0 +1,4 @@
+# file: /app/worker/preference_model.py
+# hypothesis_version: 6.151.3
+
+[0.0, 1e-10, 0.001, 1.0, 2.0, -500, 100, 256, 500, 1280, 'W1', 'W2', 'b1', 'b2', 'embedding_dim', 'hidden_dim', 'loss']

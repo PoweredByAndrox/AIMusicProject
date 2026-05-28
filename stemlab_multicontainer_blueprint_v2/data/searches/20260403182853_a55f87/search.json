@@ -1,0 +1,16 @@
+{
+  "search_id": "20260403182853_a55f87",
+  "status": "failed",
+  "request": {
+    "base_job_id": "595fb9f1c83f",
+    "max_candidates": 1,
+    "lyrics_validate_top_k": 0
+  },
+  "output_root": "/app/data/searches/20260403182853_a55f87",
+  "created_at": "2026-04-03T18:28:53.504863+00:00",
+  "updated_at": "2026-04-03T18:30:00.760306+00:00",
+  "result": null,
+  "stdout_tail": "",
+  "stderr_tail": "Traceback (most recent call last):\n  File \"/app/scripts/search_tandem_presets.py\", line 506, in <module>\n    main()\n  File \"/app/scripts/search_tandem_presets.py\", line 491, in main\n    result = run_search(\n             ^^^^^^^^^^^\n  File \"/app/scripts/search_tandem_presets.py\", line 404, in run_search\n    config_path, _ = write_temp_preset(config_dir, generated_dir, preset_name, preset_data)\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/app/scripts/search_tandem_presets.py\", line 198, in write_temp_preset\n    config_path.write_text(text, encoding=\"utf-8\")\n  File \"/usr/local/lib/python3.11/pathlib.py\", line 1078, in write_text\n    with self.open(mode='w', encoding=encoding, errors=errors, newline=newline) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.11/pathlib.py\", line 1044, in open\n    return io.open(self, mode, buffering, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nOSError: [Errno 30] Read-only file system: '/app/configs/presets/autosearch_20260403182853_a55f87_balanced_reference.yaml'\n",
+  "error": "search runner failed with exit code 1"
+}

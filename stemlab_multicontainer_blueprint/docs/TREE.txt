@@ -1,0 +1,115 @@
+├── apps
+│   ├── api
+│   │   ├── app
+│   │   │   ├── routes
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── catalog.py
+│   │   │   │   └── jobs.py
+│   │   │   ├── services
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── job_store.py
+│   │   │   │   ├── orchestrator.py
+│   │   │   │   └── preset_loader.py
+│   │   │   ├── __init__.py
+│   │   │   ├── config.py
+│   │   │   ├── main.py
+│   │   │   └── schemas.py
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   └── frontend
+│       ├── src
+│       │   ├── api.ts
+│       │   ├── App.tsx
+│       │   ├── main.tsx
+│       │   └── styles.css
+│       ├── Dockerfile
+│       ├── index.html
+│       ├── package.json
+│       ├── tsconfig.json
+│       └── vite.config.ts
+├── configs
+│   ├── presets
+│   │   ├── fine_grained_14stem.yaml
+│   │   └── karaoke_clean.yaml
+│   ├── model_registry.yaml
+│   └── service_catalog.json
+├── data
+│   ├── inputs
+│   │   ├── .gitkeep
+│   │   └── README.txt
+│   ├── jobs
+│   │   └── .gitkeep
+│   └── outputs
+│       └── .gitkeep
+├── docs
+│   ├── 00_START_HERE_RU.md
+│   ├── 01_ARCHITECTURE_RU.md
+│   ├── 02_MODEL_STRATEGY_RU.md
+│   ├── 03_BUILD_JOURNAL_RU.md
+│   ├── 04_FIX_GUIDE_RU.md
+│   ├── 05_ROADMAP_RU.md
+│   ├── 06_LIMITATIONS_RU.md
+│   ├── 07_CURRENT_LAB_MAPPING_RU.md
+│   ├── 08_REFERENCES_RU.md
+│   └── architecture.svg
+├── examples
+│   ├── create_job.json
+│   └── create_job_curl.sh
+├── models
+│   └── .gitkeep
+├── scripts
+│   ├── bootstrap_models.ps1
+│   ├── bootstrap_models.sh
+│   ├── dev_up.ps1
+│   └── dev_up.sh
+├── services
+│   ├── audio-separator-worker
+│   │   ├── app
+│   │   │   ├── __init__.py
+│   │   │   ├── main.py
+│   │   │   ├── schemas.py
+│   │   │   └── utils.py
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   └── requirements.txt
+│   ├── bsroformer-worker
+│   │   ├── app
+│   │   │   ├── __init__.py
+│   │   │   ├── main.py
+│   │   │   ├── schemas.py
+│   │   │   └── utils.py
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   └── requirements.txt
+│   ├── demucs-worker
+│   │   ├── app
+│   │   │   ├── __init__.py
+│   │   │   ├── main.py
+│   │   │   ├── schemas.py
+│   │   │   └── utils.py
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   └── requirements.txt
+│   ├── querysep-worker
+│   │   ├── app
+│   │   │   ├── __init__.py
+│   │   │   ├── main.py
+│   │   │   ├── schemas.py
+│   │   │   └── utils.py
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   └── requirements.txt
+│   └── restoration-worker
+│       ├── app
+│       │   ├── __init__.py
+│       │   ├── main.py
+│       │   ├── schemas.py
+│       │   └── utils.py
+│       ├── Dockerfile
+│       ├── README.md
+│       └── requirements.txt
+├── .env.example
+├── docker-compose.yml
+├── Makefile
+├── PROJECT_STATUS_RU.md
+└── README.md

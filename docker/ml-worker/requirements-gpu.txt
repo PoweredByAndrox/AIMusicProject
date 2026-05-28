@@ -1,0 +1,106 @@
+# ML Worker Python Dependencies - GPU Version (PyTorch)
+# Requirements: 3.1, 13.1
+#
+# Full GPU acceleration using PyTorch + torchaudio
+# No TensorFlow or Essentia - everything runs on GPU
+
+# =============================================================================
+# PyTorch - Deep Learning Framework (CUDA 12.6)
+# Using 2.6.0 for natten 0.17.5 compatibility (allin1 requires head_dim not multiple of 8)
+# Version matrix: torch 2.6 -> torchaudio 2.6 -> torchvision 0.21
+# =============================================================================
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.6.0+cu126
+torchaudio==2.6.0+cu126
+torchvision==0.21.0+cu126
+
+# =============================================================================
+# Audio Processing
+# =============================================================================
+# Essentia - Audio analysis with pretrained models (RECOMMENDED)
+# Provides real embeddings via Discogs-EffNet model
+essentia-tensorflow>=2.1b6.dev1110
+
+# TensorFlow - required to run Discogs-EffNet frozen .pb graphs.
+# CUDA/cuDNN are provided by the CUDA base image (Dockerfile.gpu).
+tensorflow==2.21.0
+
+# Cython - Required for building madmom
+cython>=3.0.0
+
+# Librosa - for fallback only, main processing is PyTorch
+librosa>=0.10.1
+
+# Soundfile - Audio file I/O
+soundfile>=0.12.1
+
+# Audioread - Audio file reading backend
+audioread>=3.0.1
+
+# =============================================================================
+# Vector Search & ML
+# =============================================================================
+# FAISS - Vector similarity search
+faiss-cpu>=1.7.4
+
+# Scikit-learn - Machine learning utilities
+scikit-learn>=1.3.2
+
+# =============================================================================
+# Numerical Computing
+# =============================================================================
+numpy>=1.24.0,<2.0.0
+scipy>=1.11.0
+
+# =============================================================================
+# GPU Acceleration
+# =============================================================================
+# CuPy - GPU-accelerated NumPy
+cupy-cuda12x>=13.0.0
+
+# =============================================================================
+# YouTube Download
+# =============================================================================
+yt-dlp>=2024.1.0
+
+# =============================================================================
+# Database & Queue
+# =============================================================================
+# PostgreSQL driver
+psycopg2-binary>=2.9.9
+
+# Redis client
+redis>=5.0.0
+
+# =============================================================================
+# Utilities
+# =============================================================================
+# Configuration management
+python-dotenv>=1.0.0
+
+# HTTP requests
+requests>=2.31.0
+
+# JSON handling
+orjson>=3.9.0
+
+# Logging
+structlog>=24.1.0
+
+# Type hints
+typing-extensions>=4.9.0
+
+# Progress bars
+tqdm>=4.66.0
+
+# Test runner for Docker-only validation.
+pytest>=8.3.0
+
+# File path handling
+pathlib2>=2.3.7
+
+# YAML parsing
+pyyaml>=6.0.1
+
+# Source separation vendor runtime dependency needed because mamba-ssm is installed with --no-deps.
+einops>=0.8.1

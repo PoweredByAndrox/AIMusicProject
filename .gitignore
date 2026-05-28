@@ -1,0 +1,62 @@
+/node_modules
+/public/build
+/public/hot
+/public/storage
+/storage/*.key
+/vendor
+.env
+.env.backup
+.env.production
+.phpunit.result.cache
+Homestead.json
+Homestead.yaml
+auth.json
+npm-debug.log
+yarn-error.log
+/.fleet
+/.idea
+/.vscode
+/.tmp/
+**/.tmp/
+__pycache__/
+*.py[cod]
+
+# Docker data (audio, demix stems, models, indexes)
+/docker_data/
+/lab_artifacts/
+/testing_flstudio_music/
+/testing_stuff_music/
+/ml_worker_improved.zip
+
+# Blueprint runtime/model caches and generated jobs
+/stemlab_multicontainer_blueprint*/models/
+/stemlab_multicontainer_blueprint*/data/jobs/
+/stemlab_multicontainer_blueprint*/services/**/vendor/
+
+# allin1 byproducts inside ml_worker_improved
+/ml_worker_improved/spec/
+/ml_worker_improved/demix/
+/ml_worker_improved/storage/
+/ml_worker_improved/faiss_index/
+/ml_worker_improved/models/
+/ml_worker_improved/vendor/
+/ml_worker_improved/lab_artifacts/
+/ml_worker_improved/.hypothesis/
+/ml_worker_improved/.pytest_cache/
+
+# Local AI tool caches and vendored dependencies
+/.playwright-mcp/
+/.cursor/mcp/**/node_modules/
+/.cursor/mcp/**/dist/
+
+# Local media/model artifacts must not be pushed to GitHub.
+*.ckpt
+*.flac
+*.mp3
+*.npz
+*.pth
+*.pt
+*.pb
+*.safetensors
+*.th
+*.wav

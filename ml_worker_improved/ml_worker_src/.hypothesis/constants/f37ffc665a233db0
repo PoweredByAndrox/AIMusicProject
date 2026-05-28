@@ -1,0 +1,4 @@
+# file: /app/worker/queue_worker.py
+# hypothesis_version: 6.151.3
+
+[5432, 6379, 'Connected to Redis', 'DB_HOST', 'DB_NAME', 'DB_PASSWORD', 'DB_PORT', 'DB_USER', 'REDIS_HOST', 'REDIS_PASSWORD', 'REDIS_PORT', 'REDIS_PREFIX', 'Worker stopping...', 'bpm', 'completed', 'embedding_path', 'failed', 'genre', 'has_vocals', 'is_acoustic', 'key', 'mode', 'mood', 'postgres', 'processing', 'redis', 'secret', 'task_id', 'track_id', 'type']

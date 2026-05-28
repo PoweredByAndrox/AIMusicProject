@@ -1,0 +1,4 @@
+# file: /app/worker/__init__.py
+# hypothesis_version: 6.151.3
+
+['AudioAnalyzer', 'QueueWorker']

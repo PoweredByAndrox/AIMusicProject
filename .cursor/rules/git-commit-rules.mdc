@@ -1,0 +1,134 @@
+---
+description: Enforce Conventional Commits and safe Git commit workflow
+alwaysApply: true
+---
+
+# Git Commit Rules for Cursor
+
+All commits created by the AI must follow Conventional Commits.
+
+## Format
+
+```txt
+<type>(<scope>): <summary>
+```
+
+Examples:
+
+```txt
+feat(auth): add login form validation
+fix(download): prevent duplicate file verification
+refactor(ui): split launcher layout into smaller components
+docs(readme): update local setup instructions
+test(verifier): add checksum mismatch coverage
+chore(config): update electron build settings
+```
+
+## Allowed Types
+
+Use only:
+
+- feat
+- fix
+- refactor
+- perf
+- docs
+- test
+- style
+- chore
+- build
+- ci
+- revert
+
+## Scope
+
+The scope must describe the affected module, folder, feature, or domain.
+
+Good scopes:
+
+```txt
+auth, ui, api, launcher, downloader, verifier, config, docs, tests
+```
+
+Bad scopes:
+
+```txt
+stuff, misc, changes, update, fix
+```
+
+## Summary
+
+The summary must:
+
+- Be written in English.
+- Be concise and specific.
+- Use imperative mood.
+- Be no longer than 72 characters.
+- Not end with a period.
+- Describe the actual change, not the intention.
+- Not mention AI, ChatGPT, Codex, Cursor, prompts, or conversations.
+
+Forbidden messages:
+
+```txt
+update
+fix
+fixes
+fixed bug
+changes
+final
+final fix
+wip
+temp
+misc
+cleanup
+work
+save
+checkpoint
+```
+
+## Required Workflow Before Commit
+
+Before creating a commit, always run and inspect:
+
+```bash
+git status --short
+git diff
+git diff --staged
+```
+
+Then decide whether all changes belong to one logical commit. If changes are unrelated, split them into separate commits.
+
+## Staging
+
+Do not blindly run:
+
+```bash
+git add .
+```
+
+unless every changed file was inspected and confirmed relevant.
+
+Prefer:
+
+```bash
+git add path/to/file
+```
+
+or:
+
+```bash
+git add -p
+```
+
+## Never Commit
+
+- secrets
+- API keys
+- `.env` files
+- debug logs
+- temporary files
+- local IDE/cache files
+- generated junk
+- unrelated changes
+- broken experiments

@@ -1,0 +1,562 @@
+{
+  "generated_at": "2026-03-21T11:53:33",
+  "annotated_fields": [
+    "genre",
+    "mood",
+    "has_vocals"
+  ],
+  "cases": [
+    {
+      "name": "track_6463",
+      "track_id": 6463,
+      "title": "What You Know (Crizzly Remix)",
+      "artist": "T.I.",
+      "audio_path": "/app/storage/audio/yt_6981365694716.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Aggressive",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_12424",
+      "track_id": 12424,
+      "title": "Shake Ya Shimmy",
+      "artist": "Da Tweekaz & Code Black",
+      "audio_path": "/app/storage/audio/yt_698299ead5af1.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Happy",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4312",
+      "track_id": 4312,
+      "title": "It's Unreal (Zed Bias Remix)",
+      "artist": "Dansette Junior",
+      "audio_path": "/app/storage/audio/yt_697f40cc695b5.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 4,
+        "min_rating": 4
+      },
+      "predicted_snapshot": {
+        "genre": "Dubstep",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4369",
+      "track_id": 4369,
+      "title": "Say No (Cutline Remix)",
+      "artist": "The Agitator",
+      "audio_path": "/app/storage/audio/yt_697f417480b9c.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Trance",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4390",
+      "track_id": 4390,
+      "title": "In Pieces",
+      "artist": "J Majik & Wickaman ft. Dee Freer",
+      "audio_path": "/app/storage/audio/yt_697f41b28dbc0.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4321",
+      "track_id": 4321,
+      "title": "Blue",
+      "artist": "Gemini",
+      "audio_path": "/app/storage/audio/yt_697f40e2bd7d2.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Dubstep",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4230",
+      "track_id": 4230,
+      "title": "Ghosts N Stuff (Nero Remix)",
+      "artist": "Deadmau5",
+      "audio_path": "/app/storage/audio/yt_697f3fcf5eb14.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Dubstep",
+        "mood": "Calm",
+        "has_vocals": true
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4442",
+      "track_id": 4442,
+      "title": "Midnight Run (Flux Pavilion Remix)",
+      "artist": "Example",
+      "audio_path": "/app/storage/audio/yt_697f424cea078.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4268",
+      "track_id": 4268,
+      "title": "Paranoid",
+      "artist": "Dansette Junior",
+      "audio_path": "/app/storage/audio/yt_697f4041cd951.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Ambient",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_5224",
+      "track_id": 5224,
+      "title": "Rescue",
+      "artist": "Zeds Dead & Dion Timmer ft. Delaney",
+      "audio_path": "/app/storage/audio/yt_697f4b82a7c31.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 4,
+        "min_rating": 4
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_5960",
+      "track_id": 5960,
+      "title": "Silence",
+      "artist": "Blanke & HALIENE",
+      "audio_path": "/app/storage/audio/yt_697f5426ce7ad.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4315",
+      "track_id": 4315,
+      "title": "Lies (Doctor P Remix)",
+      "artist": "Fenech-Soler",
+      "audio_path": "/app/storage/audio/yt_697f40cd7e34e.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4266",
+      "track_id": 4266,
+      "title": "On My Own (Drumsound & Bassline Smith Remix)",
+      "artist": "Blame ft. Ruff Sqwad",
+      "audio_path": "/app/storage/audio/yt_697f403a86790.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_5099",
+      "track_id": 5099,
+      "title": "Torque",
+      "artist": "Space Laces",
+      "audio_path": "/app/storage/audio/yt_697f49fd92f40.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 4,
+        "min_rating": 4
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4295",
+      "track_id": 4295,
+      "title": "I Can't Stop",
+      "artist": "Flux Pavilion",
+      "audio_path": "/app/storage/audio/yt_697f40970c60b.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 4,
+        "min_rating": 4
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4599",
+      "track_id": 4599,
+      "title": "More Than You",
+      "artist": "Koven",
+      "audio_path": "/app/storage/audio/yt_697f4421248b8.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": true
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_5285",
+      "track_id": 5285,
+      "title": "Lone Wolf (Oliverse Remix)",
+      "artist": "Zomboy",
+      "audio_path": "/app/storage/audio/yt_697f4c30dd2c0.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4551",
+      "track_id": 4551,
+      "title": "Sleepless (Xilent Remix)",
+      "artist": "Excision",
+      "audio_path": "/app/storage/audio/yt_697f43967fd13.mp3",
+      "feedback_context": {
+        "is_liked": false,
+        "max_rating": 4,
+        "min_rating": 4
+      },
+      "predicted_snapshot": {
+        "genre": "Dubstep",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_4466",
+      "track_id": 4466,
+      "title": "Fire Hive",
+      "artist": "Knife Party",
+      "audio_path": "/app/storage/audio/yt_697f429a57810.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_6238",
+      "track_id": 6238,
+      "title": "Live My Life (Party Rock Remix)",
+      "artist": "Far East Movement ft. Justin Bieber, Redfoo",
+      "audio_path": "/app/storage/audio/yt_6980e72d31c74.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": true
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_6237",
+      "track_id": 6237,
+      "title": "Heart Attack",
+      "artist": "Young Squage",
+      "audio_path": "/app/storage/audio/yt_6980e72a533fd.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Ambient",
+        "mood": "Calm",
+        "has_vocals": true
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_6225",
+      "track_id": 6225,
+      "title": "Nothin' on You (feat. Bruno Mars) (TC's Switch-Up Extended Version)",
+      "artist": "",
+      "audio_path": "/app/storage/audio/yt_6980e701e9a95.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Drum & Bass",
+        "mood": "Calm",
+        "has_vocals": true
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_6241",
+      "track_id": 6241,
+      "title": "Secret Lover (Spencer & Hill Remix Arcdsa Edit & Videoremix)",
+      "artist": "Private",
+      "audio_path": "/app/storage/audio/yt_6980e724714ee.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": 5,
+        "min_rating": 5
+      },
+      "predicted_snapshot": {
+        "genre": "Dubstep",
+        "mood": "Calm",
+        "has_vocals": false
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    },
+    {
+      "name": "track_9935",
+      "track_id": 9935,
+      "title": "No Superstar (Mr. P!nk Remix)",
+      "artist": "Remady P&R",
+      "audio_path": "/app/storage/audio/yt_6982153b92e8c.mp3",
+      "feedback_context": {
+        "is_liked": true,
+        "max_rating": null,
+        "min_rating": null
+      },
+      "predicted_snapshot": {
+        "genre": "House",
+        "mood": "Happy",
+        "has_vocals": true
+      },
+      "expected": {
+        "genre": null,
+        "mood": null,
+        "has_vocals": null
+      },
+      "notes": ""
+    }
+  ]
+}

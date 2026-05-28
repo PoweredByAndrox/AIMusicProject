@@ -1,0 +1,171 @@
+name: fine_grained_14stem
+description: >
+  Coarse 6-stem backbone plus long-tail melodic/orchestral extraction.
+  Built to support per-stem architecture selection and future query-based refinement.
+settings:
+  dry_run: true
+  sample_rate: 44100
+  output_format: flac
+  save_intermediate: true
+
+targets:
+  - vocals
+  - drums
+  - bass
+  - guitar
+  - piano
+  - strings_orchestra
+  - synth_lead
+  - synth_pad
+  - arps_plucks
+  - brass_woodwinds
+  - organ_reeds
+  - fx_risers_impacts
+  - ambience_residual
+  - instrumental_mix
+
+phases:
+  - id: coarse_split
+    label: Coarse split
+    steps:
+      - service: bsroformer-worker
+        task: coarse_6stem
+        model: roformer-model-bs-roformer-sw-by-jarredou
+        output_bus: coarse_6stem
+        outputs: [vocals, drums, bass, guitar, piano, other]
+
+      - service: demucs-worker
+        task: coarse_vdbo_validation
+        model: htdemucs_ft
+        output_bus: demucs_validation
+        outputs: [vocals, drums, bass, other]
+
+  - id: specialist_refine
+    label: Stem-specific refine
+    steps:
+      - stem: vocals
+        service: bsroformer-worker
+        task: vocals_resurrection
+        model: roformer-model-bs-roformer-vocals-resurrection-by-unwa
+
+      - stem: drums
+        service: demucs-worker
+        task: drums_focus
+        model: htdemucs_ft
+
+      - stem: bass
+        service: demucs-worker
+        task: bass_focus
+        model: htdemucs_ft
+
+      - stem: guitar
+        service: bsroformer-worker
+        task: guitar_refine_from_6stem
+        model: roformer-model-bs-roformer-sw-by-jarredou
+
+      - stem: piano
+        service: bsroformer-worker
+        task: piano_refine_from_6stem
+        model: roformer-model-bs-roformer-sw-by-jarredou
+
+      - stem: harmonic_residual
+        service: audio-separator-worker
+        task: harmonic_bus_cleanup
+        preset: instrumental_balanced
+        build_from:
+          include: [other, guitar, piano]
+          exclude: [vocals, drums, bass]
+
+  - id: long_tail_split
+    label: Long-tail extraction
+    steps:
+      - stem: strings_orchestra
+        service: querysep-worker
+        task: prompt_extract
+        prompt: strings_orchestra
+        input_bus: harmonic_residual
+
+      - stem: synth_lead
+        service: querysep-worker
+        task: prompt_extract
+        prompt: synth_lead
+        input_bus: harmonic_residual
+
+      - stem: synth_pad
+        service: querysep-worker
+        task: prompt_extract
+        prompt: synth_pad
+        input_bus: harmonic_residual
+
+      - stem: arps_plucks
+        service: querysep-worker
+        task: prompt_extract
+        prompt: arps_plucks
+        input_bus: harmonic_residual
+
+      - stem: brass_woodwinds
+        service: querysep-worker
+        task: prompt_extract
+        prompt: brass_woodwinds
+        input_bus: harmonic_residual
+
+      - stem: organ_reeds
+        service: querysep-worker
+        task: prompt_extract
+        prompt: organ_reeds
+        input_bus: harmonic_residual
+
+      - stem: fx_risers_impacts
+        service: querysep-worker
+        task: prompt_extract
+        prompt: fx_risers_impacts
+        input_bus: harmonic_residual
+
+      - stem: ambience_residual
+        service: querysep-worker
+        task: residual_export
+        prompt: ambience_residual
+        input_bus: harmonic_residual
+
+  - id: restoration
+    label: Restoration and cleanup
+    steps:
+      - stem: vocals
+        service: restoration-worker
+        task: dereverb_cleanup
+        recipe: vocals_clean
+
+      - stem: strings_orchestra
+        service: restoration-worker
+        task: harmonic_smoothing
+        recipe: strings_clean
+
+      - stem: synth_lead
+        service: restoration-worker
+        task: harmonic_smoothing
+        recipe: synth_clean
+
+      - stem: synth_pad
+        service: restoration-worker
+        task: harmonic_smoothing
+        recipe: synth_clean
+
+      - stem: instrumental_mix
+        service: bsroformer-worker
+        task: instrumental_resurrection
+        model: roformer-model-bs-roformer-instrumental-resurrection-by-unwa
+        build_from:
+          include:
+            - drums
+            - bass
+            - guitar
+            - piano
+            - strings_orchestra
+            - synth_lead
+            - synth_pad
+            - arps_plucks
+            - brass_woodwinds
+            - organ_reeds
+            - fx_risers_impacts
+            - ambience_residual
+          exclude: [vocals]

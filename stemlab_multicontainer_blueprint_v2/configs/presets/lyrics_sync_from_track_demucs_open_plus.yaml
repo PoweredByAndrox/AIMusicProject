@@ -1,0 +1,92 @@
+name: lyrics_sync_from_track_demucs_open_plus
+description: >
+  Extract 6 stems from a raw track with Demucs first, then run a stronger
+  ffmpeg-based de-muffle / presence-lift pass than the tuned baseline.
+  Use this when `lyrics_sync_from_track_demucs_tuned` is already good but still
+  feels slightly veiled, especially on `other` and `instrumental_mix`.
+settings:
+  dry_run: false
+  sample_rate: 44100
+  output_format: wav
+  save_intermediate: true
+
+targets:
+  - vocals
+  - drums
+  - bass
+  - guitar
+  - piano
+  - other
+  - instrumental_mix
+  - lyrics_json
+  - lyrics_txt
+  - lyrics_lrc
+  - lyrics_srt
+
+phases:
+  - id: vocals_extract
+    label: Extract 6 stems first
+    steps:
+      - stem: vocals
+        service: demucs-worker
+        task: coarse_6stem
+        model: htdemucs_6s
+
+  - id: restoration
+    label: Stronger anti-muffle opening pass
+    steps:
+      - stem: vocals
+        service: restoration-worker
+        task: presence_lift
+        recipe: vocals_air_open
+
+      - stem: drums
+        service: restoration-worker
+        task: presence_lift
+        recipe: drums_unmuffle_plus
+
+      - stem: bass
+        service: restoration-worker
+        task: presence_lift
+        recipe: bass_unmuffle_plus
+
+      - stem: guitar
+        service: restoration-worker
+        task: presence_lift
+        recipe: harmonic_unmuffle_plus
+
+      - stem: piano
+        service: restoration-worker
+        task: presence_lift
+        recipe: harmonic_unmuffle_plus
+
+      - stem: other
+        service: restoration-worker
+        task: presence_lift
+        recipe: music_unmuffle_plus
+
+      - stem: instrumental_mix
+        service: restoration-worker
+        task: presence_lift
+        recipe: instrumental_polish_plus
+
+  - id: lyrics_transcription
+    label: Word-level lyrics transcription from opened vocals
+    steps:
+      - stem: lyrics_wordlevel
+        service: lyrics-worker
+        task: transcribe_wordlevel
+        model: whisperx-large-v2
+        input_bus: vocals
+
+  - id: lyrics_alignment
+    label: Exact-text alignment (optional)
+    steps:
+      - stem: lyrics_aligned
+        service: lyrics-worker
+        task: align_reference_lyrics
+        model: stable-ts-large-v3
+        input_bus: vocals
+        build_from:
+          include: [lyrics_json]
+        only_if_reference_lyrics: true

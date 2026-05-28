@@ -1,0 +1,16 @@
+{
+  "plugins": {
+    "superpowers": {
+      "enabled": true
+    },
+    "continual-learning": {
+      "enabled": true
+    },
+    "context7-plugin": {
+      "enabled": true
+    },
+    "postman": {
+      "enabled": true
+    }
+  }
+}

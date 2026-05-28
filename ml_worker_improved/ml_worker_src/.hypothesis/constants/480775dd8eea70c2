@@ -1,0 +1,4 @@
+# file: /app/worker/faiss_manager.py
+# hypothesis_version: 6.151.3
+
+[1.0, 1280, '/app/faiss_index', 'FAISS_INDEX_PATH', 'id_map', 'id_map.npy', 'next_id', 'reverse_map', 'tracks.index']

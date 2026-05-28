@@ -1,0 +1,46 @@
+name: lyrics_sync_from_track_demucs
+description: >
+  Extract vocals from a raw track with Demucs first, then run local word-level lyrics transcription
+  on the rendered vocals stem. Use this when the input is a full song, not an isolated vocals file.
+settings:
+  dry_run: false
+  sample_rate: 44100
+  output_format: wav
+  save_intermediate: true
+
+targets:
+  - vocals
+  - lyrics_json
+  - lyrics_txt
+  - lyrics_lrc
+  - lyrics_srt
+
+phases:
+  - id: vocals_extract
+    label: Extract vocals stem first
+    steps:
+      - stem: vocals
+        service: demucs-worker
+        task: coarse_6stem
+        model: htdemucs_6s
+
+  - id: lyrics_transcription
+    label: Word-level lyrics transcription from rendered vocals
+    steps:
+      - stem: lyrics_wordlevel
+        service: lyrics-worker
+        task: transcribe_wordlevel
+        model: whisperx-large-v2
+        input_bus: vocals
+
+  - id: lyrics_alignment
+    label: Exact-text alignment (optional)
+    steps:
+      - stem: lyrics_aligned
+        service: lyrics-worker
+        task: align_reference_lyrics
+        model: stable-ts-large-v3
+        input_bus: vocals
+        build_from:
+          include: [lyrics_json]
+        only_if_reference_lyrics: true

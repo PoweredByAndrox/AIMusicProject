@@ -1,0 +1,47 @@
+# GPU Override for ML Worker
+# Usage: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Prerequisites:
+# 1. NVIDIA GPU with CUDA support
+# 2. NVIDIA drivers installed (nvidia-smi should work)
+# 3. NVIDIA Container Toolkit installed:
+#    - Windows: Install Docker Desktop with WSL2, enable GPU in settings
+#    - Linux: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+
+services:
+  ml-worker:
+    build:
+      context: .
+      dockerfile: docker/ml-worker/Dockerfile.gpu
+    volumes:
+      - ./docker_data/torch_cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      # Number of parallel worker threads (2-4 recommended for GPU)
+      # Higher values allow CPU preprocessing to overlap with GPU inference
+      - ML_WORKER_THREADS=3
+      # TensorFlow GPU memory growth (prevent OOM)
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
+      # Ensure TensorFlow uses the system cuDNN (>= 9.3) instead of PyTorch's pinned cuDNN (9.1).
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcudnn.so.9
+
+  # Ollama with GPU support
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - NVIDIA_VISIBLE_DEVICES=all

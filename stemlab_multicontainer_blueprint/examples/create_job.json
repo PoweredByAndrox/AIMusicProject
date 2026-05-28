@@ -1,0 +1,6 @@
+{
+  "track_name": "Demo Track",
+  "input_path": "/app/data/inputs/demo.wav",
+  "preset_name": "fine_grained_14stem",
+  "notes": "dry-run example"
+}

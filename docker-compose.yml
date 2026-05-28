@@ -1,0 +1,436 @@
+services:
+  # Laravel Application (PHP 8.2+ with nginx)
+  app:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    container_name: music-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:80"
+    volumes:
+      - ./:/var/www/html
+      - app_vendor:/var/www/html/vendor
+      - ./docker_data/storage:/var/www/html/storage/app
+      - ./docker_data/container_logs/app:/var/log/app
+      - ./docker/app/nginx.conf:/etc/nginx/http.d/default.conf
+      - ./docker/app/supervisord.conf:/etc/supervisor.d/supervisord.ini
+      - ./docker/app/php-fpm-www.conf:/usr/local/etc/php-fpm.d/www.conf
+      - ./docker/app/opcache-dev.ini:/usr/local/etc/php/conf.d/zzz-opcache-override.ini
+    environment:
+      - APP_ENV=${APP_ENV:-local}
+      - APP_DEBUG=${APP_DEBUG:-true}
+      - APP_KEY=${APP_KEY}
+      - APP_URL=${APP_URL:-http://localhost:8000}
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=${DB_DATABASE:-music_recommendations}
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-secret}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-null}
+      - QUEUE_CONNECTION=redis
+      - FILESYSTEM_DISK=local
+      - STORAGE_PATH=/var/www/html/storage/app
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - music-network
+
+  # Python ML Worker (Python 3.11+ with PyTorch, Essentia, FAISS, yt-dlp)
+  ml-worker:
+    image: aimusicproject-ml-worker:latest
+    build:
+      context: .
+      dockerfile: docker/ml-worker/Dockerfile
+    container_name: music-ml-worker
+    restart: unless-stopped
+    volumes:
+      - ./ml_worker_improved:/app
+      - ./lab_artifacts:/app/lab_artifacts
+      - ./testing_flstudio_music:/app/testing_flstudio_music:ro
+      - ./docker_data/storage:/app/storage
+      - ./docker_data/faiss_index:/app/faiss_index
+      - ./docker_data/models:/app/models
+      - ./docker_data/demix:/app/demix
+    # tmpfs for Demucs temp files — keeps heavy intermediate WAVs in RAM
+    # instead of writing through WSL 9P filesystem to disk.
+    # Size: 4× largest audio file × batch_size (6 tracks × ~100MB × 4 stems ≈ 2.4GB).
+    tmpfs:
+      - /app/storage/tmp:size=4G,mode=1777
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_DATABASE:-music_recommendations}
+      - DB_USER=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-secret}
+      - STORAGE_PATH=/app/storage
+      - FAISS_INDEX_PATH=/app/faiss_index
+      - MODELS_PATH=/app/models
+      - ML_WORKER_LOG_NAME=ml_worker.log
+      - ML_WORKER_ERROR_LOG_NAME=ml_worker_errors.log
+      - ML_WORKER_DISK_LOG_NAME=ml_worker_disk.log
+      - MAX_SEGMENT_ANALYSIS_DURATION=900
+      - ALLOW_CPU_STRUCTURE_FALLBACK=0
+      - ENABLE_STRUCTURE_GUIDED_SEGMENTATION=1
+      - TRACK_ANALYSIS_BATCH_SIZE=1
+      - TRACK_ANALYSIS_BATCH_WAIT_MS=3000
+      - ALLIN1_TMP_ROOT=/app/storage/tmp/allin1
+      - XDG_CACHE_HOME=/app/storage/cache/xdg
+      - HF_HOME=/app/storage/cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/app/storage/cache/huggingface/hub
+      - HF_HUB_OFFLINE=1
+      - TORCH_HOME=/app/storage/cache/torch
+      - PYTHONUNBUFFERED=1
+      - REQUIRE_CUDA=1
+      - ML_TORCH_DEVICE=cuda
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - NUMBA_NUM_THREADS=1
+      - TF_NUM_INTRAOP_THREADS=1
+      - TF_NUM_INTEROP_THREADS=1
+      # Force TensorFlow to use the system cuDNN (>= 9.3) instead of PyTorch's pinned cuDNN (9.1),
+      # otherwise Discogs-EffNet inference fails with "No DNN in stream executor".
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcudnn.so.9
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
+      - DISK_TELEMETRY_ENABLED=1
+      - DISK_TELEMETRY_SAMPLE_SECONDS=5
+    deploy:
+      resources:
+        # Memory limit prevents WSL from swapping to C:\ pagefile when ML models
+        # consume too much RAM, which was the primary cause of Docker daemon crashes.
+        limits:
+          memory: 12g
+        reservations:
+          memory: 4g
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - music-network
+
+  ml-worker-2:
+    image: aimusicproject-ml-worker:latest
+    container_name: music-ml-worker-2
+    restart: unless-stopped
+    volumes:
+      - ./ml_worker_improved:/app
+      - ./lab_artifacts:/app/lab_artifacts
+      - ./testing_flstudio_music:/app/testing_flstudio_music:ro
+      - ./docker_data/storage:/app/storage
+      - ./docker_data/faiss_index:/app/faiss_index
+      - ./docker_data/models:/app/models
+      - ./docker_data/demix:/app/demix
+    tmpfs:
+      - /app/storage/tmp:size=2G,mode=1777
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_DATABASE:-music_recommendations}
+      - DB_USER=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-secret}
+      - STORAGE_PATH=/app/storage
+      - FAISS_INDEX_PATH=/app/faiss_index
+      - MODELS_PATH=/app/models
+      - ML_WORKER_LOG_NAME=ml_worker_2.log
+      - ML_WORKER_ERROR_LOG_NAME=ml_worker_2_errors.log
+      - ML_WORKER_DISK_LOG_NAME=ml_worker_2_disk.log
+      - MAX_SEGMENT_ANALYSIS_DURATION=900
+      - ALLOW_CPU_STRUCTURE_FALLBACK=0
+      - ENABLE_STRUCTURE_GUIDED_SEGMENTATION=1
+      - TRACK_ANALYSIS_BATCH_SIZE=1
+      - TRACK_ANALYSIS_BATCH_WAIT_MS=3000
+      - ALLIN1_TMP_ROOT=/app/storage/tmp/allin1-2
+      - XDG_CACHE_HOME=/app/storage/cache/xdg
+      - HF_HOME=/app/storage/cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/app/storage/cache/huggingface/hub
+      - HF_HUB_OFFLINE=1
+      - TORCH_HOME=/app/storage/cache/torch
+      - PYTHONUNBUFFERED=1
+      - REQUIRE_CUDA=1
+      - ML_TORCH_DEVICE=cuda
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - NUMBA_NUM_THREADS=1
+      - TF_NUM_INTRAOP_THREADS=1
+      - TF_NUM_INTEROP_THREADS=1
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcudnn.so.9
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
+      - DISK_TELEMETRY_ENABLED=1
+      - DISK_TELEMETRY_SAMPLE_SECONDS=5
+    deploy:
+      resources:
+        limits:
+          memory: 12g
+        reservations:
+          memory: 4g
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - music-network
+
+  ml-worker-3:
+    image: aimusicproject-ml-worker:latest
+    container_name: music-ml-worker-3
+    restart: unless-stopped
+    volumes:
+      - ./ml_worker_improved:/app
+      - ./lab_artifacts:/app/lab_artifacts
+      - ./testing_flstudio_music:/app/testing_flstudio_music:ro
+      - ./docker_data/storage:/app/storage
+      - ./docker_data/faiss_index:/app/faiss_index
+      - ./docker_data/models:/app/models
+      - ./docker_data/demix:/app/demix
+    tmpfs:
+      - /app/storage/tmp:size=2G,mode=1777
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_DATABASE:-music_recommendations}
+      - DB_USER=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-secret}
+      - STORAGE_PATH=/app/storage
+      - FAISS_INDEX_PATH=/app/faiss_index
+      - MODELS_PATH=/app/models
+      - ML_WORKER_LOG_NAME=ml_worker_3.log
+      - ML_WORKER_ERROR_LOG_NAME=ml_worker_3_errors.log
+      - ML_WORKER_DISK_LOG_NAME=ml_worker_3_disk.log
+      - MAX_SEGMENT_ANALYSIS_DURATION=900
+      - ALLOW_CPU_STRUCTURE_FALLBACK=0
+      - ENABLE_STRUCTURE_GUIDED_SEGMENTATION=1
+      - TRACK_ANALYSIS_BATCH_SIZE=1
+      - TRACK_ANALYSIS_BATCH_WAIT_MS=3000
+      - ALLIN1_TMP_ROOT=/app/storage/tmp/allin1-3
+      - XDG_CACHE_HOME=/app/storage/cache/xdg
+      - HF_HOME=/app/storage/cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/app/storage/cache/huggingface/hub
+      - HF_HUB_OFFLINE=1
+      - TORCH_HOME=/app/storage/cache/torch
+      - PYTHONUNBUFFERED=1
+      - REQUIRE_CUDA=1
+      - ML_TORCH_DEVICE=cuda
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - NUMBA_NUM_THREADS=1
+      - TF_NUM_INTRAOP_THREADS=1
+      - TF_NUM_INTEROP_THREADS=1
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcudnn.so.9
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
+      - DISK_TELEMETRY_ENABLED=1
+      - DISK_TELEMETRY_SAMPLE_SECONDS=5
+    deploy:
+      resources:
+        limits:
+          memory: 12g
+        reservations:
+          memory: 4g
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - music-network
+
+  # QuerySep / Banquet long-tail stem worker.
+  # Profile-gated because the image can download large model checkpoints.
+  querysep-worker:
+    profiles:
+      - ml-querysep
+    build:
+      context: ./stemlab_multicontainer_blueprint_v2/services/querysep-worker
+    container_name: music-querysep-worker
+    restart: unless-stopped
+    environment:
+      - DRY_RUN=${QUERYSEP_DRY_RUN:-false}
+      - MODELS_ROOT=/app/models
+      - DATA_ROOT=/app/data
+      - QUERYSEP_RUNTIME_DEVICE=${QUERYSEP_RUNTIME_DEVICE:-auto}
+      - QUERYSEP_MODEL_ID=${QUERYSEP_MODEL_ID:-laion/clap-htsat-unfused}
+      - QUERYSEP_BACKEND_DEFAULT=${QUERYSEP_BACKEND_DEFAULT:-banquet_byoq}
+      - QUERYSEP_BANQUET_ENABLED=${QUERYSEP_BANQUET_ENABLED:-true}
+      - QUERYSEP_BANQUET_DOWNLOAD_ON_START=${QUERYSEP_BANQUET_DOWNLOAD_ON_START:-true}
+      - QUERYSEP_BANQUET_CKPT_PATH=/app/models/query-bandit/ev-pre-aug.ckpt
+      - QUERYSEP_BANQUET_CKPT_URL=${QUERYSEP_BANQUET_CKPT_URL:-https://zenodo.org/api/records/13694558/files/ev-pre-aug.ckpt/content}
+      - QUERYSEP_BANQUET_CKPT_MD5=${QUERYSEP_BANQUET_CKPT_MD5:-4dfb91d6d27c2dfd4992a15070915541}
+      - QUERYSEP_BANQUET_VENDOR_ROOT=/app/vendor/query-bandit
+      - QUERYSEP_BANQUET_CONFIG_ROOT=/app/vendor/query-bandit/config
+      - QUERYSEP_BANQUET_EXPT_CONFIG=/app/vendor/query-bandit/expt/bandit-everything-test.yml
+      - QUERYSEP_BANQUET_BATCH_SIZE=${QUERYSEP_BANQUET_BATCH_SIZE:-4}
+      - QUERYSEP_BANQUET_QUERY_TOP_K=${QUERYSEP_BANQUET_QUERY_TOP_K:-3}
+      - QUERYSEP_PREFETCH_ON_START=${QUERYSEP_PREFETCH_ON_START:-false}
+      - QUERYSEP_IDLE_UNLOAD_SECONDS=${QUERYSEP_IDLE_UNLOAD_SECONDS:-900}
+      - QUERYSEP_CACHE_ROOT=/app/models/querysep-worker-cache
+      - HF_HOME=/app/models/querysep-worker-cache/hf
+      - HUGGINGFACE_HUB_CACHE=/app/models/querysep-worker-cache/hf/hub
+      - TORCH_HOME=/app/models/querysep-worker-cache/torch
+      - XDG_CACHE_HOME=/app/models/querysep-worker-cache/xdg
+      - MPLCONFIGDIR=/app/models/querysep-worker-cache/matplotlib
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ./lab_artifacts:/main_lab_artifacts
+      - ./docker_data/models:/app/models
+      - ./docker_data/container_logs/querysep-worker:/var/log/querysep-worker
+    shm_size: 2g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - music-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: music-postgres
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - logging_collector=on
+      - -c
+      - log_destination=stderr
+      - -c
+      - log_directory=/var/log/postgresql
+      - -c
+      - log_filename=postgresql.log
+      - -c
+      - log_truncate_on_rotation=on
+      - -c
+      - log_rotation_age=1d
+      - -c
+      - log_rotation_size=50MB
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker_data/container_logs/postgres:/var/log/postgresql
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      - POSTGRES_DB=${DB_DATABASE:-music_recommendations}
+      - POSTGRES_USER=${DB_USERNAME:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-secret}
+    networks:
+      - music-network
+
+  # Redis Queue
+  redis:
+    image: redis:7-alpine
+    container_name: music-redis
+    restart: unless-stopped
+    # No external port - only accessible within Docker network
+    volumes:
+      - redis_data:/data
+      - ./docker_data/container_logs/redis:/var/log/redis
+    command: sh -c "mkdir -p /var/log/redis && exec redis-server --appendonly yes --loglevel notice --logfile /var/log/redis/redis.log"
+    networks:
+      - music-network
+
+  # Ollama LLM Server for AI Chat
+  ollama:
+    image: ollama/ollama:latest
+    container_name: music-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./docker_data/container_logs/ollama:/var/log/ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    entrypoint: /bin/sh
+    command:
+      - -lc
+      - mkdir -p /var/log/ollama && exec /bin/ollama serve >> /var/log/ollama/ollama.log 2>&1
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    networks:
+      - music-network
+
+  # Node.js for Vue.js Frontend Build
+  node:
+    image: node:20-alpine
+    container_name: music-node
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - ./:/var/www/html
+      - ./docker_data/storage:/var/www/html/storage/app
+      - ./docker_data/container_logs/node:/var/log/node
+      - node_modules:/var/www/html/node_modules
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - VITE_API_URL=${APP_URL:-http://localhost:8000}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PREFIX=${REDIS_PREFIX:-ai_music_recommendations_database_}
+      - RADIO_WS_PORT=8080
+      - RADIO_APP_ORIGIN=http://app
+    command: sh -lc "mkdir -p /var/log/node && LOCK_HASH=$$(sha1sum package-lock.json package.json 2>/dev/null | sha1sum | awk '{print $$1}') && INSTALLED_HASH=$$(cat node_modules/.install-hash 2>/dev/null || true) && if [ ! -x node_modules/.bin/vite ] || [ \"$$LOCK_HASH\" != \"$$INSTALLED_HASH\" ]; then echo '[node] running npm install' >> /var/log/node/npm-install.log && npm install >> /var/log/node/npm-install.log 2>&1 && printf '%s' \"$$LOCK_HASH\" > node_modules/.install-hash; else echo '[node] reusing cached node_modules' >> /var/log/node/npm-install.log; fi && exec npm run dev:docker >> /var/log/node/vite.log 2>&1"
+    ports:
+      - "${VITE_PORT:-5173}:5173"
+    networks:
+      - music-network
+
+networks:
+  music-network:
+    driver: bridge
+    name: music-recommendations-network
+
+volumes:
+  # Composer vendor cache inside Linux volume to avoid slow bind-mounted autoload
+  app_vendor:
+    name: music-app-vendor
+
+  # PostgreSQL data persistence
+  postgres_data:
+    name: music-postgres-data
+
+  # Redis data persistence
+  redis_data:
+    name: music-redis-data
+
+  # Ollama models persistence
+  ollama_data:
+    name: music-ollama-data
+
+  # Node modules cache
+  node_modules:
+    name: music-node-modules

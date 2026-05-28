@@ -1,0 +1,4 @@
+# file: /app/worker/audio_analyzer.py
+# hypothesis_version: 6.151.3
+
+[0.05, 0.08, 0.1, 0.12, 0.3, 0.5, 0.6, 0.7, 120.0, 120, 128, 135, 140, 160, 256, 300, 512, 1280, 2000, 3000, 3400, 16000, 22050, 44100, '#', '---', '/app/models', 'A', 'A#', 'Aggressive', 'B', 'C', 'C#', 'Calm', 'D', 'D#', 'Dark', 'Downtempo', 'Drum & Bass', 'Dubstep', 'E', 'Electronic', 'Energetic', 'F', 'F#', 'G', 'G#', 'Happy', 'House', 'Jungle', 'MODELS_PATH', 'Melancholic', 'PartitionedCall:0', 'PartitionedCall:1', 'Techno', 'Trance', 'aggressive', 'b', 'bpm', 'classes', 'danceability', 'effnet', 'embedding', 'func', 'genre', 'genre_labels', 'happy', 'has_vocals', 'is_acoustic', 'key', 'major', 'minor', 'mode', 'model/Placeholder:0', 'model/Softmax:0', 'mood', 'mood_', 'mood_aggressive', 'mood_happy', 'mood_relaxed', 'mood_sad', 'multifeature', 'outputs', 'rb', 'relaxed', 'sad', 'voice']

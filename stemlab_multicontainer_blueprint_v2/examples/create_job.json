@@ -1,0 +1,9 @@
+{
+  "track_name": "Demo Vocals Stem",
+  "input_path": "/app/data/inputs/demo_vocals.wav",
+  "preset_name": "lyrics_sync_from_vocals",
+  "notes": "real local lyrics sync example",
+  "enable_lyrics": true,
+  "lyrics_language": "en",
+  "lyrics_reference_path": "/app/data/inputs/demo_lyrics.txt"
+}

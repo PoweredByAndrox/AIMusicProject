@@ -1,0 +1,4 @@
+# file: /app/worker/segment_index.py
+# hypothesis_version: 6.151.3
+
+[0.0, 1.0, 1280, '/app/faiss_index', 'FAISS_INDEX_PATH', 'faiss_to_fragment', 'metadata', 'next_idx', 'r', 'segments', 'segments.index', 'w']

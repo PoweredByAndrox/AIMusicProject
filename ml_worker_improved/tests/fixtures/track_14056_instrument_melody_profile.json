@@ -1,0 +1,109 @@
+{
+  "track_id": 14056,
+  "title": "You're Gone",
+  "artist": "Basic Element Forever",
+  "audio_path": "/app/storage/audio/yt_69c43f0c3f181.mp3",
+  "scope": "stem-level baseline only; this is not true per-instrument classification inside the mixed 'other' stem",
+  "segments": [
+    {
+      "segment_id": 95341,
+      "type": "verse",
+      "start": 0.0,
+      "end": 78.59954833984375,
+      "notes": "Bass and harmonic stem are A-centered with F/E support; drums stay non-melodic.",
+      "assertions": {
+        "bass": {
+          "energy_ratio_range": [0.24, 0.33],
+          "top_chroma_prefix": ["A", "F"]
+        },
+        "drums": {
+          "energy_ratio_range": [0.2, 0.3],
+          "melodic_ratio_max": 0.01
+        },
+        "other": {
+          "energy_ratio_range": [0.18, 0.26],
+          "top_chroma_prefix": ["A", "E", "F"]
+        },
+        "vocals": {
+          "energy_ratio_range": [0.2, 0.28],
+          "melodic_ratio_max": 0.03
+        }
+      }
+    },
+    {
+      "segment_id": 95342,
+      "type": "melodic",
+      "start": 78.59954833984375,
+      "end": 102.79473876953125,
+      "notes": "Melodic section pivots bass and harmonic content toward A-C-E-G while drums dominate energy.",
+      "assertions": {
+        "bass": {
+          "energy_ratio_range": [0.1, 0.18],
+          "top_chroma_contains": ["A", "C"]
+        },
+        "drums": {
+          "energy_ratio_range": [0.38, 0.5],
+          "melodic_ratio_max": 0.02
+        },
+        "other": {
+          "energy_ratio_range": [0.2, 0.3],
+          "top_chroma_contains": ["A", "C"]
+        },
+        "vocals": {
+          "energy_ratio_range": [0.12, 0.24],
+          "melodic_ratio_max": 0.01
+        }
+      }
+    },
+    {
+      "segment_id": 95343,
+      "type": "verse",
+      "start": 102.79473876953125,
+      "end": 230.92245483398438,
+      "notes": "The long return section falls back to the earlier A-F-E-D bass and A-E-F-C harmonic bed.",
+      "assertions": {
+        "bass": {
+          "energy_ratio_range": [0.22, 0.32],
+          "top_chroma_prefix": ["A", "F"]
+        },
+        "drums": {
+          "energy_ratio_range": [0.22, 0.32],
+          "melodic_ratio_max": 0.01
+        },
+        "other": {
+          "energy_ratio_range": [0.18, 0.27],
+          "top_chroma_prefix": ["A", "E", "F"]
+        },
+        "vocals": {
+          "energy_ratio_range": [0.2, 0.28],
+          "melodic_ratio_max": 0.03
+        }
+      }
+    },
+    {
+      "segment_id": 95344,
+      "type": "outro",
+      "start": 230.92245483398438,
+      "end": 236.35591836734693,
+      "notes": "Outro is mostly harmonic tail plus bass; vocals nearly disappear and drums collapse.",
+      "assertions": {
+        "bass": {
+          "energy_ratio_range": [0.34, 0.45],
+          "top_chroma_contains": ["A", "F"]
+        },
+        "drums": {
+          "energy_ratio_range": [0.03, 0.1],
+          "melodic_ratio_max": 0.01
+        },
+        "other": {
+          "energy_ratio_range": [0.48, 0.58],
+          "top_chroma_prefix": ["A", "E"]
+        },
+        "vocals": {
+          "energy_ratio_range": [0.0, 0.02],
+          "melodic_ratio_max": 0.01
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+name: karaoke_clean
+description: Clean instrumental-oriented path for minus generation.
+settings:
+  dry_run: true
+  sample_rate: 44100
+  output_format: flac
+  save_intermediate: true
+
+targets:
+  - vocals
+  - instrumental_mix
+
+phases:
+  - id: coarse_split
+    label: Hybrid vocals/instrumental
+    steps:
+      - service: bsroformer-worker
+        task: coarse_6stem
+        model: roformer-model-bs-roformer-sw-by-jarredou
+        output_bus: coarse_6stem
+        outputs: [vocals, drums, bass, guitar, piano, other]
+
+      - service: demucs-worker
+        task: coarse_vdbo_validation
+        model: htdemucs_ft
+        output_bus: demucs_validation
+        outputs: [vocals, drums, bass, other]
+
+  - id: cleanup
+    label: Cleanup
+    steps:
+      - stem: vocals
+        service: bsroformer-worker
+        task: vocals_resurrection
+        model: roformer-model-bs-roformer-vocals-resurrection-by-unwa
+
+      - stem: instrumental_mix
+        service: bsroformer-worker
+        task: instrumental_resurrection
+        model: roformer-model-bs-roformer-instrumental-resurrection-by-unwa
