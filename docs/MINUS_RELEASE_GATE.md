@@ -34,23 +34,33 @@ whether material correlated with the source-minus residual is still present in t
 - `blocked_for_listening`: the selected minus is diagnostic-only because it still contains vocal
   residue or loses instrumental presence/air.
 
+These statuses are internal proxy-gate statuses for adaptive profile selection only. They are not a
+delivery contract and must not be exposed as a listen-pack or release-ready result by
+`adaptive_minus_repair.py`.
+
 ## Manifest Fields
 
 - `selected_minus_release_gate`: release status, thresholds, summary, and blockers for the selected
   candidate.
 - `candidates[*].minus_release_gate`: the same release check for each ranked candidate.
-- `selected_artifacts.release_status`: `release_ready` or `diagnostic_only`.
-- `delivery_status`: `accepted` only when the selected gate is `release_ready`; otherwise `blocked`.
-- `delivery_allowed`: `true` only when the selected gate is `release_ready`.
-- `presentation_status`: `accepted_for_listen_pack` only when `delivery_allowed=true`; otherwise
-  `blocked_from_listen_pack`.
-- `selected_artifacts.delivery_status`, `selected_artifacts.delivery_allowed`, and
-  `selected_artifacts.presentation_status`: the same delivery lock fields for the copied selected
-  minus artifact.
+- `selected_artifacts.release_status`: always `not_release_ready` for controller-selected
+  candidates.
+- `candidate_status`: `selected_candidate_only`.
+- `delivery_status`: `candidate_only`.
+- `delivery_allowed`: always `false` in `adaptive_manifest.json`.
+- `presentation_status`: `blocked_until_downstream_delivery_gates`.
+- `requires_post_judge`: always `true`.
+- `internal_minus_gate_status` and `internal_minus_release_status`: copied from the internal
+  `selected_minus_release_gate` so downstream gates can inspect the proxy result without treating it
+  as a delivery decision.
+- `selected_artifacts.delivery_status`, `selected_artifacts.delivery_allowed`,
+  `selected_artifacts.presentation_status`, and `selected_artifacts.requires_post_judge`: the same
+  candidate-only lock fields for the copied selected minus artifact.
 
-When `--listen-dir` is used, `adaptive_minus_repair.py` may copy the selected minus into the listen
-directory only if `delivery_allowed=true`. Blocked candidates can remain in the run directory as
-diagnostic artifacts, but they are not listen-pack deliverables.
+When `--listen-dir` is used, `adaptive_minus_repair.py` must not copy the selected minus into the
+listen directory as an accepted artifact. The selected FLAC remains in the run directory as a
+candidate-only artifact until a downstream self-judge/result-judge/listen-preview pipeline accepts
+it.
 
 This gate does not claim SDR/SI-SDR without isolated ground truth stems. It is a proxy release
 guard for the clean-minus listening workflow.

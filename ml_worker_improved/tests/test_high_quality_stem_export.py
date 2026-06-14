@@ -9,6 +9,7 @@ from unittest.mock import patch
 import soundfile as sf
 import numpy as np
 
+import worker.high_quality_stem_export as hq_export
 from worker.high_quality_stem_export import (
     HYBRID_BS_STEM_EXPORT_MODEL,
     HYBRID_STAGE1_MODEL,
@@ -905,6 +906,101 @@ class TestHighQualityStemExport(unittest.TestCase):
             self.assertEqual(manifest["stems"]["other"]["channels"], 2)
             self.assertEqual(manifest["stems"]["melody"]["active_frame_count"], 80)
             self.assertEqual(separate_mock.call_args.kwargs["model_name"], DEFAULT_STEM_EXPORT_MODEL)
+
+    @patch("worker.high_quality_stem_export.separate_track_stems_full_res")
+    @patch("worker.high_quality_stem_export.verify_gpu_inference_device", create=True)
+    def test_export_track_stems_full_res_records_gpu_execution_contract(self, cuda_mock, separate_mock):
+        cuda_mock.return_value = {
+            "cuda_available": True,
+            "requested_device": "cuda",
+            "resolved_device": "cuda",
+            "device_count": 1,
+            "device_name": "Unit Test GPU",
+        }
+        separate_mock.return_value = {
+            "bass": np.full((44100, 2), 0.25, dtype=np.float32),
+            "other": np.full((44100, 2), 0.5, dtype=np.float32),
+            "vocals": np.full((44100, 2), 0.125, dtype=np.float32),
+            "drums": np.full((44100, 2), 0.2, dtype=np.float32),
+            "guitar": np.full((44100, 2), 0.01, dtype=np.float32),
+            "piano": np.full((44100, 2), 0.005, dtype=np.float32),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = export_track_stems_full_res(
+                "audio/example.mp3",
+                temp_dir,
+                device="cuda",
+                include_melody_stem=False,
+            )
+            saved = json.loads((Path(temp_dir) / "stem_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["execution_contract"]["expected_acceleration_mode"], "gpu_inference_then_cpu_dsp_scoring")
+        self.assertEqual(manifest["execution_contract"]["gpu_inference_required"], True)
+        self.assertEqual(manifest["execution_contract"]["gpu_inference_skipped"], False)
+        self.assertEqual(manifest["execution_contract"]["cuda_preflight"]["device_name"], "Unit Test GPU")
+        self.assertEqual(saved["execution_contract"], manifest["execution_contract"])
+        cuda_mock.assert_called_once_with("cuda")
+
+    @patch("worker.high_quality_stem_export.torch.cuda.is_available", return_value=False)
+    def test_verify_gpu_inference_device_rejects_cuda_when_unavailable(self, _cuda_available_mock):
+        with self.assertRaisesRegex(RuntimeError, "CUDA inference required"):
+            hq_export.verify_gpu_inference_device("cuda")
+
+    def test_bs_roformer_stage_fails_closed_instead_of_allowing_cpu_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo_path = root / "repo"
+            config_path = root / "config.yaml"
+            checkpoint_path = root / "model.ckpt"
+            source_path = root / "source.wav"
+            repo_path.mkdir()
+            (repo_path / "inference.py").write_text("# fake inference", encoding="utf-8")
+            config_path.write_text("inference:\n  num_overlap: 4\n", encoding="utf-8")
+            checkpoint_path.write_bytes(b"fake")
+            sf.write(source_path, np.zeros((128, 2), dtype=np.float32), hq_export.SEPARATION_SAMPLE_RATE)
+
+            executed_commands: list[list[str]] = []
+
+            def fake_run(command, *, cwd, capture_output, text, check):
+                executed_commands.append([str(part) for part in command])
+                store_dir = Path(command[command.index("--store_dir") + 1])
+                audio = np.zeros((128, 2), dtype=np.float32)
+                sf.write(store_dir / "vocals.flac", audio, hq_export.SEPARATION_SAMPLE_RATE)
+                sf.write(store_dir / "instrumental.flac", audio, hq_export.SEPARATION_SAMPLE_RATE)
+
+                class Completed:
+                    stdout = ""
+                    stderr = ""
+
+                return Completed()
+
+            with patch("worker.high_quality_stem_export.resolve_torch_device", return_value="cuda") as resolve_mock:
+                with patch("worker.high_quality_stem_export.subprocess.run", side_effect=fake_run):
+                    hq_export._load_bs_roformer_vocals_other(
+                        source_path,
+                        device="cuda",
+                        bs_roformer_runtime={
+                            "repoPath": str(repo_path),
+                            "configPath": str(config_path),
+                            "checkpointPath": str(checkpoint_path),
+                            "requestedDevice": "cuda",
+                            "deviceIds": ["0"],
+                            "forceCpu": False,
+                            "extractInstrumental": True,
+                            "useTta": False,
+                            "disableDetailedPbar": True,
+                            "filenameTemplate": "{instrument}",
+                            "configOverrideYaml": "",
+                            "extraCliArgs": [],
+                        },
+                    )
+
+            self.assertTrue(executed_commands)
+            resolve_mock.assert_called_once()
+            self.assertEqual(resolve_mock.call_args.kwargs["allow_cpu"], False)
+            self.assertIn("--device_ids", executed_commands[0])
+            self.assertNotIn("--force_cpu", executed_commands[0])
 
     @patch("worker.high_quality_stem_export.separate_track_stems_full_res")
     def test_export_track_stems_full_res_defaults_to_stem_parser_profile_with_melody(self, separate_mock):

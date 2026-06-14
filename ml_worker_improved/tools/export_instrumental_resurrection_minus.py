@@ -312,8 +312,20 @@ def main() -> int:
         )
 
         elapsed_sec = round(time.perf_counter() - started_at, 3)
+        target_stem_artifact = {
+            "target_stem": "minus",
+            "path": str(minus_flac_path),
+            "source": "instrumental_resurrection_model_output",
+            "source_stems": [str(args.target_instrument)],
+        }
         manifest = {
             "source_audio_path": str(source_audio_path),
+            "target_stem": "minus",
+            "target_audio_path": str(minus_flac_path),
+            "target_stem_artifact": target_stem_artifact,
+            "stems": {
+                "minus": target_stem_artifact,
+            },
             "instrumental_resurrection_output_path": str(minus_flac_path),
             "instrumental_resurrection_model_output_name": target_output_path.name,
             "artifacts": {

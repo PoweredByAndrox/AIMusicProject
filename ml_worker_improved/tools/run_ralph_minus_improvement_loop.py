@@ -6,6 +6,7 @@ import math
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ from docker_runtime import require_docker_runtime  # noqa: E402
 
 
 EPSILON = 1e-12
+ROUTE_NAME = "ralph_minus_improvement_loop"
+PROGRESS_LOG_NAME = "ralph_minus_improvement_progress.jsonl"
 
 
 @dataclass(frozen=True)
@@ -397,6 +400,57 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def write_audio(path: Path, audio: np.ndarray, sample_rate: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(path), audio.astype(np.float32, copy=False), sample_rate)
+    return path
+
+
+def emit_progress(progress_path: Path, **payload: Any) -> None:
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "route_name": ROUTE_NAME,
+        "acceleration_mode": "external_only_cpu_scoring",
+        "gpu_inference_skipped": True,
+        **payload,
+    }
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+    with progress_path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(line + "\n")
+    print(line, flush=True)
+
+
+def prepare_recipe_inputs(
+    *,
+    raw_audio_path: Path,
+    base_minus_path: Path,
+    guide_minus_path: Path,
+    primary_vocals_path: Path,
+    secondary_vocals_path: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    base_audio, sample_rate = load_audio(base_minus_path)
+    raw_audio, _ = load_audio(raw_audio_path, sample_rate)
+    guide_minus, _ = load_audio(guide_minus_path, sample_rate)
+    primary_vocals, _ = load_audio(primary_vocals_path, sample_rate)
+    secondary_vocals, _ = load_audio(secondary_vocals_path, sample_rate)
+    raw_audio, base_audio, guide_minus, primary_vocals, secondary_vocals = match_length(
+        [raw_audio, base_audio, guide_minus, primary_vocals, secondary_vocals]
+    )
+    return {
+        "sample_rate": sample_rate,
+        "raw_audio_path": write_audio(output_dir / "raw_audio.flac", raw_audio, sample_rate),
+        "base_minus_path": write_audio(output_dir / "base_minus.flac", base_audio, sample_rate),
+        "guide_minus_path": write_audio(output_dir / "guide_minus.flac", guide_minus, sample_rate),
+        "primary_vocals_path": write_audio(output_dir / "primary_vocals.flac", primary_vocals, sample_rate),
+        "secondary_vocals_path": write_audio(
+            output_dir / "secondary_vocals.flac",
+            secondary_vocals,
+            sample_rate,
+        ),
+    }
+
+
 def run_candidate_recipe(
     *,
     recipe: MinusCandidateRecipe,
@@ -487,6 +541,7 @@ def exit_code_for_manifest(manifest: dict[str, Any]) -> int:
 
 
 def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]:
+    started_at = time.perf_counter()
     raw_audio_path = Path(args.raw_audio_path)
     base_minus_path = Path(args.base_minus_path)
     guide_minus_path = Path(args.guide_minus_path)
@@ -497,7 +552,54 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
     reference_base_path = (
         Path(args.reference_base_path) if args.reference_base_path else base_minus_path
     )
+    reference_base_was_base = reference_base_path == base_minus_path
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = output_dir / PROGRESS_LOG_NAME
+    if progress_path.exists():
+        progress_path.unlink()
+    manifest_path = output_dir / "ralph_minus_improvement_manifest.json"
+    emit_progress(
+        progress_path,
+        phase="start",
+        reason="external_only_cpu_dsp_scoring",
+        raw_audio_path=str(raw_audio_path),
+        base_minus_path=str(base_minus_path),
+        guide_minus_path=str(guide_minus_path),
+        primary_vocals_path=str(primary_vocals_path),
+        secondary_vocals_path=str(secondary_vocals_path),
+        output_manifest_path=str(manifest_path),
+    )
+    emit_progress(
+        progress_path,
+        phase="input_normalization_start",
+        elapsed_sec=round(time.perf_counter() - started_at, 3),
+    )
+    prepared_inputs = prepare_recipe_inputs(
+        raw_audio_path=raw_audio_path,
+        base_minus_path=base_minus_path,
+        guide_minus_path=guide_minus_path,
+        primary_vocals_path=primary_vocals_path,
+        secondary_vocals_path=secondary_vocals_path,
+        output_dir=output_dir / "normalized_inputs",
+    )
+    emit_progress(
+        progress_path,
+        phase="input_normalization_end",
+        sample_rate=prepared_inputs["sample_rate"],
+        raw_audio_path=str(prepared_inputs["raw_audio_path"]),
+        base_minus_path=str(prepared_inputs["base_minus_path"]),
+        guide_minus_path=str(prepared_inputs["guide_minus_path"]),
+        primary_vocals_path=str(prepared_inputs["primary_vocals_path"]),
+        secondary_vocals_path=str(prepared_inputs["secondary_vocals_path"]),
+        elapsed_sec=round(time.perf_counter() - started_at, 3),
+    )
+    raw_audio_path = Path(prepared_inputs["raw_audio_path"])
+    base_minus_path = Path(prepared_inputs["base_minus_path"])
+    guide_minus_path = Path(prepared_inputs["guide_minus_path"])
+    primary_vocals_path = Path(prepared_inputs["primary_vocals_path"])
+    secondary_vocals_path = Path(prepared_inputs["secondary_vocals_path"])
+    if reference_base_was_base:
+        reference_base_path = base_minus_path
 
     base_audio, sample_rate = load_audio(base_minus_path)
     reference_base_audio, _ = load_audio(reference_base_path, sample_rate)
@@ -515,7 +617,16 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
 
     policy = MinusAcceptancePolicy()
     candidate_records: list[dict[str, Any]] = []
-    for recipe in default_candidate_recipes():
+    recipes = default_candidate_recipes()
+    for index, recipe in enumerate(recipes, start=1):
+        emit_progress(
+            progress_path,
+            phase="candidate_start",
+            candidate_index=index,
+            candidate_count=len(recipes),
+            candidate_name=recipe.name,
+            elapsed_sec=round(time.perf_counter() - started_at, 3),
+        )
         candidate_record = run_candidate_recipe(
             recipe=recipe,
             raw_audio_path=raw_audio_path,
@@ -562,6 +673,17 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         )
         candidate_record["evaluation"] = evaluation
         candidate_records.append(candidate_record)
+        emit_progress(
+            progress_path,
+            phase="candidate_end",
+            candidate_index=index,
+            candidate_count=len(recipes),
+            candidate_name=recipe.name,
+            candidate_status=evaluation["status"],
+            blocker_count=len(evaluation["blockers"]),
+            score=evaluation["score"],
+            elapsed_sec=round(time.perf_counter() - started_at, 3),
+        )
 
     accepted_candidates = [
         candidate for candidate in candidate_records if candidate["evaluation"]["status"] == "accepted"
@@ -603,6 +725,12 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             "guide_minus_path": str(guide_minus_path),
             "primary_vocals_path": str(primary_vocals_path),
             "secondary_vocals_path": str(secondary_vocals_path),
+            "normalized_inputs": {
+                key: str(value)
+                for key, value in prepared_inputs.items()
+                if key.endswith("_path")
+            },
+            "normalized_sample_rate": prepared_inputs["sample_rate"],
         },
         "policy": policy.__dict__,
         "base_summary": base_summary,
@@ -623,9 +751,19 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             "accepted_for_listen_pack" if selected_candidate else "blocked_from_listen_pack"
         ),
         "selected_artifacts": selected_artifacts,
+        "progress_log": str(progress_path),
     }
-    manifest_path = output_dir / "ralph_minus_improvement_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    emit_progress(
+        progress_path,
+        phase="end",
+        release_status=manifest["release_status"],
+        delivery_status=manifest["delivery_status"],
+        delivery_allowed=manifest["delivery_allowed"],
+        selected_candidate=manifest["selected_candidate"],
+        output_manifest_path=str(manifest_path),
+        elapsed_sec=round(time.perf_counter() - started_at, 3),
+    )
     if listen_dir is not None and selected_candidate is not None:
         (listen_dir / "ralph_minus_improvement_manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False),

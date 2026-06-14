@@ -218,6 +218,61 @@ def test_minus_manifest_with_persisted_gate_blocks_non_finite_metrics(tmp_path: 
     assert item["release_status_drift"] is True
 
 
+def test_minus_candidate_only_lock_is_not_release_status_drift(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "minus" / "adaptive_manifest.json"
+    _write_json(
+        manifest_path,
+        {
+            "mode": "adaptive_minus_repair_controller",
+            "selected_profile": "pure_base",
+            "selected_score": 0.53,
+            "candidate_status": "selected_candidate_only",
+            "delivery_status": "candidate_only",
+            "delivery_allowed": False,
+            "presentation_status": "blocked_until_downstream_delivery_gates",
+            "release_status": "not_release_ready",
+            "requires_post_judge": True,
+            "candidates": [
+                {
+                    "profile_name": "pure_base",
+                    "metrics": {
+                        "vocal_residue_corr": 0.0,
+                        "vocal_to_instrumental_rms_ratio_db": -120.0,
+                        "presence_band_ratio_drift_db": 0.0,
+                        "air_band_ratio_drift_db": 0.0,
+                    },
+                    "focus_metrics": {},
+                }
+            ],
+            "selected_minus_release_gate": {
+                "status": "release_ready",
+                "release_status": "release_ready",
+                "blockers": [],
+            },
+            "selected_artifacts": {
+                "selected_minus_flac": "/app/out/02_adaptive_selected_minus.flac",
+                "candidate_status": "selected_candidate_only",
+                "delivery_status": "candidate_only",
+                "delivery_allowed": False,
+                "presentation_status": "blocked_until_downstream_delivery_gates",
+                "release_status": "not_release_ready",
+                "requires_post_judge": True,
+                "internal_minus_release_status": "release_ready",
+            },
+        },
+    )
+
+    item = evaluator.evaluate_manifest_path(manifest_path)
+
+    assert item["release_status"] == "release_ready"
+    assert item["gate_status"] == "release_ready"
+    assert item["artifact_release_status"] == "not_release_ready"
+    assert item["artifact_delivery_status"] == "candidate_only"
+    assert item["artifact_requires_post_judge"] is True
+    assert item["release_status_drift"] is False
+    assert item["listen_output_path"] is None
+
+
 def test_posthoc_evaluation_scans_only_supported_manifests(tmp_path: Path) -> None:
     _write_json(
         tmp_path / "vocal" / "adaptive_vocal_manifest.json",

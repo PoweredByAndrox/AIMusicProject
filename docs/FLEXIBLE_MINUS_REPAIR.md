@@ -206,6 +206,18 @@ candidates/<profile>/02_flexible_minus_repaired.flac
 следующий запуск с тем же `--feedback-store` изменит profile priors без изменения бизнес-логики
 нижнего repair-скрипта.
 
+Delivery lock:
+
+- `adaptive_minus_repair.py` is a candidate generator/controller, not the final delivery route.
+- `selected_minus_release_gate` remains an internal proxy gate for ranking and downstream evidence.
+- The selected adaptive artifact is written as `candidate_status=selected_candidate_only`,
+  `delivery_status=candidate_only`, `delivery_allowed=false`,
+  `presentation_status=blocked_until_downstream_delivery_gates`,
+  `release_status=not_release_ready`, and `requires_post_judge=true`.
+- The controller must not copy `02_adaptive_selected_minus.flac` into the listen directory as an
+  accepted artifact. A later self-judge/result-judge/listen-preview pipeline must accept it before
+  any listen-pack delivery.
+
 ## Vocal-guided minus layer
 
 `ml_worker_improved/tools/build_vocal_guided_minus.py` - Docker-only слой для случая, когда уже есть
@@ -218,6 +230,11 @@ Safety contract:
 - `01_selected_vocals.flac` копируется как есть после ресемплинга/выравнивания с raw mix;
 - `02_raw_minus_from_selected_vocal.flac` является audit-кандидатом `raw - vocal`;
 - `03_vocal_guided_minus.flac` является final minus только внутри audit/experiment workflow и не является clean-minus baseline;
+- `vocal_guided_minus_manifest.json` теперь явно пишет `candidate_only=true`, `delivery_status=candidate_only`,
+  `delivery_allowed=false`, `presentation_status=blocked_until_judged`, `release_status=not_release_ready`
+  и `requires_post_judge=true`;
+- route пишет structured progress events и помечает `gpu_inference_skipped=true`, потому что использует уже готовые
+  vocal/minus candidates и CPU/DSP subtraction, а не neural inference;
 - если `--base-minus-path` задан, final minus не заменяет base полностью, а смешивается через
   `base_blend_inactive` и `base_blend_active`;
 - без verified isolated stems этот слой остаётся proxy/listening workflow, не SDR/SI-SDR verdict.

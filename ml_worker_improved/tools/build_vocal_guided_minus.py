@@ -5,6 +5,7 @@ import json
 import math
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,24 @@ from apply_flexible_minus_repair import (  # noqa: E402
 )
 
 EPSILON = 1e-12
+START_TIME = time.monotonic()
+
+SAFETY_FLAGS = {
+    "reference_required": False,
+    "human_csv_required": False,
+    "training_started": False,
+    "fine_tune_started": False,
+    "models_changed": False,
+    "model_registry_edited": False,
+    "cleanup_routes_added": False,
+    "thresholds_relaxed": False,
+    "release_ready": False,
+}
+
+
+def progress(phase: str, **fields: Any) -> None:
+    payload = {"phase": phase, "elapsed_sec": round(time.monotonic() - START_TIME, 3), **fields}
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
 
 
 @dataclass(frozen=True)
@@ -185,6 +204,16 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
     base_minus_path = Path(args.base_minus_path) if args.base_minus_path else None
     output_dir = Path(args.output_dir)
     listen_dir = Path(args.listen_dir) if args.listen_dir else None
+    manifest_path = output_dir / "vocal_guided_minus_manifest.json"
+
+    progress(
+        "start",
+        route="vocal_guided_minus_builder",
+        acceleration_mode="external_only_cpu_dsp",
+        gpu_inference_skipped=True,
+        gpu_inference_skipped_reason="route uses existing vocal/minus candidates and CPU/DSP subtraction only",
+        output_manifest_path=str(manifest_path),
+    )
 
     if not raw_audio_path.exists():
         raise FileNotFoundError(raw_audio_path)
@@ -216,6 +245,14 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
         raw_audio, base_minus = match_length(raw_audio, base_minus)
         selected_vocals = selected_vocals[: raw_audio.shape[0]]
 
+    progress(
+        "input_normalized",
+        sample_rate=int(raw_sample_rate),
+        frames=int(raw_audio.shape[0]),
+        channels=int(raw_audio.shape[1]),
+        has_base_minus=base_minus is not None,
+    )
+
     tuning = VocalGuidedMinusTuning(
         vocal_subtract_gain=float(args.vocal_subtract_gain),
         base_blend_active=float(args.base_blend_active),
@@ -245,6 +282,12 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
     }
     if base_minus is not None:
         artifacts["base_minus_flac"] = _artifact(output_dir / "04_base_minus_reference.flac", base_minus, raw_sample_rate)
+    progress(
+        "output_written",
+        output_dir=str(output_dir),
+        vocal_guided_minus_path=str(artifacts["vocal_guided_minus_flac"]["path"]),
+        raw_minus_path=str(artifacts["raw_minus_from_selected_vocal_flac"]["path"]),
+    )
 
     raw_minus_before_limiter = (
         raw_audio - selected_vocals * float(tuning.vocal_subtract_gain)
@@ -252,9 +295,50 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
     raw_subtraction_error = raw_audio - (raw_minus_before_limiter + selected_vocals)
     post_limiter_reconstruction_error = raw_audio - (raw_minus + selected_vocals)
     post_limiter_delta = raw_minus - raw_minus_before_limiter
+    progress(
+        "metrics_start",
+        metric_count=7 if base_minus is None else 8,
+        frames=int(raw_audio.shape[0]),
+        sample_rate=int(raw_sample_rate),
+    )
+    raw_ref_metrics = audio_metrics(raw_audio, raw_sample_rate)
+    progress("metric_computed", metric="raw_ref")
+    selected_vocals_metrics = audio_metrics(selected_vocals, raw_sample_rate)
+    progress("metric_computed", metric="selected_vocals")
+    raw_minus_metrics = audio_metrics(raw_minus, raw_sample_rate)
+    progress("metric_computed", metric="raw_minus_from_selected_vocal")
+    vocal_guided_minus_metrics = audio_metrics(guided_minus, raw_sample_rate)
+    progress("metric_computed", metric="vocal_guided_minus")
+    reconstruction_error_metrics = audio_metrics(raw_subtraction_error, raw_sample_rate)
+    progress("metric_computed", metric="reconstruction_error")
+    post_limiter_reconstruction_error_metrics = audio_metrics(post_limiter_reconstruction_error, raw_sample_rate)
+    progress("metric_computed", metric="post_limiter_reconstruction_error")
+    post_limiter_delta_metrics = audio_metrics(post_limiter_delta, raw_sample_rate)
+    progress("metric_computed", metric="post_limiter_delta")
+    base_to_guided_minus_metrics = None
+    if base_minus is not None:
+        base_to_guided_minus_metrics = repair_metric_summary(base_minus, guided_minus, raw_sample_rate)
+        progress("metric_computed", metric="base_to_guided_minus")
+    progress("metrics_end")
+
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "mode": "vocal_guided_minus_builder",
+        "stem_type": "minus",
+        "candidate_only": True,
+        "delivery_status": "candidate_only",
+        "delivery_allowed": False,
+        "presentation_status": "blocked_until_judged",
+        "release_status": "not_release_ready",
+        "listenable": False,
+        "deliverable": False,
+        "can_mark_release_ready": False,
+        "requires_post_judge": True,
+        "is_clean_minus_baseline": False,
+        "baseline_allowed": False,
+        "route_allowed_as": "audited_candidate_only",
+        "no_per_track_hardcoded_timestamps": True,
+        "uses_existing_vocal_candidate": True,
         "raw_audio_path": str(raw_audio_path),
         "selected_vocals_path": str(selected_vocals_path),
         "base_minus_path": None if base_minus_path is None else str(base_minus_path),
@@ -277,22 +361,26 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
             "channels": int(guided_minus.shape[1]),
         },
         "metrics": {
-            "raw_ref": audio_metrics(raw_audio, raw_sample_rate),
-            "selected_vocals": audio_metrics(selected_vocals, raw_sample_rate),
-            "raw_minus_from_selected_vocal": audio_metrics(raw_minus, raw_sample_rate),
-            "vocal_guided_minus": audio_metrics(guided_minus, raw_sample_rate),
-            "reconstruction_error_rms_dbfs": audio_metrics(raw_subtraction_error, raw_sample_rate)["rms_dbfs"],
-            "post_limiter_reconstruction_error_rms_dbfs": audio_metrics(
-                post_limiter_reconstruction_error,
-                raw_sample_rate,
-            )["rms_dbfs"],
-            "post_limiter_delta_rms_dbfs": audio_metrics(post_limiter_delta, raw_sample_rate)["rms_dbfs"],
-            "base_to_guided_minus": None
-            if base_minus is None
-            else repair_metric_summary(base_minus, guided_minus, raw_sample_rate),
+            "raw_ref": raw_ref_metrics,
+            "selected_vocals": selected_vocals_metrics,
+            "raw_minus_from_selected_vocal": raw_minus_metrics,
+            "vocal_guided_minus": vocal_guided_minus_metrics,
+            "reconstruction_error_rms_dbfs": reconstruction_error_metrics["rms_dbfs"],
+            "post_limiter_reconstruction_error_rms_dbfs": post_limiter_reconstruction_error_metrics["rms_dbfs"],
+            "post_limiter_delta_rms_dbfs": post_limiter_delta_metrics["rms_dbfs"],
+            "base_to_guided_minus": base_to_guided_minus_metrics,
         },
         "debug": debug,
         "artifacts": artifacts,
+        "safety": dict(SAFETY_FLAGS),
+        "forbidden_actions": [
+            "do_not_use_as_clean_minus_baseline",
+            "do_not_export_as_delivery_without_post_judge_acceptance",
+            "do_not_mark_release_ready_from_builder_manifest",
+            "do_not_relax_gates",
+            "do_not_require_reference_stems",
+            "do_not_start_training",
+        ],
         "artifact_contract": {
             "01_selected_vocals.flac": "The selected upstream vocal stem, resampled/matched to raw mix.",
             "02_raw_minus_from_selected_vocal.flac": "Raw mix minus selected vocal. Highest instrumental preservation, highest risk if vocal estimate misses words.",
@@ -300,7 +388,6 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
             "04_base_minus_reference.flac": "Optional matched base minus reference copied only when --base-minus-path is provided.",
         },
     }
-    manifest_path = output_dir / "vocal_guided_minus_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     if listen_dir is not None:
@@ -338,6 +425,13 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
         manifest["listen_dir"] = str(listen_dir)
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    progress(
+        "end",
+        output_manifest_path=str(manifest_path),
+        delivery_status=manifest["delivery_status"],
+        delivery_allowed=manifest["delivery_allowed"],
+        requires_post_judge=manifest["requires_post_judge"],
+    )
     print(
         json.dumps(
             {

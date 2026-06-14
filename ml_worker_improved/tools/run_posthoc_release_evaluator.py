@@ -160,6 +160,18 @@ def _selected_artifacts(manifest: dict[str, Any]) -> dict[str, Any]:
     return _as_dict(manifest.get("selected_artifacts"))
 
 
+def _is_candidate_only_delivery_lock(
+    manifest: dict[str, Any],
+    selected_artifacts: dict[str, Any],
+) -> bool:
+    return (
+        manifest.get("delivery_status") == "candidate_only"
+        and selected_artifacts.get("delivery_status") == "candidate_only"
+        and selected_artifacts.get("release_status") == "not_release_ready"
+        and selected_artifacts.get("requires_post_judge") is True
+    )
+
+
 def evaluate_vocal_manifest(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     action_contract, defect_gate, issue_ledger, rebuilt_fields = _build_vocal_release_fields(manifest)
     selected_artifacts = _selected_artifacts(manifest)
@@ -244,6 +256,7 @@ def evaluate_minus_manifest(manifest_path: Path, manifest: dict[str, Any]) -> di
     selected_gate, rebuilt_fields = _build_minus_release_fields(manifest)
     selected_artifacts = _selected_artifacts(manifest)
     artifact_release_status = selected_artifacts.get("release_status")
+    candidate_only_delivery_lock = _is_candidate_only_delivery_lock(manifest, selected_artifacts)
     release_status = selected_gate.get("release_status", "diagnostic_only")
     blockers = _as_list(selected_gate.get("blockers"))
     return {
@@ -255,7 +268,15 @@ def evaluate_minus_manifest(manifest_path: Path, manifest: dict[str, Any]) -> di
         "release_status": release_status,
         "gate_status": selected_gate.get("status", "blocked_for_listening"),
         "artifact_release_status": artifact_release_status,
-        "release_status_drift": bool(artifact_release_status is not None and artifact_release_status != release_status),
+        "artifact_candidate_status": selected_artifacts.get("candidate_status"),
+        "artifact_delivery_status": selected_artifacts.get("delivery_status"),
+        "artifact_requires_post_judge": selected_artifacts.get("requires_post_judge"),
+        "candidate_only_delivery_lock": candidate_only_delivery_lock,
+        "release_status_drift": bool(
+            artifact_release_status is not None
+            and artifact_release_status != release_status
+            and not candidate_only_delivery_lock
+        ),
         "rebuilt_fields": rebuilt_fields,
         "blocker_reasons": _blocker_reasons(blockers),
         "blocker_labels": _blocker_labels(blockers),

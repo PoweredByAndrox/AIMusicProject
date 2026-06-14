@@ -66,6 +66,45 @@ def _emit_progress(message: str) -> None:
     print(f"[hq_stem_export] {message}", flush=True)
 
 
+def verify_gpu_inference_device(requested: str | None = None) -> dict[str, Any]:
+    requested_device = str(requested or "cuda").strip().lower() or "cuda"
+    if requested_device == "cpu":
+        raise RuntimeError("CUDA inference required for high-quality stem export but CPU was requested")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA inference required for high-quality stem export but no visible GPU is available")
+    resolved_device = resolve_torch_device(
+        task_name="hq_stem_export",
+        requested=None if requested_device == "auto" else requested_device,
+        allow_cpu=False,
+    )
+    if resolved_device.type != "cuda":
+        raise RuntimeError(f"CUDA inference required for high-quality stem export but resolved device is {resolved_device}")
+    device_count = int(torch.cuda.device_count())
+    device_index = int(resolved_device.index or torch.cuda.current_device())
+    if device_index >= device_count:
+        raise RuntimeError(
+            "CUDA inference required for high-quality stem export but requested device index "
+            f"{device_index} is outside visible device count {device_count}"
+        )
+    return {
+        "cuda_available": True,
+        "requested_device": requested_device,
+        "resolved_device": str(resolved_device),
+        "device_count": device_count,
+        "device_name": str(torch.cuda.get_device_name(device_index)),
+    }
+
+
+def _build_gpu_execution_contract(cuda_preflight: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "docker_runtime_required": True,
+        "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
+        "gpu_inference_required": True,
+        "gpu_inference_skipped": False,
+        "cuda_preflight": dict(cuda_preflight),
+    }
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -249,7 +288,9 @@ def separate_track_stems_full_res(
         _emit_progress(f"EXIT separate_track_stems_full_res model={model_name} stems={list(stems.keys())}")
         return stems
 
-    resolved_device = str(resolve_torch_device(task_name="hq_stem_export", requested=device, allow_cpu=True))
+    resolved_device = str(resolve_torch_device(task_name="hq_stem_export", requested=device, allow_cpu=False))
+    if resolved_device == "cpu":
+        raise RuntimeError("CUDA inference required for high-quality stem export but resolved device is CPU")
     runtime = _normalize_demucs_runtime(demucs_runtime)
     model = _load_demucs_model(model_name, resolved_device)
     waveform, sample_rate = torchaudio.load(str(audio_path))
@@ -1159,7 +1200,7 @@ def _load_bs_roformer_vocals_other(
         )
 
     requested_device = "cpu" if bool(runtime["forceCpu"]) else _effective_requested_device(device, str(runtime["requestedDevice"]))
-    resolved_device = str(resolve_torch_device(task_name="hq_stem_export_bs_roformer", requested=requested_device, allow_cpu=True))
+    resolved_device = str(resolve_torch_device(task_name="hq_stem_export_bs_roformer", requested=requested_device, allow_cpu=False))
     with tempfile.TemporaryDirectory(prefix="bsroformer_input_") as input_dir, tempfile.TemporaryDirectory(prefix="bsroformer_output_") as output_dir:
         input_dir_path = Path(input_dir)
         output_dir_path = Path(output_dir)
@@ -2248,6 +2289,14 @@ def export_track_stems_full_res(
     resolved_audio_path = Path(audio_path)
     resolved_output_dir = Path(output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
+    cuda_preflight = verify_gpu_inference_device(device)
+    _emit_progress(
+        "cuda_preflight "
+        f"requested_device={cuda_preflight['requested_device']} "
+        f"resolved_device={cuda_preflight['resolved_device']} "
+        f"device_count={cuda_preflight['device_count']} "
+        f"device_name={cuda_preflight['device_name']}"
+    )
 
     raw_stems = separate_track_stems_full_res(
         resolved_audio_path,
@@ -2270,6 +2319,7 @@ def export_track_stems_full_res(
         "bleed_sharpening": bool(sharpen_bleed),
         "melody_stem_included": bool(include_melody_stem),
         "contract": _build_no_reference_stem_export_contract(route_name="full_res_stem_export"),
+        "execution_contract": _build_gpu_execution_contract(cuda_preflight),
         "stems": {},
     }
     if model_name == HYBRID_STEM_EXPORT_MODEL:
@@ -2418,6 +2468,14 @@ def export_track_stems_aggressive_melody_first(
     resolved_audio_path = Path(audio_path)
     resolved_output_dir = Path(output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
+    cuda_preflight = verify_gpu_inference_device(device)
+    _emit_progress(
+        "cuda_preflight "
+        f"requested_device={cuda_preflight['requested_device']} "
+        f"resolved_device={cuda_preflight['resolved_device']} "
+        f"device_count={cuda_preflight['device_count']} "
+        f"device_name={cuda_preflight['device_name']}"
+    )
 
     raw_stems = separate_track_stems_full_res(
         resolved_audio_path,
@@ -2437,6 +2495,7 @@ def export_track_stems_aggressive_melody_first(
         "bleed_sharpening": bool(sharpen_bleed),
         "melody_stem_included": True,
         "contract": _build_no_reference_stem_export_contract(route_name="aggressive_melody_first"),
+        "execution_contract": _build_gpu_execution_contract(cuda_preflight),
         "pipeline": {
             "mode": "aggressive_melody_first",
             "base_model": model_name,

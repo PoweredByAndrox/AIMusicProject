@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
+
+import numpy as np
+import soundfile as sf
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
@@ -168,6 +172,76 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_progress_log_records_external_only_cpu_scoring(self) -> None:
+        module = _load_module()
+        progress_path = self.temp_path / "ralph_minus_improvement_progress.jsonl"
+
+        module.emit_progress(
+            progress_path,
+            phase="start",
+            route_name="ralph_minus_improvement_loop",
+            acceleration_mode="external_only_cpu_scoring",
+            gpu_inference_skipped=True,
+            reason="external_only_cpu_dsp_scoring",
+        )
+
+        rows = [
+            json.loads(line)
+            for line in progress_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["phase"], "start")
+        self.assertEqual(rows[0]["route_name"], "ralph_minus_improvement_loop")
+        self.assertEqual(rows[0]["acceleration_mode"], "external_only_cpu_scoring")
+        self.assertTrue(rows[0]["gpu_inference_skipped"])
+        self.assertEqual(rows[0]["reason"], "external_only_cpu_dsp_scoring")
+
+    def test_recipe_inputs_are_resampled_to_base_sample_rate(self) -> None:
+        module = _load_module()
+        inputs_dir = self.temp_path / "inputs"
+        raw_path = self._write_audio(inputs_dir / "raw.flac", sample_rate=12000)
+        base_minus_path = self._write_audio(inputs_dir / "base.flac", sample_rate=8000)
+        guide_minus_path = self._write_audio(inputs_dir / "guide.flac", sample_rate=16000)
+        primary_vocals_path = self._write_audio(inputs_dir / "primary.flac", sample_rate=11025)
+        secondary_vocals_path = self._write_audio(inputs_dir / "secondary.flac", sample_rate=22050)
+
+        prepared = module.prepare_recipe_inputs(
+            raw_audio_path=raw_path,
+            base_minus_path=base_minus_path,
+            guide_minus_path=guide_minus_path,
+            primary_vocals_path=primary_vocals_path,
+            secondary_vocals_path=secondary_vocals_path,
+            output_dir=self.temp_path / "normalized",
+        )
+
+        sample_rates = {
+            key: sf.info(str(path)).samplerate
+            for key, path in prepared.items()
+            if key.endswith("_path")
+        }
+        self.assertEqual(set(sample_rates.values()), {8000})
+        self.assertEqual(prepared["sample_rate"], 8000)
+        self.assertTrue(str(prepared["raw_audio_path"]).endswith("raw_audio.flac"))
+
+    def _write_audio(self, path: Path, *, sample_rate: int) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frames = sample_rate // 2
+        audio = np.zeros((frames, 2), dtype=np.float32)
+        audio[:, 0] = np.linspace(-0.1, 0.1, frames, dtype=np.float32)
+        audio[:, 1] = audio[:, 0]
+        sf.write(path, audio, sample_rate)
+        return path
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self._temp_dir.name)
+
+    def tearDown(self) -> None:
+        self._temp_dir.cleanup()
 
 
 if __name__ == "__main__":

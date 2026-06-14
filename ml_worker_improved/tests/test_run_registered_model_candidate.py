@@ -7,7 +7,9 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
@@ -62,6 +64,33 @@ def _demo_registry(tmp_path: Path):
                     sys.executable,
                     "-c",
                     "import sys; print('stdout marker'); print('stderr marker', file=sys.stderr); raise SystemExit(7)",
+                ),
+                expected_manifest="{output_dir}/stem_manifest.json",
+            ),
+            ModelRegistryEntry(
+                model_id="demo_multistem_instrumental_model",
+                display_name="Demo multi-stem instrumental model",
+                family="test",
+                target_stems=("instrumental",),
+                output_stems=("vocals", "drums", "bass", "other"),
+                command_template=("python", "demo_multistem.py", "{source_audio_path}", "{output_dir}"),
+                expected_manifest="{output_dir}/stem_manifest.json",
+            ),
+            ModelRegistryEntry(
+                model_id="demo_hq_full_stem_exporter",
+                display_name="Demo HQ full stem exporter",
+                family="test",
+                target_stems=("instrumental",),
+                output_stems=("vocals", "drums", "bass", "other", "instrumental"),
+                command_template=(
+                    "python",
+                    "/app/tools/export_hq_stems_full.py",
+                    "{source_audio_path}",
+                    "{output_dir}",
+                    "--model-name",
+                    "htdemucs_6s",
+                    "--device",
+                    "{device}",
                 ),
                 expected_manifest="{output_dir}/stem_manifest.json",
             ),
@@ -187,6 +216,187 @@ def test_missing_expected_manifest_fails_after_command_without_fallback() -> Non
         failure_manifest = root / "candidate" / "registry_candidate_execution_manifest.json"
         assert failure_manifest.exists()
         assert "expected_manifest_missing" in failure_manifest.read_text(encoding="utf-8")
+
+
+def test_registered_multistem_instrumental_job_materializes_minus_target_manifest() -> None:
+    executor = _load_executor_module()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        sample_rate = 8000
+        source_path = root / "source.wav"
+        sf.write(source_path, np.zeros((8, 2), dtype=np.float32), sample_rate, subtype="FLOAT")
+
+        drums = np.full((8, 2), 0.10, dtype=np.float32)
+        bass = np.full((8, 2), 0.20, dtype=np.float32)
+        other = np.full((8, 2), -0.05, dtype=np.float32)
+        vocals = np.full((8, 2), 0.40, dtype=np.float32)
+
+        def fake_runner(command: list[str]) -> None:
+            output_dir = Path(command[3])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stem_arrays = {
+                "vocals": vocals,
+                "drums": drums,
+                "bass": bass,
+                "other": other,
+            }
+            stems = {}
+            for stem, audio in stem_arrays.items():
+                stem_path = output_dir / f"{stem}.wav"
+                sf.write(stem_path, audio, sample_rate, subtype="FLOAT")
+                stems[stem] = {"path": str(stem_path)}
+            (output_dir / "stem_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "model_id": "demo_multistem_instrumental_model",
+                        "contract": {
+                            "full_track": True,
+                            "fallback_used": False,
+                            "hidden_inference": False,
+                        },
+                        "stems": stems,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        manifest = executor.run_registered_model_candidate(
+            model_id="demo_multistem_instrumental_model",
+            source_audio_path=source_path,
+            output_dir=root / "candidate",
+            registry=_demo_registry(root),
+            command_runner=fake_runner,
+            target_stem="minus",
+        )
+
+        assert manifest["status"] == "completed"
+        assert manifest["candidate_manifest"]["target_stem"] == "minus"
+        target_audio_path = Path(manifest["candidate_manifest"]["target_audio_path"])
+        assert target_audio_path.exists()
+
+        target_audio, observed_sample_rate = sf.read(target_audio_path, always_2d=True)
+        assert observed_sample_rate == sample_rate
+        np.testing.assert_allclose(target_audio, drums + bass + other, atol=1e-4)
+
+        candidate_manifest = json.loads((root / "candidate" / "stem_manifest.json").read_text(encoding="utf-8"))
+        assert candidate_manifest["target_stem"] == "minus"
+        assert candidate_manifest["stems"]["minus"]["path"] == str(target_audio_path)
+        assert candidate_manifest["stems"]["instrumental"]["path"] == str(target_audio_path)
+        assert candidate_manifest["target_stem_artifact"]["source"] == "sum_non_vocal_stems"
+        assert candidate_manifest["delivery_allowed"] is False
+        assert candidate_manifest["release_ready"] is False
+
+
+def test_hq_full_stem_minus_target_skips_melody_export_step() -> None:
+    executor = _load_executor_module()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source_path = root / "source.flac"
+        source_path.write_text("stub", encoding="utf-8")
+        executed_commands: list[list[str]] = []
+
+        def fake_runner(command: list[str]) -> None:
+            executed_commands.append(command)
+            output_dir = Path(command[3])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stems = {}
+            for stem_name, value in {
+                "vocals": 0.4,
+                "drums": 0.1,
+                "bass": 0.2,
+                "other": 0.3,
+            }.items():
+                path = output_dir / f"{stem_name}.flac"
+                sf.write(path, np.full((8, 2), value, dtype=np.float32), 44100)
+                stems[stem_name] = {"path": str(path)}
+            (output_dir / "stem_manifest.json").write_text(
+                json.dumps({"model_name": "htdemucs_6s", "stems": stems}),
+                encoding="utf-8",
+            )
+
+        manifest = executor.run_registered_model_candidate(
+            model_id="demo_hq_full_stem_exporter",
+            source_audio_path=source_path,
+            output_dir=root / "candidate",
+            registry=_demo_registry(root),
+            command_runner=fake_runner,
+            device="cuda",
+            target_stem="minus",
+        )
+
+        assert manifest["status"] == "completed"
+        assert "--no-melody-stem" in executed_commands[0]
+        assert manifest["candidate_manifest"]["target_stem"] == "minus"
+        assert manifest["candidate_manifest"]["target_source"] == "sum_non_vocal_stems"
+
+
+def test_existing_instrumental_minus_target_preserves_original_stem_metadata() -> None:
+    executor = _load_executor_module()
+    from worker.model_registry import ModelRegistry, ModelRegistryEntry
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source_path = root / "source.flac"
+        source_path.write_text("stub", encoding="utf-8")
+        registry = ModelRegistry(
+            runtime_root=root,
+            entries=(
+                ModelRegistryEntry(
+                    model_id="demo_instrumental_model",
+                    display_name="Demo instrumental model",
+                    family="test",
+                    target_stems=("instrumental",),
+                    output_stems=("vocals", "instrumental"),
+                    command_template=("python", "demo_instrumental.py", "{source_audio_path}", "{output_dir}"),
+                    expected_manifest="{output_dir}/stem_manifest.json",
+                ),
+            ),
+        )
+
+        def fake_runner(command: list[str]) -> None:
+            output_dir = Path(command[3])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            instrumental_path = output_dir / "instrumental.flac"
+            vocals_path = output_dir / "vocals.flac"
+            instrumental_path.write_text("stub instrumental", encoding="utf-8")
+            vocals_path.write_text("stub vocals", encoding="utf-8")
+            (output_dir / "stem_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "model_id": "demo_instrumental_model",
+                        "stems": {
+                            "vocals": {"path": str(vocals_path), "source": "residual_from_raw_minus_instrumental"},
+                            "instrumental": {
+                                "path": str(instrumental_path),
+                                "source": "model_output",
+                                "sample_rate": 48000,
+                                "sha256": "demo-hash",
+                            },
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        executor.run_registered_model_candidate(
+            model_id="demo_instrumental_model",
+            source_audio_path=source_path,
+            output_dir=root / "candidate",
+            registry=registry,
+            command_runner=fake_runner,
+            target_stem="minus",
+        )
+
+        candidate_manifest = json.loads((root / "candidate" / "stem_manifest.json").read_text(encoding="utf-8"))
+        assert candidate_manifest["stems"]["minus"]["source"] == "existing_manifest_stem"
+        assert candidate_manifest["stems"]["minus"]["source_stems"] == ["instrumental"]
+        assert candidate_manifest["stems"]["instrumental"]["source"] == "model_output"
+        assert candidate_manifest["stems"]["instrumental"]["sample_rate"] == 48000
+        assert candidate_manifest["stems"]["instrumental"]["sha256"] == "demo-hash"
 
 
 def test_command_runner_error_writes_execution_failed_manifest() -> None:
@@ -394,6 +604,93 @@ def test_becruily_karaoke_registry_executor_contract_preserves_checkpoint_metada
         assert candidate_manifest["model"]["model_id"] == "becruily_karaoke_vocals"
         assert candidate_manifest["contract"]["full_track"] is True
         assert candidate_manifest["contract"]["fallback_used"] is False
+
+
+def test_becruily_instrumental_registry_executor_contract_preserves_checkpoint_metadata() -> None:
+    executor = _load_executor_module()
+    from worker.model_registry import ModelRegistry, default_model_registry
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source_path = root / "source.flac"
+        source_path.write_text("stub", encoding="utf-8")
+        default_entry = default_model_registry().get("becruily_instrumental_vocals")
+        registry = ModelRegistry(
+            runtime_root=root,
+            entries=(replace(default_entry, required_paths=(), required_python_modules=()),),
+        )
+        executed_commands: list[list[str]] = []
+
+        def fake_becruily_runner(command: list[str]) -> None:
+            executed_commands.append(command)
+            output_dir = Path(command[3])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            vocals_path = output_dir / "vocals.flac"
+            instrumental_path = output_dir / "instrumental.flac"
+            vocals_path.write_text("stub vocals", encoding="utf-8")
+            instrumental_path.write_text("stub instrumental", encoding="utf-8")
+            (output_dir / "stem_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "model_id": "becruily_instrumental_vocals",
+                        "model": {
+                            "model_id": "becruily_instrumental_vocals",
+                            "name": "Becruily MelBand RoFormer instrumental checkpoint",
+                        },
+                        "contract": {
+                            "full_track": True,
+                            "benchmark_compatible": True,
+                            "fallback_used": False,
+                            "hidden_inference": False,
+                        },
+                        "stems": {
+                            "vocals": {"path": str(vocals_path)},
+                            "instrumental": {"path": str(instrumental_path)},
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        manifest = executor.run_registered_model_candidate(
+            model_id="becruily_instrumental_vocals",
+            source_audio_path=source_path,
+            output_dir=root / "candidate",
+            registry=registry,
+            command_runner=fake_becruily_runner,
+            device="cuda",
+            target_stem="minus",
+        )
+
+        assert manifest["status"] == "completed"
+        assert manifest["candidate_manifest"]["target_stem"] == "minus"
+        assert manifest["candidate_manifest"]["target_source"] == "existing_manifest_stem"
+        assert executed_commands == [
+            [
+                "python",
+                "/app/tools/export_melband_vocal_full.py",
+                str(source_path),
+                str(root / "candidate"),
+                "--model-path",
+                "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt",
+                "--config-path",
+                "/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml",
+                "--manifest-model-id",
+                "becruily_instrumental_vocals",
+                "--manifest-model-display-name",
+                "Becruily MelBand RoFormer instrumental checkpoint",
+            ]
+        ]
+        candidate_manifest = json.loads((root / "candidate" / "stem_manifest.json").read_text(encoding="utf-8"))
+        assert candidate_manifest["model_id"] == "becruily_instrumental_vocals"
+        assert candidate_manifest["model"]["model_id"] == "becruily_instrumental_vocals"
+        assert candidate_manifest["contract"]["full_track"] is True
+        assert candidate_manifest["contract"]["fallback_used"] is False
+        assert candidate_manifest["target_stem"] == "minus"
+        assert candidate_manifest["delivery_allowed"] is False
+        assert candidate_manifest["release_ready"] is False
 
 
 def test_mdx23c_registry_executor_contract_writes_full_track_candidate_manifest() -> None:
@@ -610,6 +907,89 @@ def test_audio_separator_bs_roformer_registry_executor_contract_writes_full_trac
         ]
         candidate_manifest = json.loads((root / "candidate" / "stem_manifest.json").read_text(encoding="utf-8"))
         assert candidate_manifest["model_id"] == "audio_separator_bs_roformer_vocals"
+        assert candidate_manifest["contract"]["full_track"] is True
+        assert candidate_manifest["contract"]["application_reference_free"] is True
+        assert candidate_manifest["stems"]["vocals"]["path"].endswith("vocals.flac")
+        assert candidate_manifest["stems"]["instrumental"]["path"].endswith("instrumental.flac")
+
+
+def test_audio_separator_bs_roformer_viperx_vendor_config_executor_contract_writes_full_track_candidate_manifest() -> None:
+    executor = _load_executor_module()
+    from worker.model_registry import ModelRegistry, default_model_registry
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source_path = root / "source.flac"
+        source_path.write_text("stub", encoding="utf-8")
+        default_entry = default_model_registry().get("audio_separator_bs_roformer_viperx_1297_vendor_config_vocals")
+        registry = ModelRegistry(
+            runtime_root=root,
+            entries=(replace(default_entry, required_paths=(), required_python_modules=()),),
+        )
+        executed_commands: list[list[str]] = []
+
+        def fake_audio_separator_runner(command: list[str]) -> None:
+            executed_commands.append(command)
+            output_dir = Path(command[3])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            vocals_path = output_dir / "vocals.flac"
+            instrumental_path = output_dir / "instrumental.flac"
+            vocals_path.write_text("stub vocals", encoding="utf-8")
+            instrumental_path.write_text("stub instrumental", encoding="utf-8")
+            (output_dir / "stem_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "model_id": "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals",
+                        "contract": {
+                            "full_track": True,
+                            "benchmark_compatible": True,
+                            "fallback_used": False,
+                            "hidden_inference": False,
+                            "target_reference_used_at_application": False,
+                            "application_reference_free": True,
+                        },
+                        "stems": {
+                            "vocals": {"path": str(vocals_path)},
+                            "instrumental": {"path": str(instrumental_path)},
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        manifest = executor.run_registered_model_candidate(
+            model_id="audio_separator_bs_roformer_viperx_1297_vendor_config_vocals",
+            source_audio_path=source_path,
+            output_dir=root / "candidate",
+            registry=registry,
+            command_runner=fake_audio_separator_runner,
+            device="cuda",
+        )
+
+        assert manifest["status"] == "completed"
+        assert executed_commands == [
+            [
+                "python",
+                "/app/tools/export_audio_separator_vocal_full.py",
+                str(source_path),
+                str(root / "candidate"),
+                "--model-filename",
+                "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+                "--model-file-dir",
+                "/app/vendor/bs_roformer_viperx_1297",
+                "--audio-separator-python",
+                "/opt/audio-separator-venv/bin/python",
+                "--manifest-model-id",
+                "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals",
+                "--manifest-model-display-name",
+                "Audio Separator BS-RoFormer ViperX-1297 vendor config variant",
+                "--require-cuda-provider",
+            ]
+        ]
+        candidate_manifest = json.loads((root / "candidate" / "stem_manifest.json").read_text(encoding="utf-8"))
+        assert candidate_manifest["model_id"] == "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals"
         assert candidate_manifest["contract"]["full_track"] is True
         assert candidate_manifest["contract"]["application_reference_free"] is True
         assert candidate_manifest["stems"]["vocals"]["path"].endswith("vocals.flac")

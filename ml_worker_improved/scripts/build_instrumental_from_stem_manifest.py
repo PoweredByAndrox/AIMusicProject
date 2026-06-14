@@ -17,7 +17,7 @@ if str(TOOLS_ROOT) not in sys.path:
 from docker_runtime import require_docker_runtime  # noqa: E402
 
 
-DEFAULT_EXCLUDED_STEMS = ("vocals",)
+DEFAULT_EXCLUDED_STEMS = ("vocals", "vocal")
 
 
 def load_json(path: Path) -> dict[str, Any]:

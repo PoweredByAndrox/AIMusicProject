@@ -328,18 +328,27 @@ class TestAdaptiveMinusRepair(unittest.TestCase):
         self.assertEqual(len(commands), 4)
         self.assertEqual(adaptive_manifest["selected_profile"], "pure_base")
         self.assertTrue(output_selected_exists)
-        self.assertTrue(listen_selected_exists)
+        self.assertFalse(listen_selected_exists)
         self.assertEqual(adaptive_manifest["selected_minus_release_gate"]["status"], "release_ready")
-        self.assertEqual(adaptive_manifest["delivery_status"], "accepted")
-        self.assertTrue(adaptive_manifest["delivery_allowed"])
-        self.assertEqual(adaptive_manifest["presentation_status"], "accepted_for_listen_pack")
-        self.assertEqual(adaptive_manifest["selected_artifacts"]["delivery_status"], "accepted")
-        self.assertTrue(adaptive_manifest["selected_artifacts"]["delivery_allowed"])
+        self.assertEqual(adaptive_manifest["candidate_status"], "selected_candidate_only")
+        self.assertEqual(adaptive_manifest["delivery_status"], "candidate_only")
+        self.assertFalse(adaptive_manifest["delivery_allowed"])
+        self.assertEqual(adaptive_manifest["presentation_status"], "blocked_until_downstream_delivery_gates")
+        self.assertEqual(adaptive_manifest["release_status"], "not_release_ready")
+        self.assertTrue(adaptive_manifest["requires_post_judge"])
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["candidate_status"], "selected_candidate_only")
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["delivery_status"], "candidate_only")
+        self.assertFalse(adaptive_manifest["selected_artifacts"]["delivery_allowed"])
         self.assertEqual(
             adaptive_manifest["selected_artifacts"]["presentation_status"],
-            "accepted_for_listen_pack",
+            "blocked_until_downstream_delivery_gates",
         )
-        self.assertEqual(adaptive_manifest["selected_artifacts"]["release_status"], "release_ready")
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["release_status"], "not_release_ready")
+        self.assertTrue(adaptive_manifest["selected_artifacts"]["requires_post_judge"])
+        self.assertEqual(
+            adaptive_manifest["selected_artifacts"]["internal_minus_release_status"],
+            "release_ready",
+        )
         self.assertIn("minus_release_gate", adaptive_manifest["candidates"][0])
         self.assertEqual(
             [candidate["profile_name"] for candidate in adaptive_manifest["candidates"]],
@@ -347,6 +356,82 @@ class TestAdaptiveMinusRepair(unittest.TestCase):
         )
         self.assertIn("--pure-base", commands[0])
         self.assertEqual(adaptive_manifest["learning_contract"]["type"], "feedback_weighted_profile_selection")
+        self.assertEqual(
+            adaptive_manifest["execution_contract"]["acceleration_mode"],
+            "external_only_cpu_dsp_repair",
+        )
+        self.assertTrue(adaptive_manifest["execution_contract"]["gpu_inference_skipped"])
+        self.assertEqual(adaptive_manifest["progress_events"][0]["phase"], "start")
+        self.assertEqual(adaptive_manifest["progress_events"][0]["gpu_inference_skipped"], True)
+        self.assertTrue(
+            any(
+                event["phase"] == "candidate_start" and event["profile"] == "pure_base"
+                for event in adaptive_manifest["progress_events"]
+            ),
+        )
+
+    def test_cli_keeps_selected_candidate_locked_until_downstream_delivery_gates(self):
+        module = _load_adaptive_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            raw_audio_path = temp_path / "raw.flac"
+            base_minus_path = temp_path / "base.flac"
+            repair_script = temp_path / "apply_flexible_minus_repair.py"
+            output_dir = temp_path / "adaptive"
+            listen_dir = temp_path / "listen"
+            raw_audio_path.write_bytes(b"raw")
+            base_minus_path.write_bytes(b"base")
+            repair_script.write_text("# fake repair script\n", encoding="utf-8")
+
+            def fake_run_command(command: list[str]) -> None:
+                candidate_output_dir = Path(command[4])
+                _write_fake_manifest(candidate_output_dir, profile_name=candidate_output_dir.name)
+
+            argv = [
+                str(raw_audio_path),
+                str(base_minus_path),
+                str(output_dir),
+                "--profile",
+                "pure_base",
+                "--listen-dir",
+                str(listen_dir),
+                "--repair-script",
+                str(repair_script),
+                "--python-executable",
+                sys.executable,
+            ]
+
+            with patch.object(module, "_run_command", side_effect=fake_run_command):
+                self.assertEqual(module.main(argv), 0)
+
+            adaptive_manifest = json.loads(
+                (output_dir / "adaptive_manifest.json").read_text(encoding="utf-8"),
+            )
+            output_selected_exists = (output_dir / "02_adaptive_selected_minus.flac").exists()
+            listen_selected_exists = (listen_dir / "02_adaptive_selected_minus.flac").exists()
+
+        self.assertTrue(output_selected_exists)
+        self.assertFalse(listen_selected_exists)
+        self.assertEqual(adaptive_manifest["selected_minus_release_gate"]["status"], "release_ready")
+        self.assertEqual(adaptive_manifest["candidate_status"], "selected_candidate_only")
+        self.assertEqual(adaptive_manifest["release_status"], "not_release_ready")
+        self.assertEqual(adaptive_manifest["delivery_status"], "candidate_only")
+        self.assertFalse(adaptive_manifest["delivery_allowed"])
+        self.assertEqual(adaptive_manifest["presentation_status"], "blocked_until_downstream_delivery_gates")
+        self.assertTrue(adaptive_manifest["requires_post_judge"])
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["delivery_status"], "candidate_only")
+        self.assertFalse(adaptive_manifest["selected_artifacts"]["delivery_allowed"])
+        self.assertEqual(
+            adaptive_manifest["selected_artifacts"]["presentation_status"],
+            "blocked_until_downstream_delivery_gates",
+        )
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["release_status"], "not_release_ready")
+        self.assertTrue(adaptive_manifest["selected_artifacts"]["requires_post_judge"])
+        self.assertEqual(
+            adaptive_manifest["selected_artifacts"]["internal_minus_release_status"],
+            "release_ready",
+        )
 
     def test_cli_blocks_listen_copy_when_selected_minus_gate_blocks(self):
         module = _load_adaptive_module()
@@ -405,14 +490,24 @@ class TestAdaptiveMinusRepair(unittest.TestCase):
         self.assertTrue(output_selected_exists)
         self.assertFalse(listen_selected_exists)
         self.assertEqual(adaptive_manifest["selected_minus_release_gate"]["status"], "blocked_for_listening")
-        self.assertEqual(adaptive_manifest["delivery_status"], "blocked")
+        self.assertEqual(adaptive_manifest["candidate_status"], "selected_candidate_only")
+        self.assertEqual(adaptive_manifest["delivery_status"], "candidate_only")
         self.assertFalse(adaptive_manifest["delivery_allowed"])
-        self.assertEqual(adaptive_manifest["presentation_status"], "blocked_from_listen_pack")
-        self.assertEqual(adaptive_manifest["selected_artifacts"]["delivery_status"], "blocked")
+        self.assertEqual(adaptive_manifest["presentation_status"], "blocked_until_downstream_delivery_gates")
+        self.assertEqual(adaptive_manifest["release_status"], "not_release_ready")
+        self.assertTrue(adaptive_manifest["requires_post_judge"])
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["candidate_status"], "selected_candidate_only")
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["delivery_status"], "candidate_only")
         self.assertFalse(adaptive_manifest["selected_artifacts"]["delivery_allowed"])
         self.assertEqual(
             adaptive_manifest["selected_artifacts"]["presentation_status"],
-            "blocked_from_listen_pack",
+            "blocked_until_downstream_delivery_gates",
+        )
+        self.assertEqual(adaptive_manifest["selected_artifacts"]["release_status"], "not_release_ready")
+        self.assertTrue(adaptive_manifest["selected_artifacts"]["requires_post_judge"])
+        self.assertEqual(
+            adaptive_manifest["selected_artifacts"]["internal_minus_release_status"],
+            "diagnostic_only",
         )
 
 

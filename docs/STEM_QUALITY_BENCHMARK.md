@@ -180,6 +180,20 @@ suggestions:
 These fields are audit metadata. They do not change ranking thresholds and do not make an unavailable or unlicensed
 checkpoint deliverable.
 
+2026-06-11 candidate-pool update: `audio_separator_bs_roformer_viperx_1297_vendor_config_vocals` is registered as a
+same-checkpoint config variant for the local ViperX-1297 BS-RoFormer asset. It uses
+`export_audio_separator_vocal_full.py`, `/app/vendor/bs_roformer_viperx_1297`, and the same
+`model_bs_roformer_ep_317_sdr_12.9755.ckpt` hash as the `/app/models/audio_separator` mirror, but with the vendor
+sidecar YAML. This is a reproducible no-reference candidate route for local judge/selector runs only; it is not a new
+leaderboard/model-family claim and does not change delivery thresholds.
+
+2026-06-12 candidate-pool update: `becruily_instrumental_vocals` is registered through the shared
+`export_melband_vocal_full.py` route with `/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml` and
+`/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt`. It is primarily an
+instrumental/minus candidate for local no-reference routing and exact/reference gates. Registration does not make it a
+release-ready vocal route, does not relax any threshold, and does not bypass the mode-specific judge, selector, artifact
+contract, or stem QC gates.
+
 `run_ground_truth_quality_gate.py` also enforces the candidate manifest delivery contract. A candidate can pass the
 waveform/objective thresholds and still be rejected for delivery when its own manifest says it is teacher-assisted,
 holdout-missing, timestamp/mask-prior based, or otherwise not a no-reference production route. The report records this as:
@@ -1273,6 +1287,7 @@ Current registered families are generated from `default_model_registry()` and mu
 - `mdx23c_vocals`;
 - `melband_roformer_vocals`;
 - `becruily_karaoke_vocals`;
+- `becruily_instrumental_vocals`;
 - `bs_mamba2_vocals`;
 - `audio_separator_bs_roformer_vocals`;
 - `audio_separator_melband_roformer_viperx_vocals`.
@@ -1566,7 +1581,8 @@ Safety hardening on 2026-05-17:
   `no_reference_production_claim=false`, `delivery.status=rejected`, and `listen.status=blocked`; no listen files are
   copied for that candidate.
 
-`mdx23c_vocals`, `melband_roformer_vocals`, `becruily_karaoke_vocals`, `bs_mamba2_vocals`, and
+`mdx23c_vocals`, `melband_roformer_vocals`, `becruily_karaoke_vocals`, `becruily_instrumental_vocals`,
+`bs_mamba2_vocals`, and
 `audio_separator_bs_roformer_vocals` are registered through
 full-track exporters: `ml_worker_improved/tools/export_mdx23c_vocal_full.py`,
 `ml_worker_improved/tools/export_melband_vocal_full.py`, and
@@ -1762,9 +1778,10 @@ Detected vocal issue actions also carry an `action_family` so the router can dis
 (`protect_vocal_content`). This is the bridge from generic issue labels toward defect-specific vocal reconstruction:
 dropout/tail/body defects must not be treated as no-vocal suppression evidence.
 The Docker image builds `mamba-ssm==2.3.2.post1` from source with `--no-deps --no-build-isolation` after
-PyTorch is installed, so pip cannot replace the pinned torch/CUDA runtime while enabling BS-Mamba2. The Dockerfile
-performs only a package-availability smoke at build time; full Triton/Mamba imports require an active GPU driver and
-must be validated by runtime route probes instead of `docker build`.
+PyTorch is installed, so pip cannot replace the pinned torch/CUDA runtime while probing BS-Mamba2. The Dockerfile
+also installs `causal-conv1d` so bounded runtime probes can run reproducibly, but package presence is not sufficient
+to enable the route. Full Triton/Mamba inference requires an active GPU driver and must be validated by runtime route
+probes instead of `docker build`.
 
 Required module presence is only the first gate for BS-Mamba2. A BS-Mamba2 Docker/runtime stack must also pass
 `run_registered_model_candidate.py` on a bounded smoke fixture and create `stem_manifest.json` before the candidate
@@ -1778,8 +1795,11 @@ load and then crashed with `SIGSEGV` before manifest creation:
 | `torch==2.6.0+cu126`, `mamba-ssm==2.2.6.post3`, `causal-conv1d==1.5.3.post1` | `lab_artifacts/quality_benchmark/runtime_probe/bs_mamba2_gpu260_m226_fixture_probe` | rejected |
 | `torch==2.6.0+cu126`, `mamba-ssm==2.3.0`, `causal-conv1d==1.5.3.post1` | `lab_artifacts/quality_benchmark/runtime_probe/bs_mamba2_gpu260_m230_fixture_probe` | rejected |
 | `torch==2.6.0+cu126`, `mamba-ssm==2.3.2.post1`, `causal-conv1d==1.5.3.post1` | `lab_artifacts/quality_benchmark/runtime_probe/bs_mamba2_gpu260_m232_causal153_fixture_probe` | rejected |
+| `torch==2.5.1+cu124`, `mamba-ssm==2.3.2.post1`, `causal-conv1d==1.5.3.post1` | `lab_artifacts/testing_stuff_music_track2_bs_mamba2_minus_execution_20260611` | rejected |
 
-Do not add any of these stacks to the production Dockerfile as an enabled BS-Mamba2 route.
+Do not enable any of these stacks as a production BS-Mamba2 route. The registry entry for `bs_mamba2_vocals` must stay
+fail-closed until `/app/vendor/bs_mamba2_vocals/runtime_probe_passed.json` exists from a bounded
+`run_registered_model_candidate.py` probe that created `stem_manifest.json` without `SIGSEGV`.
 
 Use `ml_worker_improved/tools/list_model_registry.py` to inspect available candidates or ask for bounded next
 candidate suggestions after a failed benchmark:

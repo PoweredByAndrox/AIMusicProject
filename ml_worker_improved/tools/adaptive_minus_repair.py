@@ -6,6 +6,7 @@ import math
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -230,6 +231,15 @@ MINUS_RELEASE_REQUIRED_METRICS = (
     "presence_band_ratio_drift_db",
     "air_band_ratio_drift_db",
 )
+EXECUTION_CONTRACT = {
+    "route_name": "adaptive_minus_repair",
+    "acceleration_mode": "external_only_cpu_dsp_repair",
+    "gpu_inference_skipped": True,
+    "gpu_inference_skip_reason": (
+        "controller uses existing audio candidates and CPU/DSP flexible repair; "
+        "it does not run neural model inference"
+    ),
+}
 
 
 def build_minus_release_gate(metrics: dict[str, Any], focus_metrics: dict[str, Any]) -> dict[str, Any]:
@@ -503,6 +513,38 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def emit_progress_event(
+    progress_events: list[dict[str, Any]],
+    *,
+    started_at: float,
+    phase: str,
+    **fields: Any,
+) -> None:
+    event = {
+        "schema_version": 1,
+        "mode": "adaptive_minus_repair_progress",
+        "phase": phase,
+        "elapsed_sec": round(time.monotonic() - started_at, 3),
+        **EXECUTION_CONTRACT,
+        **fields,
+    }
+    progress_events.append(event)
+    print(json.dumps(event, ensure_ascii=False, sort_keys=True), flush=True)
+
+
+def selected_candidate_delivery_lock(release_gate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_status": "selected_candidate_only",
+        "delivery_status": "candidate_only",
+        "delivery_allowed": False,
+        "presentation_status": "blocked_until_downstream_delivery_gates",
+        "release_status": "not_release_ready",
+        "requires_post_judge": True,
+        "internal_minus_gate_status": release_gate.get("status", "unknown"),
+        "internal_minus_release_status": release_gate.get("release_status", "diagnostic_only"),
+    }
+
+
 def copy_selected_artifacts(
     *,
     selected_manifest: dict[str, Any],
@@ -515,26 +557,17 @@ def copy_selected_artifacts(
     selected_minus_path = output_dir / "02_adaptive_selected_minus.flac"
     shutil.copyfile(repaired_path, selected_minus_path)
 
-    delivery_allowed = release_gate.get("release_status") == "release_ready"
     copied_paths = {
         "selected_minus_flac": str(selected_minus_path),
-        "delivery_status": "accepted" if delivery_allowed else "blocked",
-        "delivery_allowed": delivery_allowed,
-        "presentation_status": (
-            "accepted_for_listen_pack" if delivery_allowed else "blocked_from_listen_pack"
-        ),
-        "release_status": release_gate.get("release_status", "diagnostic_only"),
+        **selected_candidate_delivery_lock(release_gate),
     }
-    if listen_dir is not None and delivery_allowed:
-        listen_dir.mkdir(parents=True, exist_ok=True)
-        listen_minus_path = listen_dir / "02_adaptive_selected_minus.flac"
-        shutil.copyfile(repaired_path, listen_minus_path)
-        copied_paths["listen_selected_minus_flac"] = str(listen_minus_path)
 
     return copied_paths
 
 
 def run_adaptive_repair(args: argparse.Namespace) -> dict[str, Any]:
+    started_at = time.monotonic()
+    progress_events: list[dict[str, Any]] = []
     raw_audio_path = Path(args.raw_audio_path)
     base_minus_path = Path(args.base_minus_path)
     output_dir = Path(args.output_dir)
@@ -555,10 +588,20 @@ def run_adaptive_repair(args: argparse.Namespace) -> dict[str, Any]:
 
     profiles = select_profiles(args.profile, default_candidate_profiles())
     feedback_adjustments = load_feedback_adjustments(feedback_store_path)
+    emit_progress_event(
+        progress_events,
+        started_at=started_at,
+        phase="start",
+        raw_audio_path=str(raw_audio_path),
+        base_minus_path=str(base_minus_path),
+        output_dir=str(output_dir),
+        profile_count=len(profiles),
+        focus_window_count=len(args.focus_window),
+    )
 
     candidate_scores: list[CandidateScore] = []
     candidate_manifests: dict[str, dict[str, Any]] = {}
-    for profile in profiles:
+    for profile_index, profile in enumerate(profiles, start=1):
         candidate_output_dir = candidate_root_dir / profile.name
         candidate_listen_dir = listen_dir / profile.name if listen_dir is not None else None
         command = build_repair_command(
@@ -572,19 +615,37 @@ def run_adaptive_repair(args: argparse.Namespace) -> dict[str, Any]:
             focus_windows=args.focus_window,
             profile=profile,
         )
+        emit_progress_event(
+            progress_events,
+            started_at=started_at,
+            phase="candidate_start",
+            profile=profile.name,
+            profile_index=profile_index,
+            profile_count=len(profiles),
+            output_dir=str(candidate_output_dir),
+        )
         _run_command(command)
 
         manifest_path = candidate_output_dir / "stem_manifest.json"
         manifest = load_json(manifest_path)
         candidate_manifests[profile.name] = manifest
-        candidate_scores.append(
-            score_candidate(
-                manifest=manifest,
-                manifest_path=manifest_path,
-                output_dir=candidate_output_dir,
-                profile=profile,
-                feedback_adjustments=feedback_adjustments,
-            )
+        candidate_score = score_candidate(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            output_dir=candidate_output_dir,
+            profile=profile,
+            feedback_adjustments=feedback_adjustments,
+        )
+        candidate_scores.append(candidate_score)
+        emit_progress_event(
+            progress_events,
+            started_at=started_at,
+            phase="candidate_end",
+            profile=profile.name,
+            profile_index=profile_index,
+            profile_count=len(profiles),
+            score=candidate_score.score,
+            manifest_path=str(manifest_path),
         )
 
     selected_score = max(candidate_scores, key=lambda candidate: candidate.score)
@@ -596,11 +657,24 @@ def run_adaptive_repair(args: argparse.Namespace) -> dict[str, Any]:
         listen_dir=listen_dir,
         release_gate=selected_release_gate,
     )
-    delivery_allowed = copied_artifacts["delivery_allowed"]
+    delivery_lock = selected_candidate_delivery_lock(selected_release_gate)
+    emit_progress_event(
+        progress_events,
+        started_at=started_at,
+        phase="selected_candidate_locked",
+        selected_profile=selected_score.profile_name,
+        selected_score=selected_score.score,
+        internal_minus_gate_status=selected_release_gate.get("status"),
+        delivery_status=delivery_lock["delivery_status"],
+        delivery_allowed=delivery_lock["delivery_allowed"],
+        requires_post_judge=delivery_lock["requires_post_judge"],
+    )
 
     adaptive_manifest = {
         "schema_version": 1,
         "mode": "adaptive_minus_repair_controller",
+        "execution_contract": dict(EXECUTION_CONTRACT),
+        "progress_events": progress_events,
         "raw_audio_path": str(raw_audio_path),
         "base_minus_path": str(base_minus_path),
         "output_dir": str(output_dir),
@@ -646,12 +720,7 @@ def run_adaptive_repair(args: argparse.Namespace) -> dict[str, Any]:
         "selected_score": selected_score.score,
         "selected_manifest_path": selected_score.manifest_path,
         "selected_minus_release_gate": selected_release_gate,
-        "release_status": selected_release_gate["release_status"],
-        "delivery_status": "accepted" if delivery_allowed else "blocked",
-        "delivery_allowed": delivery_allowed,
-        "presentation_status": (
-            "accepted_for_listen_pack" if delivery_allowed else "blocked_from_listen_pack"
-        ),
+        **delivery_lock,
         "selected_artifacts": copied_artifacts,
         "learning_contract": {
             "type": "feedback_weighted_profile_selection",
@@ -670,7 +739,18 @@ def run_adaptive_repair(args: argparse.Namespace) -> dict[str, Any]:
         },
     }
 
-    write_json(output_dir / "adaptive_manifest.json", adaptive_manifest)
+    manifest_path = output_dir / "adaptive_manifest.json"
+    write_json(manifest_path, adaptive_manifest)
+    emit_progress_event(
+        progress_events,
+        started_at=started_at,
+        phase="manifest_written",
+        manifest_path=str(manifest_path),
+        selected_profile=selected_score.profile_name,
+        delivery_status=delivery_lock["delivery_status"],
+        delivery_allowed=delivery_lock["delivery_allowed"],
+    )
+    write_json(manifest_path, adaptive_manifest)
     return adaptive_manifest
 
 

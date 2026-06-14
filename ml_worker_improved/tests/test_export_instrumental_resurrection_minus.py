@@ -182,6 +182,19 @@ class TestExportInstrumentalResurrectionMinus(unittest.TestCase):
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["source_audio_path"], str(source_path.resolve()))
+            self.assertEqual(manifest["target_stem"], "minus")
+            self.assertEqual(manifest["target_audio_path"], str(minus_path))
+            self.assertEqual(
+                manifest["target_stem_artifact"],
+                {
+                    "target_stem": "minus",
+                    "path": str(minus_path),
+                    "source": "instrumental_resurrection_model_output",
+                    "source_stems": ["other"],
+                },
+            )
+            self.assertEqual(manifest["stems"]["minus"]["path"], str(minus_path))
+            self.assertEqual(manifest["stems"]["minus"]["source"], "instrumental_resurrection_model_output")
             self.assertEqual(manifest["instrumental_resurrection_output_path"], str(minus_path))
             self.assertEqual(manifest["instrumental_resurrection_model_output_name"], "other.wav")
             self.assertEqual(manifest["artifacts"]["raw_ref_flac"], str(raw_ref_path))
@@ -280,6 +293,10 @@ class TestExportInstrumentalResurrectionMinus(unittest.TestCase):
             self.assertFalse((output_dir / "candidate_map.json").exists())
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["target_stem"], "minus")
+            self.assertEqual(manifest["target_audio_path"], str(minus_path))
+            self.assertEqual(manifest["target_stem_artifact"]["path"], str(minus_path))
+            self.assertEqual(manifest["stems"]["minus"]["path"], str(minus_path))
             self.assertEqual(manifest["instrumental_resurrection_output_path"], str(minus_path))
             self.assertEqual(manifest["instrumental_resurrection_model_output_name"], "other.wav")
             self.assertEqual(manifest["model"]["device"], "cpu")

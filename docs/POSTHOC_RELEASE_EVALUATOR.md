@@ -43,7 +43,10 @@ The summary JSON includes:
 - uncovered labels;
 - worst vocal issue windows;
 - selected/listen output paths;
-- `release_status_drift` when an artifact's saved status differs from the rebuilt gate.
+- `artifact_delivery_status`, `artifact_candidate_status`, and `artifact_requires_post_judge` for
+  minus candidate-only locks;
+- `release_status_drift` when an artifact's saved status differs from the rebuilt gate, except when
+  a minus artifact is intentionally locked as `candidate_only` with `requires_post_judge=true`.
 
 ## Batch Delivery Integration
 
@@ -99,6 +102,11 @@ docker compose run --rm --no-deps -T ml-worker \
 
 `diagnostic_only` means the artifact can be inspected for debugging, but must not be presented as a
 clean/professional listening result.
+
+For adaptive minus manifests, `candidate_only` / `not_release_ready` with
+`requires_post_judge=true` is the expected controller output even if `selected_minus_release_gate`
+has internal `release_ready`. That internal gate is ranking evidence only; downstream
+self-judge/result-judge/listen-preview contracts must accept the artifact before delivery.
 
 When an older minus manifest lacks the required release metrics, the evaluator emits
 `diagnostic_only` with `missing_minus_release_metrics` instead of treating default metric values as

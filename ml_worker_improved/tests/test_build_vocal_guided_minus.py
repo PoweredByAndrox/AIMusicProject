@@ -158,3 +158,50 @@ def test_reconstruction_metric_ignores_peak_limiter_delta(tmp_path: Path) -> Non
     assert manifest["metrics"]["reconstruction_error_rms_dbfs"] < -120.0
     assert manifest["metrics"]["post_limiter_delta_rms_dbfs"] > -30.0
     assert manifest["metrics"]["post_limiter_reconstruction_error_rms_dbfs"] > -30.0
+
+
+def test_vocal_guided_minus_manifest_is_candidate_only_not_delivery(tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    sample_rate = 8000
+    times = np.arange(sample_rate, dtype=np.float32) / float(sample_rate)
+    instrumental = 0.12 * np.sin(2.0 * np.pi * 220.0 * times)
+    vocal = 0.08 * np.sin(2.0 * np.pi * 660.0 * times)
+    raw = np.stack([instrumental + vocal, instrumental + vocal], axis=1).astype(np.float32)
+    selected_vocals = np.stack([vocal, vocal], axis=1).astype(np.float32)
+
+    raw_path = tmp_path / "raw.flac"
+    vocals_path = tmp_path / "vocals.flac"
+    output_dir = tmp_path / "out"
+    sf.write(str(raw_path), raw, sample_rate, subtype="PCM_24")
+    sf.write(str(vocals_path), selected_vocals, sample_rate, subtype="PCM_24")
+
+    manifest = module.run_build(
+        Namespace(
+            raw_audio_path=str(raw_path),
+            selected_vocals_path=str(vocals_path),
+            base_minus_path=None,
+            output_dir=str(output_dir),
+            listen_dir=None,
+            listen_minus_label="02_vocal_guided_minus.flac",
+            vocal_subtract_gain=1.0,
+            base_blend_active=0.72,
+            base_blend_inactive=0.18,
+            activity_floor_ratio=0.035,
+            activity_smoothing_sec=0.12,
+            max_peak=0.999,
+        )
+    )
+
+    assert manifest["candidate_only"] is True
+    assert manifest["stem_type"] == "minus"
+    assert manifest["delivery_status"] == "candidate_only"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "blocked_until_judged"
+    assert manifest["release_status"] == "not_release_ready"
+    assert manifest["requires_post_judge"] is True
+    assert manifest["is_clean_minus_baseline"] is False
+    assert manifest["safety"]["training_started"] is False
+    assert manifest["safety"]["thresholds_relaxed"] is False
+    output = capsys.readouterr().out
+    assert '"phase": "metrics_start"' in output
+    assert '"phase": "metrics_end"' in output

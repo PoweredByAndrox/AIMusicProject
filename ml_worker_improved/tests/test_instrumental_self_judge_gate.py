@@ -134,6 +134,114 @@ class TestInstrumentalSelfJudgeGate(unittest.TestCase):
             self.assertGreater(issue_counts.get("low_rms_muffling_proxy", 0), 0)
             self.assertGreater(issue_counts.get("vocal_projection_proxy", 0), 0)
 
+    def test_resamples_candidate_and_vocal_windows_to_source_rate(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_rate = 8000
+            candidate_rate = 11025
+            source_path = temp_path / "source.wav"
+            candidate_path = temp_path / "candidate.flac"
+            vocal_path = temp_path / "vocals.flac"
+            _write_audio(source_path, np.full(source_rate, 0.8, dtype=np.float32), source_rate)
+            _write_audio(candidate_path, np.full(candidate_rate, 0.72, dtype=np.float32), candidate_rate)
+            _write_audio(vocal_path, np.full(candidate_rate, 0.05, dtype=np.float32), candidate_rate)
+
+            manifest = module.judge_instrumental(
+                source_audio_path=source_path,
+                candidate_instrumental_path=candidate_path,
+                output_dir=temp_path / "judge",
+                candidate_vocal_path=vocal_path,
+                candidate_label="candidate",
+                segment_sec=0.5,
+            )
+
+            self.assertEqual(manifest["overall"]["segment_count"], 2)
+            self.assertTrue((temp_path / "judge" / "instrumental_self_judge_manifest.json").exists())
+
+    def test_blocks_full_mix_passthrough_even_when_candidate_is_slightly_quieter(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sample_rate = 8000
+            t = np.arange(sample_rate, dtype=np.float32) / sample_rate
+            source = (
+                0.45 * np.sin(2.0 * np.pi * 220.0 * t)
+                + 0.25 * np.sin(2.0 * np.pi * 880.0 * t)
+            )
+            candidate = 0.94 * source
+            source_path = temp_path / "source.wav"
+            candidate_path = temp_path / "candidate.flac"
+            _write_audio(source_path, source, sample_rate)
+            _write_audio(candidate_path, candidate, sample_rate)
+
+            manifest = module.judge_instrumental(
+                source_audio_path=source_path,
+                candidate_instrumental_path=candidate_path,
+                output_dir=temp_path / "judge",
+                candidate_label="near_full_mix_passthrough",
+                segment_sec=0.5,
+            )
+
+            self.assertEqual(manifest["overall"]["status"], "proxy_blocked")
+            self.assertGreater(manifest["overall"]["issue_counts"].get("full_mix_like_risk_proxy", 0), 0)
+            first_segment = manifest["segments"][0]
+            self.assertGreater(first_segment["metrics"]["source_candidate_corr_abs"], 0.98)
+            self.assertLess(first_segment["metrics"]["source_candidate_delta_rms_ratio"], 0.08)
+
+    def test_high_mix_similarity_without_vocal_evidence_is_not_full_mix_blocker(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sample_rate = 8000
+            t = np.arange(sample_rate, dtype=np.float32) / sample_rate
+            music = 0.55 * np.sin(2.0 * np.pi * 110.0 * t)
+            vocal = 0.35 * np.sin(2.0 * np.pi * 880.0 * t)
+            source = music + 0.015 * vocal
+            candidate = music
+            source_path = temp_path / "source.wav"
+            candidate_path = temp_path / "candidate.flac"
+            vocal_path = temp_path / "vocals.flac"
+            _write_audio(source_path, source, sample_rate)
+            _write_audio(candidate_path, candidate, sample_rate)
+            _write_audio(vocal_path, vocal, sample_rate)
+
+            manifest = module.judge_instrumental(
+                source_audio_path=source_path,
+                candidate_instrumental_path=candidate_path,
+                output_dir=temp_path / "judge",
+                candidate_vocal_path=vocal_path,
+                candidate_label="music_dense_instrumental",
+                segment_sec=0.5,
+            )
+
+            self.assertEqual(manifest["overall"]["status"], "proxy_pass")
+            first_segment = manifest["segments"][0]
+            self.assertGreater(first_segment["metrics"]["source_candidate_corr_abs"], 0.98)
+            self.assertLess(first_segment["metrics"]["source_candidate_delta_rms_ratio"], 0.08)
+            self.assertNotIn("full_mix_like_risk_proxy", first_segment["issues"])
+
+    def test_high_rms_ratio_still_blocks_even_without_vocal_evidence(self) -> None:
+        module = _load_module()
+
+        issues, severities = module.classify_issues(
+            {
+                "rms_ratio": 1.08,
+                "presence_ratio_db_vs_source": 0.0,
+                "air_ratio_db_vs_source": 0.0,
+                "source_candidate_corr_abs": 0.8,
+                "source_candidate_delta_rms_ratio": 0.2,
+                "vocal_stem_corr_abs": 0.01,
+                "vocal_projection_db_vs_instrumental": -40.0,
+            }
+        )
+
+        self.assertIn("full_mix_like_risk_proxy", issues)
+        self.assertGreater(severities["full_mix_like_risk"], 0.0)
+
     def test_uses_selector_manifest_vocal_features_for_rendered_selector_audio(self) -> None:
         module = _load_module()
 

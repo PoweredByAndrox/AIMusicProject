@@ -11,6 +11,7 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 import soundfile as sf
+from scipy import signal
 
 
 SCHEMA_VERSION = 1
@@ -104,6 +105,15 @@ def _read_window(path: Path, start_sec: float, end_sec: float) -> tuple[np.ndarr
     frames = max(1, end_frame - start_frame)
     audio, sr = sf.read(str(path), start=start_frame, frames=frames, always_2d=True, dtype="float32")
     return _mono(audio), int(sr)
+
+
+def _resample_to(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if source_rate == target_rate:
+        return audio
+    gcd = math.gcd(int(source_rate), int(target_rate))
+    up = int(target_rate) // gcd
+    down = int(source_rate) // gcd
+    return signal.resample_poly(audio, up, down).astype(np.float64, copy=False)
 
 
 def _rms(audio: np.ndarray) -> float:
@@ -225,16 +235,20 @@ def segment_metrics(
     start_sec, end_sec = float(window_sec[0]), float(window_sec[1])
     source_audio, source_sr = _read_window(source_audio_path, start_sec, end_sec)
     candidate_audio, candidate_sr = _read_window(candidate_instrumental_path, start_sec, end_sec)
-    if source_sr != candidate_sr:
-        raise ValueError(f"Sample rate mismatch: source={source_sr}, candidate={candidate_sr}")
+    candidate_audio = _resample_to(candidate_audio, candidate_sr, source_sr)
+    candidate_sr = source_sr
 
     source_rms = _rms(source_audio)
     candidate_rms = _rms(candidate_audio)
+    aligned_frame_count = min(source_audio.size, candidate_audio.size)
+    source_candidate_delta_rms = _rms(source_audio[:aligned_frame_count] - candidate_audio[:aligned_frame_count])
     metrics = {
         "rms": round(candidate_rms, 9),
         "source_rms": round(source_rms, 9),
         "rms_ratio": round(candidate_rms / max(source_rms, 1e-12), 9),
         "rms_ratio_db_vs_source": round(_db_ratio(candidate_rms, source_rms), 6),
+        "source_candidate_corr_abs": round(_correlation_abs(source_audio, candidate_audio), 9),
+        "source_candidate_delta_rms_ratio": round(source_candidate_delta_rms / max(source_rms, 1e-12), 9),
         "presence_ratio_db_vs_source": round(
             _db_ratio(
                 _band_energy(candidate_audio, candidate_sr, 1800.0, 6000.0),
@@ -253,8 +267,7 @@ def segment_metrics(
 
     if candidate_vocal_path is not None:
         vocal_audio, vocal_sr = _read_window(candidate_vocal_path, start_sec, end_sec)
-        if vocal_sr != candidate_sr:
-            raise ValueError(f"Sample rate mismatch: vocal={vocal_sr}, candidate={candidate_sr}")
+        vocal_audio = _resample_to(vocal_audio, vocal_sr, candidate_sr)
         metrics.update(
             {
                 "vocal_stem_corr_abs": round(_correlation_abs(candidate_audio, vocal_audio), 9),
@@ -277,14 +290,33 @@ def classify_issues(metrics: dict[str, float]) -> tuple[list[str], dict[str, flo
     air_db = float(metrics.get("air_ratio_db_vs_source", 0.0))
     vocal_corr = float(metrics.get("vocal_stem_corr_abs", 0.0))
     vocal_projection_db = float(metrics.get("vocal_projection_db_vs_instrumental", -240.0))
+    source_candidate_corr = float(metrics.get("source_candidate_corr_abs", 0.0))
+    source_candidate_delta_ratio = float(metrics.get("source_candidate_delta_rms_ratio", 1.0))
+    full_mix_rms_risk = max(0.0, (ratio - 1.02) / 0.18)
+    passthrough_similarity_risk = min(
+        max(0.0, (source_candidate_corr - 0.96) / 0.04),
+        max(0.0, (0.10 - source_candidate_delta_ratio) / 0.10),
+    )
+    vocal_corr_risk = max(0.0, (vocal_corr - 0.12) / 0.12)
+    vocal_projection_risk = max(0.0, (vocal_projection_db + 22.0) / 12.0)
+    has_vocal_evidence_metrics = (
+        "vocal_stem_corr_abs" in metrics or "vocal_projection_db_vs_instrumental" in metrics
+    )
+    vocal_evidence_risk = max(vocal_corr_risk, vocal_projection_risk)
+    gated_passthrough_similarity_risk = (
+        passthrough_similarity_risk
+        if (not has_vocal_evidence_metrics or vocal_evidence_risk > 0.0)
+        else 0.0
+    )
+    full_mix_like_risk = max(full_mix_rms_risk, gated_passthrough_similarity_risk)
 
     severities = {
         "low_rms_ratio": max(0.0, (0.52 - ratio) / 0.52),
         "presence_loss": max(0.0, (-9.0 - presence_db) / 9.0),
         "air_loss": max(0.0, (-12.0 - air_db) / 12.0),
-        "full_mix_like_risk": max(0.0, (ratio - 1.02) / 0.18),
-        "vocal_stem_corr": max(0.0, (vocal_corr - 0.12) / 0.12),
-        "vocal_projection": max(0.0, (vocal_projection_db + 22.0) / 12.0),
+        "full_mix_like_risk": full_mix_like_risk,
+        "vocal_stem_corr": vocal_corr_risk,
+        "vocal_projection": vocal_projection_risk,
     }
     issues: list[str] = []
     if severities["low_rms_ratio"] > 0.0:
