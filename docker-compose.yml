@@ -51,6 +51,7 @@ services:
     volumes:
       - ./ml_worker_improved:/app
       - ./lab_artifacts:/app/lab_artifacts
+      - ./testing_stuff_music:/host_testing_stuff_music:ro
       - ./testing_flstudio_music:/app/testing_flstudio_music:ro
       - ./docker_data/storage:/app/storage
       - ./docker_data/faiss_index:/app/faiss_index
