@@ -293,6 +293,12 @@ def write_runtime_summary(path: Path, manifest: dict[str, Any]) -> None:
         f"- selected_minus_candidate: {manifest.get('selected_minus_candidate') or ''}",
         f"- learned_model_version: {manifest.get('learned_model', {}).get('model_version', 'unknown')}",
         f"- candidate_wave_executed: {str(manifest.get('candidate_wave_executed') is True).lower()}",
+        f"- candidate_execution_mode: {manifest.get('candidate_execution_mode') or ''}",
+        f"- allow_shape_normalization: {str(manifest.get('allow_shape_normalization') is True).lower()}",
+        f"- candidate_diversity_profile: {manifest.get('candidate_diversity_profile') or ''}",
+        f"- escalation_executed: {str(manifest.get('escalation_executed') is True).lower()}",
+        f"- escalated_profile: {manifest.get('escalated_profile') or ''}",
+        f"- escalation_reason: {manifest.get('escalation_reason') or ''}",
         f"- candidate_pool_jsonl: {manifest.get('candidate_pool_jsonl') or ''}",
         f"- release_ready: false",
         "",
@@ -301,6 +307,14 @@ def write_runtime_summary(path: Path, manifest: dict[str, Any]) -> None:
     ]
     wave = manifest.get("candidate_wave_summary") if isinstance(manifest.get("candidate_wave_summary"), dict) else {}
     for key in (
+        "candidate_execution_mode",
+        "registry_configs_total",
+        "registry_configs_available",
+        "registry_configs_unavailable",
+        "jobs_attempted",
+        "jobs_generated",
+        "jobs_failed",
+        "jobs_skipped",
         "candidates_attempted",
         "candidates_generated",
         "complete_pairs",
@@ -335,6 +349,11 @@ def build_failure_manifest(
     candidate_wave_executed: bool = False,
     candidate_wave_summary: dict[str, Any] | None = None,
     candidate_pool_jsonl: Path | None = None,
+    candidate_execution_mode: str = "",
+    profile: str = "safe",
+    allow_shape_normalization: bool = True,
+    candidate_diversity_profile: str = "safe",
+    escalation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blockers = stable_unique([reason])
     write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["selected_candidates"])
@@ -367,7 +386,12 @@ def build_failure_manifest(
         "learned_model": model_info,
         "candidate_wave_executed": bool(candidate_wave_executed),
         "candidate_wave_summary": candidate_wave_summary or {},
+        "candidate_execution_mode": candidate_execution_mode,
+        "profile": profile,
+        "allow_shape_normalization": bool(allow_shape_normalization),
+        "candidate_diversity_profile": candidate_diversity_profile,
         "candidate_pool_jsonl": str(candidate_pool_jsonl or output_dir / "candidate_pool.jsonl"),
+        **(escalation or {}),
         **SAFETY_FLAGS,
     }
     write_json(output_dir / REQUIRED_OUTPUTS["run_manifest"], manifest)
@@ -386,6 +410,12 @@ def run_pipeline(
     candidate_profile: str = "safe",
     max_candidates: int = 6,
     candidate_wave_source_jsonl: Path | None = None,
+    candidate_execution_mode: str = "collect_existing",
+    max_candidate_runtime_sec: int = 600,
+    continue_on_candidate_failure: bool = True,
+    allow_shape_normalization: bool = True,
+    candidate_diversity_profile: str = "safe",
+    auto_escalate_profile: bool = False,
     window_seconds: float = 12.0,
     max_windows_per_candidate: int = 5,
     window_step_seconds: float = 0.0,
@@ -397,6 +427,14 @@ def run_pipeline(
     candidate_source = candidate_pool_jsonl or (output_dir / "candidate_pool.jsonl")
     candidate_wave_executed = False
     candidate_wave_summary: dict[str, Any] = {}
+    escalation = {
+        "initial_profile": candidate_diversity_profile,
+        "escalated_profile": "",
+        "escalation_reason": "",
+        "escalation_executed": False,
+        "additional_jobs_attempted": 0,
+        "additional_candidates_generated": 0,
+    }
 
     validation = validate_input_audio(input_audio)
     stages.append(stage("validate_input_audio", "completed" if validation["ok"] else "failed", **validation))
@@ -411,6 +449,11 @@ def run_pipeline(
             candidate_wave_executed=candidate_wave_executed,
             candidate_wave_summary=candidate_wave_summary,
             candidate_pool_jsonl=candidate_source,
+            candidate_execution_mode=candidate_execution_mode,
+            profile=profile,
+            allow_shape_normalization=allow_shape_normalization,
+            candidate_diversity_profile=candidate_diversity_profile,
+            escalation=escalation,
         )
 
     if generate_candidates:
@@ -424,10 +467,54 @@ def run_pipeline(
             profile=candidate_profile,
             source_jsonl=source_jsonl,
             max_candidates=max_candidates,
+            execution_mode=candidate_execution_mode,
+            max_runtime_sec=max_candidate_runtime_sec,
+            continue_on_failure=continue_on_candidate_failure,
+            allow_shape_normalization=allow_shape_normalization,
+            candidate_diversity_profile=candidate_diversity_profile,
         )
         candidate_wave_executed = True
         candidate_wave_summary = wave_result["summary"]
         stages.append(stage("run_candidate_wave", "completed", candidate_pool_jsonl=str(candidate_source), **candidate_wave_summary))
+        should_escalate = (
+            auto_escalate_profile
+            and candidate_diversity_profile == "safe"
+            and (
+                int(candidate_wave_summary.get("complete_pairs") or 0) <= 1
+                or int(candidate_wave_summary.get("pair_usable_candidates") or 0) <= 1
+                or int(candidate_wave_summary.get("jobs_failed_timeout") or 0) > 0
+            )
+        )
+        if should_escalate:
+            escalation_reason = "safe_profile_insufficient_candidate_diversity"
+            if int(candidate_wave_summary.get("complete_pairs") or 0) == 0:
+                escalation_reason = "safe_profile_zero_complete_pairs"
+            elif int(candidate_wave_summary.get("jobs_failed_timeout") or 0) > 0:
+                escalation_reason = "safe_profile_timeout_or_partial_jobs"
+            balanced_result = run_candidate_wave(
+                input_audio=input_audio,
+                output_dir=output_dir / "candidates_balanced",
+                candidate_pool_jsonl=candidate_source,
+                profile="balanced",
+                source_jsonl=source_jsonl,
+                max_candidates=max_candidates,
+                execution_mode=candidate_execution_mode,
+                max_runtime_sec=max_candidate_runtime_sec,
+                continue_on_failure=continue_on_candidate_failure,
+                allow_shape_normalization=allow_shape_normalization,
+                candidate_diversity_profile="balanced",
+            )
+            candidate_wave_summary = balanced_result["summary"]
+            escalation.update(
+                {
+                    "escalated_profile": "balanced",
+                    "escalation_reason": escalation_reason,
+                    "escalation_executed": True,
+                    "additional_jobs_attempted": int(candidate_wave_summary.get("jobs_attempted") or 0),
+                    "additional_candidates_generated": int(candidate_wave_summary.get("candidates_generated") or 0),
+                }
+            )
+            stages.append(stage("run_candidate_wave_escalated", "completed", candidate_pool_jsonl=str(candidate_source), **candidate_wave_summary, **escalation))
     else:
         stages.append(stage("run_candidate_wave", "skipped_generate_candidates_false", candidate_pool_jsonl=str(candidate_source)))
 
@@ -458,6 +545,11 @@ def run_pipeline(
             candidate_wave_executed=candidate_wave_executed,
             candidate_wave_summary=candidate_wave_summary,
             candidate_pool_jsonl=candidate_source,
+            candidate_execution_mode=candidate_execution_mode,
+            profile=profile,
+            allow_shape_normalization=allow_shape_normalization,
+            candidate_diversity_profile=candidate_diversity_profile,
+            escalation=escalation,
         )
 
     vocal_judge = judge_candidate_rows_windowed(
@@ -511,6 +603,11 @@ def run_pipeline(
             candidate_wave_executed=candidate_wave_executed,
             candidate_wave_summary=candidate_wave_summary,
             candidate_pool_jsonl=candidate_source,
+            candidate_execution_mode=candidate_execution_mode,
+            profile=profile,
+            allow_shape_normalization=allow_shape_normalization,
+            candidate_diversity_profile=candidate_diversity_profile,
+            escalation=escalation,
         )
 
     selected_rows = [
@@ -636,8 +733,12 @@ def run_pipeline(
         "learned_model": model_info,
         "candidate_wave_executed": bool(candidate_wave_executed),
         "candidate_wave_summary": candidate_wave_summary,
+        "candidate_execution_mode": candidate_execution_mode,
+        "allow_shape_normalization": bool(allow_shape_normalization),
+        "candidate_diversity_profile": candidate_diversity_profile,
         "candidate_pool_jsonl": str(candidate_source),
         "artifacts": {name: str(output_dir / filename) for name, filename in REQUIRED_OUTPUTS.items()},
+        **escalation,
         **SAFETY_FLAGS,
     }
     if output_status not in ALLOWED_RUNTIME_STATUSES:
@@ -653,12 +754,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--input-audio", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
-    parser.add_argument("--profile", choices=("safe",), default="safe")
+    parser.add_argument("--profile", choices=("safe", "balanced"), default="safe")
     parser.add_argument("--candidate-pool-jsonl", type=Path)
     parser.add_argument("--generate-candidates", type=parse_bool, default=True)
     parser.add_argument("--candidate-profile", choices=("safe", "balanced", "exploration"), default="safe")
     parser.add_argument("--candidate-wave-source-jsonl", type=Path)
+    parser.add_argument("--candidate-execution-mode", choices=("collect_existing", "run_jobs", "auto"), default="collect_existing")
     parser.add_argument("--max-candidates", type=int, default=6)
+    parser.add_argument("--max-candidate-runtime-sec", type=int, default=600)
+    parser.add_argument("--continue-on-candidate-failure", type=parse_bool, default=True)
+    parser.add_argument("--allow-shape-normalization", type=parse_bool, default=True)
+    parser.add_argument("--candidate-diversity-profile", choices=("safe", "balanced", "exploration"), default="safe")
+    parser.add_argument("--auto-escalate-profile", type=parse_bool, default=False)
     parser.add_argument("--window-seconds", type=float, default=12.0)
     parser.add_argument("--max-windows-per-candidate", type=int, default=5)
     parser.add_argument("--window-step-seconds", type=float, default=0.0)
@@ -673,6 +780,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidate_profile=args.candidate_profile,
         max_candidates=args.max_candidates,
         candidate_wave_source_jsonl=args.candidate_wave_source_jsonl,
+        candidate_execution_mode=args.candidate_execution_mode,
+        max_candidate_runtime_sec=args.max_candidate_runtime_sec,
+        continue_on_candidate_failure=args.continue_on_candidate_failure,
+        allow_shape_normalization=args.allow_shape_normalization,
+        candidate_diversity_profile=args.candidate_diversity_profile,
+        auto_escalate_profile=args.auto_escalate_profile,
         window_seconds=args.window_seconds,
         max_windows_per_candidate=args.max_windows_per_candidate,
         window_step_seconds=args.window_step_seconds,

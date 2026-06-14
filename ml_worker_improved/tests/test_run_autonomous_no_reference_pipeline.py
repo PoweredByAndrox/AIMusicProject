@@ -341,6 +341,8 @@ def test_controller_runs_candidate_wave_when_no_pool_is_provided(tmp_path: Path)
             "true",
             "--candidate-profile",
             "safe",
+            "--candidate-execution-mode",
+            "collect_existing",
             "--max-candidates",
             "6",
             "--window-seconds",
@@ -437,6 +439,8 @@ def test_controller_zero_generated_candidates_stops_with_needs_more_candidates(t
             "true",
             "--candidate-profile",
             "safe",
+            "--candidate-execution-mode",
+            "collect_existing",
             "--max-candidates",
             "6",
         ]
@@ -446,5 +450,212 @@ def test_controller_zero_generated_candidates_stops_with_needs_more_candidates(t
     manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["candidate_wave_executed"] is True
     assert manifest["output_status"] == "needs_more_candidates"
+    assert manifest["profile"] == "safe"
     assert manifest["release_ready"] is False
     assert manifest["candidate_wave_summary"]["complete_pairs"] == 0
+
+
+def test_controller_passes_candidate_execution_mode_to_wave(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "run"
+    model_dir = tmp_path / "models"
+    create_shadow_model_dir(model_dir)
+    vocal = sine(440, 2.0)
+    minus = sine(120, 2.0)
+    mix_path = write_wav(tmp_path / "audio" / "song.wav", vocal + minus)
+    vocal_path = write_wav(tmp_path / "generated" / "vocal.wav", vocal)
+    minus_path = write_wav(tmp_path / "generated" / "minus.wav", minus)
+    captured: dict = {}
+
+    def fake_wave(**kwargs):
+        captured.update(kwargs)
+        row = {
+            "track_id": "song",
+            "candidate_id": "generated-pair",
+            "mix_path": mix_path,
+            "input_audio_path": mix_path,
+            "vocal_path": vocal_path,
+            "instrumental_path": minus_path,
+            "minus_path": minus_path,
+            "is_complete_pair": True,
+            "target_mode": "both",
+            "can_use_for_vocal": True,
+            "can_use_for_minus": True,
+            "can_use_for_pair": True,
+            "generation_status": "generated",
+            "release_ready": False,
+        }
+        write_jsonl(kwargs["candidate_pool_jsonl"], [row])
+        return {
+            "run_id": "unit-wave",
+            "rows": [row],
+            "failures": [],
+            "summary": {
+                "candidate_execution_mode": kwargs["execution_mode"],
+                "candidates_generated": 1,
+                "complete_pairs": 1,
+                "jobs_attempted": 2,
+                "jobs_generated": 2,
+                "jobs_failed": 0,
+                "release_ready_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(controller, "run_candidate_wave", fake_wave)
+
+    exit_code = main(
+        [
+            "--input-audio",
+            mix_path,
+            "--output-dir",
+            str(output_dir),
+            "--model-dir",
+            str(model_dir),
+            "--profile",
+            "safe",
+            "--generate-candidates",
+            "true",
+            "--candidate-profile",
+            "safe",
+            "--candidate-execution-mode",
+            "run_jobs",
+            "--max-candidates",
+            "4",
+            "--max-candidate-runtime-sec",
+            "123",
+            "--continue-on-candidate-failure",
+            "false",
+            "--allow-shape-normalization",
+            "false",
+            "--candidate-diversity-profile",
+            "balanced",
+            "--window-seconds",
+            "0.5",
+            "--max-windows-per-candidate",
+            "1",
+        ]
+    )
+
+    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert captured["execution_mode"] == "run_jobs"
+    assert captured["max_runtime_sec"] == 123
+    assert captured["continue_on_failure"] is False
+    assert captured["allow_shape_normalization"] is False
+    assert captured["candidate_diversity_profile"] == "balanced"
+    assert manifest["candidate_wave_summary"]["candidate_execution_mode"] == "run_jobs"
+    assert manifest["allow_shape_normalization"] is False
+    assert manifest["candidate_diversity_profile"] == "balanced"
+    assert manifest["release_ready"] is False
+
+
+def test_controller_auto_escalates_safe_to_balanced_when_candidates_are_insufficient(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "run"
+    model_dir = tmp_path / "models"
+    create_shadow_model_dir(model_dir)
+    vocal = sine(440, 2.0)
+    minus = sine(120, 2.0)
+    mix_path = write_wav(tmp_path / "audio" / "song.wav", vocal + minus)
+    vocal_path = write_wav(tmp_path / "generated" / "vocal.wav", vocal)
+    minus_path = write_wav(tmp_path / "generated" / "minus.wav", minus)
+    calls: list[dict] = []
+
+    def fake_wave(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            write_jsonl(kwargs["candidate_pool_jsonl"], [])
+            return {
+                "run_id": "safe-wave",
+                "rows": [],
+                "failures": [],
+                "jobs": [],
+                "summary": {
+                    "candidate_execution_mode": kwargs["execution_mode"],
+                    "candidate_diversity_profile": kwargs["candidate_diversity_profile"],
+                    "candidates_generated": 0,
+                    "complete_pairs": 0,
+                    "jobs_attempted": 1,
+                    "jobs_generated": 0,
+                    "release_ready_count": 0,
+                },
+            }
+        row = {
+            "track_id": "song",
+            "candidate_id": "balanced-pair",
+            "mix_path": mix_path,
+            "input_audio_path": mix_path,
+            "vocal_path": vocal_path,
+            "instrumental_path": minus_path,
+            "minus_path": minus_path,
+            "is_complete_pair": True,
+            "target_mode": "both",
+            "can_use_for_vocal": True,
+            "can_use_for_minus": True,
+            "can_use_for_pair": True,
+            "generation_status": "generated",
+            "release_ready": False,
+        }
+        write_jsonl(kwargs["candidate_pool_jsonl"], [row])
+        return {
+            "run_id": "balanced-wave",
+            "rows": [row],
+            "failures": [],
+            "jobs": [],
+            "summary": {
+                "candidate_execution_mode": kwargs["execution_mode"],
+                "candidate_diversity_profile": kwargs["candidate_diversity_profile"],
+                "candidates_generated": 1,
+                "complete_pairs": 1,
+                "jobs_attempted": 2,
+                "jobs_generated": 2,
+                "release_ready_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(controller, "run_candidate_wave", fake_wave)
+
+    exit_code = main(
+        [
+            "--input-audio",
+            mix_path,
+            "--output-dir",
+            str(output_dir),
+            "--model-dir",
+            str(model_dir),
+            "--profile",
+            "safe",
+            "--generate-candidates",
+            "true",
+            "--candidate-profile",
+            "safe",
+            "--candidate-execution-mode",
+            "auto",
+            "--allow-shape-normalization",
+            "true",
+            "--candidate-diversity-profile",
+            "safe",
+            "--auto-escalate-profile",
+            "true",
+            "--max-candidates",
+            "8",
+            "--max-candidate-runtime-sec",
+            "1800",
+            "--continue-on-candidate-failure",
+            "true",
+            "--window-seconds",
+            "0.5",
+            "--max-windows-per-candidate",
+            "1",
+        ]
+    )
+
+    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert [call["candidate_diversity_profile"] for call in calls] == ["safe", "balanced"]
+    assert manifest["escalation_executed"] is True
+    assert manifest["initial_profile"] == "safe"
+    assert manifest["escalated_profile"] == "balanced"
+    assert manifest["additional_jobs_attempted"] == 2
+    assert manifest["additional_candidates_generated"] == 1
+    assert manifest["release_ready"] is False

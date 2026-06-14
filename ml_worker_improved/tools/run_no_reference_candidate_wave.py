@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -15,9 +16,19 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.build_no_reference_ml_dataset import stable_hash, write_jsonl  # noqa: E402
+from tools.no_reference_candidate_job_registry import (  # noqa: E402
+    CandidateJobConfig,
+    build_candidate_job_registry,
+)
+from tools.no_reference_candidate_job_scheduler import (  # noqa: E402
+    build_candidate_job_plan,
+    write_candidate_job_plan,
+)
+from tools.run_local_separator_candidate_job import run_local_separator_candidate_job  # noqa: E402
 
 
 ALLOWED_PROFILES = {"safe", "balanced", "exploration"}
+ALLOWED_EXECUTION_MODES = {"collect_existing", "run_jobs", "auto"}
 ALLOWED_TARGET_MODES = {"vocal", "minus", "both"}
 DETERMINISTIC_CREATED_AT = "1970-01-01T00:00:00Z"
 
@@ -60,6 +71,17 @@ def sanitize(value: str) -> str:
 
 def stable_id(prefix: str, payload: dict[str, Any]) -> str:
     return sanitize(f"{prefix}_{stable_hash(payload)[:16]}")
+
+
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean value, got: {value}")
 
 
 def file_digest(path: Path) -> str:
@@ -158,6 +180,12 @@ def failure_row(
         "vocal_path": audio_path(row, "vocal_path"),
         "minus_path": audio_path(row, "minus_path", "instrumental_path"),
         "instrumental_path": audio_path(row, "minus_path", "instrumental_path"),
+        "raw_vocal_path": audio_path(row, "raw_vocal_path"),
+        "raw_minus_path": audio_path(row, "raw_minus_path"),
+        "normalized_vocal_path": audio_path(row, "normalized_vocal_path"),
+        "normalized_minus_path": audio_path(row, "normalized_minus_path"),
+        "shape_normalization_applied": bool(row.get("shape_normalization_applied") is True),
+        "shape_normalization_reason": str(row.get("shape_normalization_reason") or ""),
         "can_use_for_vocal": False,
         "can_use_for_minus": False,
         "can_use_for_pair": False,
@@ -167,6 +195,8 @@ def failure_row(
         "source_tool": str(row.get("source_tool") or "existing_local_separator_output"),
         "source_model_id": str(row.get("source_model_id") or ""),
         "source_config_hash": source_hash(row),
+        "job_manifest_path": str(row.get("job_manifest_path") or ""),
+        "job_progress_path": str(row.get("job_progress_path") or ""),
         "created_at": DETERMINISTIC_CREATED_AT,
         "audio_rendered": False,
         "release_ready": False,
@@ -198,6 +228,10 @@ def materialize_asset(
         return None, failure_row(run_id=run_id, track_id=track_id, input_audio=input_audio, row=row, skip_reason="unsupported_target_mode", profile=profile)
     vocal_source = audio_path(row, "vocal_path")
     minus_source = audio_path(row, "minus_path", "instrumental_path")
+    raw_vocal_source = audio_path(row, "raw_vocal_path") or vocal_source
+    raw_minus_source = audio_path(row, "raw_minus_path") or minus_source
+    normalized_vocal_source = audio_path(row, "normalized_vocal_path") or vocal_source
+    normalized_minus_source = audio_path(row, "normalized_minus_path") or minus_source
     missing: list[str] = []
     if mode in {"vocal", "both"} and (not vocal_source or not Path(vocal_source).exists()):
         missing.append("vocal_path")
@@ -234,6 +268,12 @@ def materialize_asset(
         "vocal_path": copied_vocal,
         "minus_path": copied_minus,
         "instrumental_path": copied_minus,
+        "raw_vocal_path": raw_vocal_source if copied_vocal else "",
+        "raw_minus_path": raw_minus_source if copied_minus else "",
+        "normalized_vocal_path": normalized_vocal_source if copied_vocal else "",
+        "normalized_minus_path": normalized_minus_source if copied_minus else "",
+        "shape_normalization_applied": bool(row.get("shape_normalization_applied") is True),
+        "shape_normalization_reason": str(row.get("shape_normalization_reason") or ""),
         "can_use_for_vocal": bool(copied_vocal),
         "can_use_for_minus": bool(copied_minus),
         "can_use_for_pair": bool(copied_vocal and copied_minus),
@@ -243,6 +283,8 @@ def materialize_asset(
         "source_tool": str(row.get("source_tool") or "existing_local_separator_output"),
         "source_model_id": str(row.get("source_model_id") or ""),
         "source_config_hash": source_hash(row),
+        "job_manifest_path": str(row.get("job_manifest_path") or ""),
+        "job_progress_path": str(row.get("job_progress_path") or ""),
         "created_at": DETERMINISTIC_CREATED_AT,
         "audio_rendered": False,
         "release_ready": False,
@@ -273,17 +315,25 @@ def pair_candidate(vocal: dict[str, Any], minus: dict[str, Any], *, max_index: i
         "vocal_path": vocal["vocal_path"],
         "minus_path": minus["minus_path"],
         "instrumental_path": minus["minus_path"],
+        "raw_vocal_path": str(vocal.get("raw_vocal_path") or vocal["vocal_path"]),
+        "raw_minus_path": str(minus.get("raw_minus_path") or minus["minus_path"]),
+        "normalized_vocal_path": str(vocal.get("normalized_vocal_path") or vocal["vocal_path"]),
+        "normalized_minus_path": str(minus.get("normalized_minus_path") or minus["minus_path"]),
+        "shape_normalization_applied": bool(vocal.get("shape_normalization_applied") is True or minus.get("shape_normalization_applied") is True),
+        "shape_normalization_reason": "+".join(sorted({value for value in (str(vocal.get("shape_normalization_reason") or ""), str(minus.get("shape_normalization_reason") or "")) if value})),
         "can_use_for_vocal": True,
         "can_use_for_minus": True,
         "can_use_for_pair": True,
         "generation_profile": vocal["generation_profile"],
-        "generation_status": "generated",
+        "generation_status": "generated_with_shape_normalization" if bool(vocal.get("shape_normalization_applied") is True or minus.get("shape_normalization_applied") is True) else "generated",
         "skip_reason": "",
         "source_tool": "+".join(sorted({vocal["source_tool"], minus["source_tool"]})),
         "source_model_id": "+".join(sorted({value for value in (vocal["source_model_id"], minus["source_model_id"]) if value})),
         "source_config_hash": stable_hash({"vocal": vocal["source_config_hash"], "minus": minus["source_config_hash"]}),
+        "job_manifest_path": "+".join(sorted({value for value in (str(vocal.get("job_manifest_path") or ""), str(minus.get("job_manifest_path") or "")) if value})),
+        "job_progress_path": "+".join(sorted({value for value in (str(vocal.get("job_progress_path") or ""), str(minus.get("job_progress_path") or "")) if value})),
         "created_at": DETERMINISTIC_CREATED_AT,
-        "audio_rendered": False,
+        "audio_rendered": bool(vocal.get("audio_rendered") or minus.get("audio_rendered")),
         "release_ready": False,
         "is_complete_pair": True,
         **SAFETY_FLAGS,
@@ -316,6 +366,320 @@ def build_pairs(assets: list[dict[str, Any]], max_candidates: int) -> list[dict[
     return rows[:limit] if limit else rows
 
 
+def write_summary_markdown(path: Path, summary: dict[str, Any]) -> None:
+    lines = [
+        "# No-Reference Candidate Wave Summary",
+        "",
+        f"- candidate_execution_mode: {summary.get('candidate_execution_mode')}",
+        f"- allow_shape_normalization: {str(summary.get('allow_shape_normalization') is True).lower()}",
+        f"- candidate_diversity_profile: {summary.get('candidate_diversity_profile')}",
+        f"- registry_configs_total: {summary.get('registry_configs_total', 0)}",
+        f"- registry_configs_available: {summary.get('registry_configs_available', 0)}",
+        f"- registry_configs_unavailable: {summary.get('registry_configs_unavailable', 0)}",
+        f"- shared_jobs_planned: {summary.get('shared_jobs_planned', 0)}",
+        f"- duplicate_jobs_avoided: {summary.get('duplicate_jobs_avoided', 0)}",
+        f"- scheduler_skipped_jobs: {summary.get('scheduler_skipped_jobs', 0)}",
+        f"- jobs_attempted: {summary.get('jobs_attempted', 0)}",
+        f"- jobs_generated: {summary.get('jobs_generated', 0)}",
+        f"- jobs_generated_raw: {summary.get('jobs_generated_raw', 0)}",
+        f"- jobs_generated_with_shape_normalization: {summary.get('jobs_generated_with_shape_normalization', 0)}",
+        f"- jobs_generated_with_late_timeout: {summary.get('jobs_generated_with_late_timeout', 0)}",
+        f"- jobs_failed_timeout: {summary.get('jobs_failed_timeout', 0)}",
+        f"- partial_outputs_recovered: {summary.get('partial_outputs_recovered', 0)}",
+        f"- jobs_failed_shape_unrecoverable: {summary.get('jobs_failed_shape_unrecoverable', 0)}",
+        f"- jobs_failed: {summary.get('jobs_failed', 0)}",
+        f"- jobs_skipped: {summary.get('jobs_skipped', 0)}",
+        f"- candidates_generated: {summary.get('candidates_generated', 0)}",
+        f"- materialized_candidate_rows: {summary.get('materialized_candidate_rows', 0)}",
+        f"- complete_pairs: {summary.get('complete_pairs', 0)}",
+        f"- vocal_usable_candidates: {summary.get('vocal_usable_candidates', 0)}",
+        f"- minus_usable_candidates: {summary.get('minus_usable_candidates', 0)}",
+        f"- pair_usable_candidates: {summary.get('pair_usable_candidates', 0)}",
+        f"- candidate_families_generated: {summary.get('candidate_families_generated', [])}",
+        f"- target_modes_generated: {summary.get('target_modes_generated', [])}",
+        f"- release_ready_count: {summary.get('release_ready_count', 0)}",
+        f"- codex_required_at_runtime: {str(summary.get('codex_required_at_runtime') is True).lower()}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def wave_progress_row(phase: str, status: str, **extra: Any) -> dict[str, Any]:
+    return {"phase": phase, "status": status, "created_at": DETERMINISTIC_CREATED_AT, **extra}
+
+
+def job_manifest_to_asset(
+    *,
+    run_id: str,
+    track_id: str,
+    input_audio: Path,
+    profile: str,
+    manifest: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    mode = str(manifest.get("target_mode") or "").strip().lower()
+    if mode not in ALLOWED_TARGET_MODES:
+        row = {
+            "candidate_config_id": str(manifest.get("candidate_config_id") or "unknown_config"),
+            "candidate_family": str(manifest.get("candidate_family") or "unknown_family"),
+            "target_mode": mode or "unknown",
+            "source_tool": str(manifest.get("source_tool") or ""),
+            "source_model_id": str(manifest.get("source_model_id") or ""),
+            "source_config_hash": str(manifest.get("source_config_hash") or ""),
+            "job_manifest_path": str(manifest.get("job_manifest_path") or ""),
+            "job_progress_path": str(manifest.get("job_progress_path") or ""),
+        }
+        return None, failure_row(run_id=run_id, track_id=track_id, input_audio=input_audio, row=row, skip_reason="unsupported_target_mode", profile=profile)
+    output_paths = manifest.get("output_paths") if isinstance(manifest.get("output_paths"), dict) else {}
+    status = str(manifest.get("generation_status") or "")
+    successful_generation = status in {"generated", "generated_with_shape_normalization", "generated_with_late_timeout"}
+    row = {
+        "candidate_config_id": str(manifest.get("candidate_config_id") or "unknown_config"),
+        "candidate_family": str(manifest.get("candidate_family") or f"{mode}_focused"),
+        "target_mode": mode,
+        "vocal_path": str(output_paths.get("vocal_path") or ""),
+        "minus_path": str(output_paths.get("minus_path") or ""),
+        "instrumental_path": str(output_paths.get("minus_path") or ""),
+        "raw_vocal_path": str(manifest.get("raw_vocal_path") or output_paths.get("vocal_path") or ""),
+        "raw_minus_path": str(manifest.get("raw_minus_path") or output_paths.get("minus_path") or ""),
+        "normalized_vocal_path": str(manifest.get("normalized_vocal_path") or output_paths.get("vocal_path") or ""),
+        "normalized_minus_path": str(manifest.get("normalized_minus_path") or output_paths.get("minus_path") or ""),
+        "shape_normalization_applied": bool(manifest.get("shape_normalization_applied") is True),
+        "shape_normalization_reason": str(manifest.get("shape_normalization_reason") or ""),
+        "source_tool": str(manifest.get("source_tool") or "local_separator_candidate_job"),
+        "source_model_id": str(manifest.get("source_model_id") or ""),
+        "source_config_hash": str(manifest.get("source_config_hash") or source_hash(manifest)),
+        "job_manifest_path": str(manifest.get("job_manifest_path") or ""),
+        "job_progress_path": str(manifest.get("job_progress_path") or ""),
+    }
+    if not successful_generation:
+        failure = failure_row(
+            run_id=run_id,
+            track_id=track_id,
+            input_audio=input_audio,
+            row=row,
+            skip_reason=str(manifest.get("skip_reason") or status or "job_not_generated"),
+            profile=profile,
+        )
+        failure["generation_status"] = status or "failed_runtime_error"
+        failure["audio_rendered"] = False
+        return None, failure
+    candidate_id = stable_id(
+        mode,
+        {
+            "input_audio": str(input_audio),
+            "profile": profile,
+            "candidate_config_id": row["candidate_config_id"],
+            "target_mode": mode,
+            "source_config_hash": row["source_config_hash"],
+            "job_manifest_path": row["job_manifest_path"],
+        },
+    )
+    return {
+        "run_id": run_id,
+        "track_id": track_id,
+        "input_audio_path": str(input_audio),
+        "mix_path": str(input_audio),
+        "candidate_id": candidate_id,
+        "candidate_family": row["candidate_family"],
+        "candidate_config_id": row["candidate_config_id"],
+        "target_mode": mode,
+        "vocal_path": row["vocal_path"],
+        "minus_path": row["minus_path"],
+        "instrumental_path": row["minus_path"],
+        "raw_vocal_path": row["raw_vocal_path"],
+        "raw_minus_path": row["raw_minus_path"],
+        "normalized_vocal_path": row["normalized_vocal_path"],
+        "normalized_minus_path": row["normalized_minus_path"],
+        "shape_normalization_applied": row["shape_normalization_applied"],
+        "shape_normalization_reason": row["shape_normalization_reason"],
+        "can_use_for_vocal": bool(row["vocal_path"]) and mode in {"vocal", "both"},
+        "can_use_for_minus": bool(row["minus_path"]) and mode in {"minus", "both"},
+        "can_use_for_pair": bool(mode == "both" and row["vocal_path"] and row["minus_path"]),
+        "generation_profile": profile,
+        "generation_status": status,
+        "skip_reason": "",
+        "source_tool": row["source_tool"],
+        "source_model_id": row["source_model_id"],
+        "source_config_hash": row["source_config_hash"],
+        "job_manifest_path": row["job_manifest_path"],
+        "job_progress_path": row["job_progress_path"],
+        "created_at": DETERMINISTIC_CREATED_AT,
+        "audio_rendered": bool(manifest.get("audio_rendered")),
+        "release_ready": False,
+        **SAFETY_FLAGS,
+    }, None
+
+
+def runnable_configs(candidate_diversity_profile: str, max_candidates: int) -> list[CandidateJobConfig]:
+    configs = sorted(build_candidate_job_registry(profile=candidate_diversity_profile), key=lambda config: config.candidate_config_id)
+    limit = max(0, int(max_candidates))
+    return configs[:limit] if limit else configs
+
+
+def manifest_for_materialized_mode(manifest: dict[str, Any], mode: str) -> dict[str, Any]:
+    output_paths = manifest.get("output_paths") if isinstance(manifest.get("output_paths"), dict) else {}
+    raw_vocal_path = str(manifest.get("raw_vocal_path") or output_paths.get("vocal_path") or "")
+    raw_minus_path = str(manifest.get("raw_minus_path") or output_paths.get("minus_path") or "")
+    normalized_vocal_path = str(manifest.get("normalized_vocal_path") or output_paths.get("vocal_path") or "")
+    normalized_minus_path = str(manifest.get("normalized_minus_path") or output_paths.get("minus_path") or "")
+    if mode == "vocal":
+        materialized_paths = {"vocal_path": str(output_paths.get("vocal_path") or ""), "minus_path": ""}
+        raw_minus_path = ""
+        normalized_minus_path = ""
+    elif mode == "minus":
+        materialized_paths = {"vocal_path": "", "minus_path": str(output_paths.get("minus_path") or "")}
+        raw_vocal_path = ""
+        normalized_vocal_path = ""
+    else:
+        materialized_paths = {"vocal_path": str(output_paths.get("vocal_path") or ""), "minus_path": str(output_paths.get("minus_path") or "")}
+    return {
+        **manifest,
+        "target_mode": mode,
+        "output_paths": materialized_paths,
+        "raw_vocal_path": raw_vocal_path,
+        "raw_minus_path": raw_minus_path,
+        "normalized_vocal_path": normalized_vocal_path,
+        "normalized_minus_path": normalized_minus_path,
+    }
+
+
+def job_manifest_to_assets(
+    *,
+    run_id: str,
+    track_id: str,
+    input_audio: Path,
+    profile: str,
+    manifest: dict[str, Any],
+    materialized_modes: Sequence[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    assets: list[dict[str, Any]] = []
+    first_failure: dict[str, Any] | None = None
+    for mode in materialized_modes:
+        asset, failure = job_manifest_to_asset(
+            run_id=run_id,
+            track_id=track_id,
+            input_audio=input_audio,
+            profile=profile,
+            manifest=manifest_for_materialized_mode(manifest, mode),
+        )
+        if asset is not None:
+            assets.append(asset)
+        if failure is not None and first_failure is None:
+            first_failure = failure
+    return assets, first_failure
+
+
+def run_job_wave(
+    *,
+    run_id: str,
+    track_id: str,
+    input_audio: Path,
+    output_dir: Path,
+    profile: str,
+    max_candidates: int,
+    max_runtime_sec: int,
+    continue_on_failure: bool,
+    allow_shape_normalization: bool,
+    candidate_diversity_profile: str,
+    progress_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    configs = sorted(build_candidate_job_registry(profile=candidate_diversity_profile), key=lambda config: config.candidate_config_id)
+    config_by_id = {config.candidate_config_id: config for config in configs}
+    plan_rows = build_candidate_job_plan(
+        input_audio_path=input_audio,
+        registry_configs=configs,
+        candidate_profile=profile,
+        candidate_diversity_profile=candidate_diversity_profile,
+        max_candidates=max_candidates,
+        max_runtime_sec=max_runtime_sec,
+    )
+    write_candidate_job_plan(output_dir / "candidate_job_plan.jsonl", plan_rows)
+    stats = {
+        "registry_configs_total": len(configs),
+        "registry_configs_available": sum(1 for config in configs if config.entrypoint_type != "unavailable"),
+        "registry_configs_unavailable": sum(1 for config in configs if config.entrypoint_type == "unavailable"),
+        "shared_jobs_planned": sum(1 for row in plan_rows if row.get("can_run") is True),
+        "duplicate_jobs_avoided": sum(1 for row in plan_rows if row.get("reason_skipped") == "duplicate_shared_execution_group"),
+        "scheduler_skipped_jobs": sum(1 for row in plan_rows if row.get("can_run") is not True),
+        "jobs_attempted": 0,
+        "jobs_generated": 0,
+        "jobs_generated_raw": 0,
+        "jobs_generated_with_shape_normalization": 0,
+        "jobs_generated_with_late_timeout": 0,
+        "jobs_failed_shape_unrecoverable": 0,
+        "jobs_failed_timeout": 0,
+        "partial_outputs_recovered": 0,
+        "jobs_failed": 0,
+        "jobs_skipped": 0,
+    }
+    assets: list[dict[str, Any]] = []
+    materialized_assets: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    job_rows: list[dict[str, Any]] = []
+    started = time.monotonic()
+    for plan_row in plan_rows:
+        if plan_row.get("can_run") is not True:
+            continue
+        config = config_by_id[str(plan_row["candidate_config_id"])]
+        elapsed = time.monotonic() - started
+        if max_runtime_sec > 0 and elapsed >= max_runtime_sec:
+            progress_rows.append(wave_progress_row("run_jobs", "stopped_max_runtime_sec", candidate_config_id=config.candidate_config_id))
+            break
+        remaining_runtime_sec = max(1, int(max_runtime_sec - elapsed)) if max_runtime_sec > 0 else int(config.timeout_sec)
+        stats["jobs_attempted"] += 1
+        candidate_output_dir = output_dir / "jobs" / config.candidate_config_id
+        manifest = run_local_separator_candidate_job(
+            input_audio=input_audio,
+            candidate_config_id=config.candidate_config_id,
+            output_dir=candidate_output_dir,
+            job_manifest_json=candidate_output_dir / "job_manifest.json",
+            job_progress_jsonl=candidate_output_dir / "job_progress.jsonl",
+            registry_configs=configs,
+            profile=profile,
+            timeout_sec=min(int(plan_row["timeout_sec"]), remaining_runtime_sec),
+            allow_shape_normalization=allow_shape_normalization,
+        )
+        manifest["job_plan_id"] = str(plan_row["job_plan_id"])
+        manifest["shared_execution_group_id"] = str(plan_row["shared_execution_group_id"])
+        manifest["materialized_candidate_modes"] = list(plan_row.get("target_modes_produced") or [])
+        write_json(candidate_output_dir / "job_manifest.json", manifest)
+        job_rows.append(manifest)
+        status = str(manifest.get("generation_status") or "")
+        if status in {"generated", "generated_with_shape_normalization", "generated_with_late_timeout"}:
+            stats["jobs_generated"] += 1
+            if status == "generated_with_shape_normalization":
+                stats["jobs_generated_with_shape_normalization"] += 1
+            elif status == "generated_with_late_timeout":
+                stats["jobs_generated_with_late_timeout"] += 1
+                stats["partial_outputs_recovered"] += 1
+            else:
+                stats["jobs_generated_raw"] += 1
+        elif status == "skipped_unavailable_entrypoint":
+            stats["jobs_skipped"] += 1
+        else:
+            stats["jobs_failed"] += 1
+            if status == "failed_invalid_audio_shape_unrecoverable":
+                stats["jobs_failed_shape_unrecoverable"] += 1
+            if "timeout" in status:
+                stats["jobs_failed_timeout"] += 1
+        job_assets, failure = job_manifest_to_assets(
+            run_id=run_id,
+            track_id=track_id,
+            input_audio=input_audio,
+            profile=profile,
+            manifest=manifest,
+            materialized_modes=tuple(str(mode) for mode in plan_row.get("target_modes_produced") or (config.target_mode,)),
+        )
+        if job_assets:
+            assets.extend(job_assets)
+            materialized_assets.extend(job_assets)
+        if failure is not None:
+            failures.append(failure)
+        if failure is not None and not continue_on_failure:
+            progress_rows.append(wave_progress_row("run_jobs", "stopped_after_failure", candidate_config_id=config.candidate_config_id, generation_status=status))
+            break
+    return assets, materialized_assets, failures, job_rows, plan_rows, stats
+
+
 def build_summary(
     *,
     source_rows: list[dict[str, Any]],
@@ -323,18 +687,33 @@ def build_summary(
     failures: list[dict[str, Any]],
     source_paths: list[Path],
     input_validation: dict[str, Any],
+    execution_mode: str,
+    allow_shape_normalization: bool,
+    candidate_diversity_profile: str,
+    job_rows: list[dict[str, Any]],
+    plan_rows: list[dict[str, Any]],
+    materialized_assets: list[dict[str, Any]],
+    job_stats: dict[str, int],
 ) -> dict[str, Any]:
     return {
         "candidate_wave_executed": True,
+        "candidate_execution_mode": execution_mode,
+        "allow_shape_normalization": bool(allow_shape_normalization),
+        "candidate_diversity_profile": candidate_diversity_profile,
         "source_jsonl_paths": [str(path) for path in source_paths],
         "input_validation": input_validation,
-        "candidates_attempted": len(source_rows),
+        "candidates_attempted": len(source_rows) + len(job_rows),
         "candidates_generated": len(rows),
+        "materialized_candidate_rows": len(materialized_assets),
+        "candidate_job_plan_rows": len(plan_rows),
         "complete_pairs": sum(1 for row in rows if row.get("is_complete_pair") is True),
         "vocal_usable_candidates": sum(1 for row in rows if row.get("can_use_for_vocal") is True),
         "minus_usable_candidates": sum(1 for row in rows if row.get("can_use_for_minus") is True),
         "pair_usable_candidates": sum(1 for row in rows if row.get("can_use_for_pair") is True),
         "failed_candidates": len(failures),
+        **job_stats,
+        "candidate_families_generated": sorted({str(row.get("candidate_family") or "") for row in rows if str(row.get("candidate_family") or "")}),
+        "target_modes_generated": sorted({str(row.get("target_mode") or "") for row in rows if str(row.get("target_mode") or "")}),
         "skip_reasons": dict(sorted({reason: sum(1 for row in failures if row.get("skip_reason") == reason) for reason in {str(row.get("skip_reason") or "") for row in failures}}.items())),
         "release_ready_count": sum(1 for row in rows + failures if row.get("release_ready") is True),
         **SAFETY_FLAGS,
@@ -349,9 +728,18 @@ def run_candidate_wave(
     profile: str = "safe",
     source_jsonl: Path | None = None,
     max_candidates: int = 6,
+    execution_mode: str = "collect_existing",
+    max_runtime_sec: int = 600,
+    continue_on_failure: bool = True,
+    allow_shape_normalization: bool = True,
+    candidate_diversity_profile: str = "safe",
 ) -> dict[str, Any]:
     if profile not in ALLOWED_PROFILES:
         raise ValueError(f"Unsupported candidate profile: {profile}")
+    if candidate_diversity_profile not in ALLOWED_PROFILES:
+        raise ValueError(f"Unsupported candidate diversity profile: {candidate_diversity_profile}")
+    if execution_mode not in ALLOWED_EXECUTION_MODES:
+        raise ValueError(f"Unsupported candidate execution mode: {execution_mode}")
     output_dir.mkdir(parents=True, exist_ok=True)
     input_validation = validate_input_audio(input_audio)
     source_rows, source_paths = load_source_rows(output_dir, source_jsonl)
@@ -361,12 +749,39 @@ def run_candidate_wave(
         {
             "input_audio_path": str(input_audio),
             "input_audio_sha256": file_digest(input_audio) if input_validation["ok"] else "",
-            "profile": profile,
-            "source_rows": [{key: row.get(key) for key in sorted(row)} for row in source_rows],
-        },
+        "profile": profile,
+        "candidate_diversity_profile": candidate_diversity_profile,
+        "execution_mode": execution_mode,
+        "allow_shape_normalization": bool(allow_shape_normalization),
+        "source_rows": [{key: row.get(key) for key in sorted(row)} for row in source_rows],
+    },
     )
     assets: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    job_rows: list[dict[str, Any]] = []
+    plan_rows: list[dict[str, Any]] = []
+    materialized_assets: list[dict[str, Any]] = []
+    progress_rows: list[dict[str, Any]] = [
+        wave_progress_row("start", "started", candidate_execution_mode=execution_mode, profile=profile)
+    ]
+    job_stats = {
+        "registry_configs_total": 0,
+        "registry_configs_available": 0,
+        "registry_configs_unavailable": 0,
+        "shared_jobs_planned": 0,
+        "duplicate_jobs_avoided": 0,
+        "scheduler_skipped_jobs": 0,
+        "jobs_attempted": 0,
+        "jobs_generated": 0,
+        "jobs_generated_raw": 0,
+        "jobs_generated_with_shape_normalization": 0,
+        "jobs_generated_with_late_timeout": 0,
+        "jobs_failed_shape_unrecoverable": 0,
+        "jobs_failed_timeout": 0,
+        "partial_outputs_recovered": 0,
+        "jobs_failed": 0,
+        "jobs_skipped": 0,
+    }
     if not input_validation["ok"]:
         failures.append(
             failure_row(
@@ -379,17 +794,79 @@ def run_candidate_wave(
             )
         )
     else:
-        for row in source_rows:
-            asset, failure = materialize_asset(run_id=run_id, track_id=str(row.get("track_id") or track_id), input_audio=input_audio, output_dir=output_dir, row=row, profile=profile)
-            if asset is not None:
-                assets.append(asset)
-            if failure is not None:
-                failures.append(failure)
+        if execution_mode in {"collect_existing", "auto"}:
+            progress_rows.append(wave_progress_row("collect_existing", "started", source_rows=len(source_rows)))
+            for row in source_rows:
+                asset, failure = materialize_asset(run_id=run_id, track_id=str(row.get("track_id") or track_id), input_audio=input_audio, output_dir=output_dir, row=row, profile=profile)
+                if asset is not None:
+                    assets.append(asset)
+                if failure is not None:
+                    failures.append(failure)
+            progress_rows.append(wave_progress_row("collect_existing", "completed", assets=len(assets), failures=len(failures)))
+        existing_rows = build_pairs(assets, max_candidates=max_candidates)
+        should_run_jobs = execution_mode == "run_jobs" or (execution_mode == "auto" and len(existing_rows) < int(max_candidates))
+        if should_run_jobs:
+            progress_rows.append(wave_progress_row("run_jobs", "started", existing_pairs=len(existing_rows)))
+            job_assets, job_materialized_assets, job_failures, job_rows, plan_rows, job_stats = run_job_wave(
+                run_id=run_id,
+                track_id=track_id,
+                input_audio=input_audio,
+                output_dir=output_dir,
+                profile=profile,
+                max_candidates=max_candidates,
+                max_runtime_sec=max_runtime_sec,
+                continue_on_failure=continue_on_failure,
+                allow_shape_normalization=allow_shape_normalization,
+                candidate_diversity_profile=candidate_diversity_profile,
+                progress_rows=progress_rows,
+            )
+            assets.extend(job_assets)
+            materialized_assets.extend(job_materialized_assets)
+            failures.extend(job_failures)
+            progress_rows.append(wave_progress_row("run_jobs", "completed", **job_stats))
+        else:
+            registry_configs = build_candidate_job_registry(profile=candidate_diversity_profile)
+            job_stats = {
+                "registry_configs_total": len(registry_configs),
+                "registry_configs_available": sum(1 for config in registry_configs if config.entrypoint_type != "unavailable"),
+                "registry_configs_unavailable": sum(1 for config in registry_configs if config.entrypoint_type == "unavailable"),
+                "shared_jobs_planned": 0,
+                "duplicate_jobs_avoided": 0,
+                "scheduler_skipped_jobs": 0,
+                "jobs_attempted": 0,
+                "jobs_generated": 0,
+                "jobs_generated_raw": 0,
+                "jobs_generated_with_shape_normalization": 0,
+                "jobs_generated_with_late_timeout": 0,
+                "jobs_failed_shape_unrecoverable": 0,
+                "jobs_failed_timeout": 0,
+                "partial_outputs_recovered": 0,
+                "jobs_failed": 0,
+                "jobs_skipped": 0,
+            }
     rows = build_pairs(assets, max_candidates=max_candidates)
-    summary = build_summary(source_rows=source_rows, rows=rows, failures=failures, source_paths=source_paths, input_validation=input_validation)
+    summary = build_summary(
+        source_rows=source_rows,
+        rows=rows,
+        failures=failures,
+        source_paths=source_paths,
+        input_validation=input_validation,
+        execution_mode=execution_mode,
+        allow_shape_normalization=allow_shape_normalization,
+        candidate_diversity_profile=candidate_diversity_profile,
+        job_rows=job_rows,
+        plan_rows=plan_rows,
+        materialized_assets=materialized_assets,
+        job_stats=job_stats,
+    )
+    progress_rows.append(wave_progress_row("write_outputs", "completed", candidates_generated=len(rows), failures=len(failures)))
     write_jsonl(candidate_pool_jsonl, rows)
     write_jsonl(output_dir / "candidate_wave_failures.jsonl", failures)
+    write_jsonl(output_dir / "candidate_wave_jobs.jsonl", job_rows)
+    write_jsonl(output_dir / "candidate_wave_materialized_assets.jsonl", materialized_assets)
+    write_jsonl(output_dir / "candidate_wave_progress.jsonl", progress_rows)
     write_json(output_dir / "candidate_wave_summary.json", summary)
+    write_summary_markdown(output_dir / "candidate_wave_summary.md", summary)
     write_json(
         output_dir / "candidate_wave_manifest.json",
         {
@@ -397,12 +874,17 @@ def run_candidate_wave(
             "input_audio_path": str(input_audio),
             "candidate_pool_jsonl": str(candidate_pool_jsonl),
             "profile": profile,
+            "candidate_execution_mode": execution_mode,
+            "allow_shape_normalization": bool(allow_shape_normalization),
+            "candidate_diversity_profile": candidate_diversity_profile,
             "max_candidates": int(max_candidates),
+            "max_runtime_sec": int(max_runtime_sec),
+            "continue_on_failure": bool(continue_on_failure),
             "summary": summary,
             **SAFETY_FLAGS,
         },
     )
-    return {"run_id": run_id, "rows": rows, "failures": failures, "summary": summary}
+    return {"run_id": run_id, "rows": rows, "materialized_assets": materialized_assets, "failures": failures, "jobs": job_rows, "plan": plan_rows, "summary": summary}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -413,6 +895,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile", choices=tuple(sorted(ALLOWED_PROFILES)), default="safe")
     parser.add_argument("--source-jsonl", type=Path)
     parser.add_argument("--max-candidates", type=int, default=6)
+    parser.add_argument("--execution-mode", choices=tuple(sorted(ALLOWED_EXECUTION_MODES)), default="collect_existing")
+    parser.add_argument("--max-runtime-sec", type=int, default=600)
+    parser.add_argument("--continue-on-failure", type=parse_bool, default=True)
+    parser.add_argument("--allow-shape-normalization", type=parse_bool, default=True)
+    parser.add_argument("--candidate-diversity-profile", choices=tuple(sorted(ALLOWED_PROFILES)), default="safe")
     args = parser.parse_args(argv)
     result = run_candidate_wave(
         input_audio=args.input_audio,
@@ -421,6 +908,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile=args.profile,
         source_jsonl=args.source_jsonl,
         max_candidates=args.max_candidates,
+        execution_mode=args.execution_mode,
+        max_runtime_sec=args.max_runtime_sec,
+        continue_on_failure=args.continue_on_failure,
+        allow_shape_normalization=args.allow_shape_normalization,
+        candidate_diversity_profile=args.candidate_diversity_profile,
     )
     print(json.dumps({"candidate_pool_jsonl": str(args.candidate_pool_jsonl), **result["summary"]}, ensure_ascii=False, sort_keys=True))
     return 0
