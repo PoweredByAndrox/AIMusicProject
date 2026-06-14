@@ -11,16 +11,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import soundfile as sf
 import torch
+from scipy.signal import resample_poly
 from torch import nn
 
 TOOLS_ROOT = Path(__file__).resolve().parent
@@ -32,7 +35,9 @@ from docker_runtime import require_docker_runtime  # noqa: E402
 
 SAFE_STEM_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 MODEL_ID = "teacher_mask_separator_v1"
+PROGRESS_NAME = "teacher_mask_separator_progress.jsonl"
 EPSILON = 1.0e-8
+START_TIME = time.monotonic()
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,18 @@ def read_json(path: Path) -> dict[str, Any]:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def progress(path: Path, event: str, **fields: Any) -> None:
+    payload = {
+        "event": event,
+        "elapsed_sec": round(time.monotonic() - START_TIME, 3),
+    }
+    payload.update(fields)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.flush()
 
 
 def sha256_file(path: Path) -> str:
@@ -154,13 +171,28 @@ def fit_audio_pair(source_audio: np.ndarray, target_audio: np.ndarray) -> tuple[
     return source_audio[:length, :channels], target_audio[:length, :channels]
 
 
+def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if int(source_rate) == int(target_rate):
+        return audio.astype(np.float64, copy=False)
+    if int(source_rate) <= 0 or int(target_rate) <= 0:
+        raise ValueError(f"invalid sample rates: source={source_rate}, target={target_rate}")
+    divisor = math.gcd(int(source_rate), int(target_rate))
+    up = int(target_rate) // divisor
+    down = int(source_rate) // divisor
+    return resample_poly(audio, up, down, axis=0).astype(np.float64, copy=False)
+
+
 def mono(audio: np.ndarray) -> np.ndarray:
     return np.mean(audio, axis=1, dtype=np.float64)
 
 
 def _select_device(requested_device: str) -> torch.device:
-    if requested_device == "cuda" and torch.cuda.is_available():
+    if requested_device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested for teacher-mask training but torch.cuda.is_available() is false")
         return torch.device("cuda")
+    if requested_device != "cpu":
+        raise ValueError(f"Unsupported device: {requested_device}")
     return torch.device("cpu")
 
 
@@ -334,6 +366,8 @@ def train_teacher_mask(
     target_audio: np.ndarray,
     *,
     config: TeacherMaskTrainConfig,
+    progress_path: Path | None = None,
+    progress_context: dict[str, Any] | None = None,
 ) -> tuple[TeacherMaskNetwork, dict[str, Any], dict[str, float]]:
     torch.manual_seed(int(config.seed))
     np.random.seed(int(config.seed))
@@ -380,7 +414,9 @@ def train_teacher_mask(
         indices = base_indices
     batch_size = max(1, min(int(config.batch_size), int(frame_count)))
     last_loss = 0.0
-    for _ in range(int(config.epochs)):
+    epoch_count = int(config.epochs)
+    progress_stride = max(1, epoch_count // 10)
+    for epoch_index in range(epoch_count):
         permutation = indices[torch.randperm(indices.numel(), device=device)]
         for start in range(0, indices.numel(), batch_size):
             batch_indices = permutation[start : start + batch_size]
@@ -394,6 +430,21 @@ def train_teacher_mask(
             loss.backward()
             optimizer.step()
             last_loss = float(loss.detach().cpu())
+        if progress_path is not None and (
+            epoch_index == 0 or epoch_index + 1 == epoch_count or (epoch_index + 1) % progress_stride == 0
+        ):
+            progress(
+                progress_path,
+                "train_epoch",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                frame_count=int(frame_count),
+                training_index_count=int(indices.numel()),
+                batch_size=int(batch_size),
+                current_loss=round(last_loss, 9),
+                device=str(device),
+            )
     metadata = {
         "frequency_bins": int(frequency_bins),
         "input_features": int(model_features.shape[1]),
@@ -453,6 +504,181 @@ def train_teacher_mask(
         "active_frame_threshold": round(float(active_threshold.detach().cpu()), 12),
         "frequency_bins": float(frequency_bins),
         "device_used": 1.0 if device.type == "cuda" else 0.0,
+        "source_feature_memory_frame_count": float(frame_count)
+        if int(config.source_feature_memory_neighbors) > 0
+        else 0.0,
+    }
+    return model, metadata, diagnostics
+
+
+def train_teacher_mask_dataset(
+    training_pairs: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    config: TeacherMaskTrainConfig,
+    progress_path: Path | None = None,
+    progress_context: dict[str, Any] | None = None,
+    max_frames_per_pair: int = 0,
+) -> tuple[TeacherMaskNetwork, dict[str, Any], dict[str, float]]:
+    if not training_pairs:
+        raise ValueError("training_pairs must contain at least one source/target pair")
+    if int(config.time_feature_count) > 0:
+        raise ValueError("dataset training forbids temporal priors because they do not generalize across tracks")
+    if bool(config.source_feature_memory_store_complex_masks):
+        raise ValueError("dataset training forbids complex source-feature memory because it is reconstructive per-source state")
+
+    torch.manual_seed(int(config.seed))
+    np.random.seed(int(config.seed))
+    device = _select_device(config.device)
+    raw_feature_chunks: list[torch.Tensor] = []
+    source_mag_chunks: list[torch.Tensor] = []
+    target_mag_chunks: list[torch.Tensor] = []
+    oracle_mask_chunks: list[torch.Tensor] = []
+    weight_chunks: list[torch.Tensor] = []
+    active_index_chunks: list[torch.Tensor] = []
+    frame_counts: list[int] = []
+    frequency_bins: int | None = None
+    frame_offset = 0
+
+    for pair_index, (source_audio, target_audio) in enumerate(training_pairs, start=1):
+        source_audio, target_audio = fit_audio_pair(source_audio, target_audio)
+        source_stft = _stft_mono(mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
+        target_stft = _stft_mono(mono(target_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
+        source_mag = source_stft.abs().transpose(0, 1).clamp_min(EPSILON)
+        target_mag = target_stft.abs().transpose(0, 1)
+        if frequency_bins is None:
+            frequency_bins = int(source_mag.shape[1])
+        elif int(source_mag.shape[1]) != frequency_bins:
+            raise ValueError("all training pairs must produce the same frequency-bin count")
+        raw_frame_features = torch.log1p(source_mag * 64.0)
+        raw_features = _local_context_features(raw_frame_features, int(config.context_frame_radius))
+        oracle_mask = (target_mag / source_mag).clamp(0.0, float(config.mask_ceiling))
+        target_frame_activity = target_mag.mean(dim=1)
+        baseline_active_threshold = safe_quantile(target_frame_activity, 0.65)
+        sparse_active_floor = safe_quantile(target_frame_activity, 0.95) * 0.05
+        active_threshold = torch.maximum(baseline_active_threshold, sparse_active_floor).clamp_min(EPSILON)
+        active_mask = target_frame_activity >= active_threshold
+        frame_weights = 0.25 + active_mask.float().unsqueeze(1)
+        target_bin_scale = (target_mag / safe_quantile(target_mag, 0.90).clamp_min(EPSILON)).clamp(0.0, 1.0)
+        source_bin_scale = (source_mag / safe_quantile(source_mag, 0.90).clamp_min(EPSILON)).clamp(0.0, 1.0)
+        source_without_target_weight = source_bin_scale * (1.0 - target_bin_scale).clamp(0.0, 1.0)
+        time_frequency_weights = frame_weights * (
+            0.05
+            + float(config.activity_weight) * target_bin_scale
+            + max(0.0, float(config.leakage_suppression_weight)) * source_without_target_weight
+        )
+        frame_count = int(source_mag.shape[0])
+        if int(max_frames_per_pair) > 0 and frame_count > int(max_frames_per_pair):
+            selected_indices = torch.linspace(
+                0,
+                frame_count - 1,
+                int(max_frames_per_pair),
+                dtype=torch.long,
+                device=device,
+            )
+            source_mag = source_mag[selected_indices]
+            target_mag = target_mag[selected_indices]
+            raw_features = raw_features[selected_indices]
+            oracle_mask = oracle_mask[selected_indices]
+            time_frequency_weights = time_frequency_weights[selected_indices]
+            active_mask = active_mask[selected_indices]
+            frame_count = int(source_mag.shape[0])
+        raw_feature_chunks.append(raw_features)
+        source_mag_chunks.append(source_mag)
+        target_mag_chunks.append(target_mag)
+        oracle_mask_chunks.append(oracle_mask)
+        weight_chunks.append(time_frequency_weights)
+        active_indices = torch.nonzero(active_mask, as_tuple=False).flatten()
+        if active_indices.numel() > 0:
+            active_index_chunks.append(active_indices + frame_offset)
+        frame_counts.append(frame_count)
+        frame_offset += frame_count
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "dataset_pair_loaded",
+                **dict(progress_context or {}),
+                pair_index=pair_index,
+                pair_count=len(training_pairs),
+                frame_count=frame_count,
+                active_frame_count=int(active_indices.numel()),
+                device=str(device),
+            )
+
+    raw_features_all = torch.cat(raw_feature_chunks, dim=0)
+    features, feature_mean, feature_std = _normalize_features(raw_features_all)
+    temporal_features = _temporal_position_features(int(features.shape[0]), int(config.time_feature_count), device=device)
+    model_features = torch.cat([features, temporal_features], dim=1)
+    source_mag_all = torch.cat(source_mag_chunks, dim=0)
+    target_mag_all = torch.cat(target_mag_chunks, dim=0)
+    oracle_mask_all = torch.cat(oracle_mask_chunks, dim=0)
+    weights_all = torch.cat(weight_chunks, dim=0)
+    frame_count = int(model_features.shape[0])
+    frequency_bins = int(frequency_bins or 0)
+    model = TeacherMaskNetwork(
+        input_features=int(model_features.shape[1]),
+        frequency_bins=frequency_bins,
+        hidden_size=int(config.hidden_size),
+    ).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(config.learning_rate), weight_decay=1.0e-5)
+    base_indices = torch.arange(frame_count, device=device)
+    active_indices = torch.cat(active_index_chunks, dim=0) if active_index_chunks else torch.empty(0, dtype=torch.long, device=device)
+    if int(config.active_frame_oversample) > 1 and active_indices.numel() > 0:
+        indices = torch.cat([base_indices, active_indices.repeat(int(config.active_frame_oversample) - 1)])
+    else:
+        indices = base_indices
+    batch_size = max(1, min(int(config.batch_size), frame_count))
+    epoch_count = int(config.epochs)
+    progress_stride = max(1, epoch_count // 10)
+    last_loss = 0.0
+    for epoch_index in range(epoch_count):
+        permutation = indices[torch.randperm(indices.numel(), device=device)]
+        for start in range(0, int(indices.numel()), batch_size):
+            batch_indices = permutation[start : start + batch_size]
+            prediction = model(model_features[batch_indices])
+            batch_weights = weights_all[batch_indices]
+            mask_loss = ((prediction - oracle_mask_all[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+            estimated_mag = prediction * source_mag_all[batch_indices]
+            magnitude_loss = ((estimated_mag - target_mag_all[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+            loss = mask_loss + float(config.magnitude_loss_weight) * magnitude_loss / source_mag_all.mean().clamp_min(EPSILON)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            last_loss = float(loss.detach().cpu())
+        if progress_path is not None and (
+            epoch_index == 0 or epoch_index + 1 == epoch_count or (epoch_index + 1) % progress_stride == 0
+        ):
+            progress(
+                progress_path,
+                "dataset_train_epoch",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                frame_count=frame_count,
+                training_index_count=int(indices.numel()),
+                batch_size=batch_size,
+                current_loss=round(last_loss, 9),
+                device=str(device),
+            )
+
+    metadata = {
+        "frequency_bins": int(frequency_bins),
+        "input_features": int(model_features.shape[1]),
+        "feature_mean": feature_mean.detach().cpu().numpy().astype(np.float32),
+        "feature_std": feature_std.detach().cpu().numpy().astype(np.float32),
+    }
+    if int(config.source_feature_memory_neighbors) > 0:
+        metadata["source_feature_memory_features"] = model_features.detach().cpu().numpy().astype(np.float16, copy=False)
+        metadata["source_feature_memory_masks"] = oracle_mask_all.detach().cpu().numpy().astype(np.float16, copy=False)
+    diagnostics = {
+        "training_loss": round(last_loss, 9),
+        "training_example_count": float(len(training_pairs)),
+        "unique_training_pair_count": float(len(training_pairs)),
+        "frame_count": float(frame_count),
+        "training_index_count": float(indices.numel()),
+        "active_frame_count": float(active_indices.numel()),
+        "frequency_bins": float(frequency_bins),
+        "device_used": 1.0 if device.type == "cuda" else 0.0,
+        "max_frames_per_pair": float(max(0, int(max_frames_per_pair))),
         "source_feature_memory_frame_count": float(frame_count)
         if int(config.source_feature_memory_neighbors) > 0
         else 0.0,
@@ -524,7 +750,15 @@ def apply_teacher_mask(
                     if raw_channel_masks.ndim == 3 and raw_channel_masks.shape[-1] == source_mag.shape[1]:
                         source_feature_memory_channel_masks = raw_channel_masks
             else:
-                source_feature_memory_skipped_reason = "non_matching_source_features"
+                memory_mask = _source_feature_memory_mask(
+                    model_features,
+                    memory_features=memory_features,
+                    memory_masks=memory_masks,
+                    neighbor_count=int(config.source_feature_memory_neighbors),
+                    chunk_size=int(config.source_feature_memory_chunk_size),
+                )
+                mask = memory_mask.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
+                source_feature_memory_used = True
             if "source_feature_memory_complex_mask_real" in metadata and "source_feature_memory_complex_mask_imag" in metadata:
                 source_feature_memory_complex_mask_available = True
                 raw_source_feature_memory_complex_masks = (
@@ -615,6 +849,8 @@ def apply_teacher_mask(
         output *= float(config.max_peak) / peak
         peak_limited = True
     diagnostics = {
+        "device": str(device.type),
+        "device_used": 1.0 if device.type == "cuda" else 0.0,
         "predicted_mask_mean": round(float(mask.mean().detach().cpu()), 9),
         "predicted_mask_max": round(float(mask.max().detach().cpu()), 9),
         "source_feature_memory_available": source_feature_memory_available,
@@ -807,18 +1043,90 @@ def train_and_apply_teacher_mask_separator(
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     stem_name = validate_stem_name(stem_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = output_dir / PROGRESS_NAME
+    acceleration_mode = "gpu_training" if str(train_config.device).lower() == "cuda" else "cpu_test_training"
+    progress_context = {
+        "stem_name": stem_name,
+        "expected_acceleration_mode": acceleration_mode,
+        "gpu_training_required": str(train_config.device).lower() == "cuda",
+        "gpu_training_skipped": str(train_config.device).lower() != "cuda",
+        "device_requested": str(train_config.device),
+    }
+    progress(
+        progress_path,
+        "start",
+        **progress_context,
+        source_mix_path=str(source_mix_path),
+        teacher_target_path=str(teacher_target_path),
+        output_dir=str(output_dir),
+    )
     source_audio, source_sample_rate = read_audio(source_mix_path)
     target_audio, target_sample_rate = read_audio(teacher_target_path)
+    sample_rate_alignment = {
+        "source_sample_rate": int(source_sample_rate),
+        "teacher_target_original_sample_rate": int(target_sample_rate),
+        "teacher_target_sample_rate_after_alignment": int(target_sample_rate),
+        "teacher_target_resampled": False,
+        "method": "none",
+    }
     if source_sample_rate != target_sample_rate:
-        raise ValueError(f"sample-rate mismatch: source={source_sample_rate}, target={target_sample_rate}")
+        progress(
+            progress_path,
+            "teacher_target_resample_start",
+            **progress_context,
+            source_sample_rate=int(source_sample_rate),
+            teacher_target_sample_rate=int(target_sample_rate),
+        )
+        target_audio = resample_audio(target_audio, target_sample_rate, source_sample_rate)
+        sample_rate_alignment.update(
+            {
+                "teacher_target_sample_rate_after_alignment": int(source_sample_rate),
+                "teacher_target_resampled": True,
+                "method": "scipy.signal.resample_poly",
+            }
+        )
+        progress(
+            progress_path,
+            "teacher_target_resample_finish",
+            **progress_context,
+            source_sample_rate=int(source_sample_rate),
+            teacher_target_original_sample_rate=int(target_sample_rate),
+            teacher_target_sample_rate_after_alignment=int(source_sample_rate),
+            teacher_target_frames_after_alignment=int(target_audio.shape[0]),
+            resample_method="scipy.signal.resample_poly",
+        )
+        target_sample_rate = source_sample_rate
     source_audio, target_audio = fit_audio_pair(source_audio, target_audio)
-    model, metadata, train_diagnostics = train_teacher_mask(source_audio, target_audio, config=train_config)
+    progress(
+        progress_path,
+        "audio_loaded",
+        **progress_context,
+        sample_rate=source_sample_rate,
+        source_frames=int(source_audio.shape[0]),
+        target_frames=int(target_audio.shape[0]),
+        channels=int(source_audio.shape[1]),
+    )
+    model, metadata, train_diagnostics = train_teacher_mask(
+        source_audio,
+        target_audio,
+        config=train_config,
+        progress_path=progress_path,
+        progress_context=progress_context,
+    )
+    progress(progress_path, "apply_start", **progress_context)
     output_audio, apply_diagnostics = apply_teacher_mask(source_audio, model=model, metadata=metadata, config=train_config)
-    output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"01_teacher_mask_{stem_name}.flac"
     checkpoint_path = output_dir / f"{stem_name}_teacher_mask_separator.pt"
     write_flac(output_path, output_audio, source_sample_rate)
     save_checkpoint(checkpoint_path, model=model, metadata=metadata, config=train_config, stem_name=stem_name)
+    progress(
+        progress_path,
+        "artifacts_written",
+        **progress_context,
+        output_path=str(output_path),
+        checkpoint_path=str(checkpoint_path),
+    )
     contract = {
         "benchmark_compatible": True,
         "full_track": True,
@@ -865,6 +1173,8 @@ def train_and_apply_teacher_mask_separator(
             "checkpoint_sha256": sha256_file(checkpoint_path),
             "config": _config_payload(train_config),
             "diagnostics": train_diagnostics,
+            "progress_jsonl": str(progress_path),
+            "sample_rate_alignment": sample_rate_alignment,
         },
         "application": {
             "uses_reference_during_application": False,
@@ -888,6 +1198,14 @@ def train_and_apply_teacher_mask_separator(
         listen_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(output_path, listen_dir / f"01_teacher_mask_{stem_name}.flac")
         write_json(listen_dir / "candidate_map.json", {"01_teacher_mask": str(listen_dir / f"01_teacher_mask_{stem_name}.flac")})
+    progress(
+        progress_path,
+        "finish",
+        **progress_context,
+        manifest_path=str(output_dir / "stem_manifest.json"),
+        checkpoint_path=str(checkpoint_path),
+        output_path=str(output_path),
+    )
     return manifest
 
 

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 
@@ -34,6 +35,16 @@ def _sdr(reference: np.ndarray, estimate: np.ndarray) -> float:
     est = estimate[:length].astype(np.float64)
     err = ref - est
     return float(10.0 * np.log10((np.mean(ref**2) + 1.0e-12) / (np.mean(err**2) + 1.0e-12)))
+
+
+def test_select_device_fails_fast_when_cuda_requested_but_unavailable(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="CUDA was requested"):
+        module._select_device("cuda")
+
+    assert module._select_device("cpu").type == "cpu"
 
 
 def test_teacher_mask_training_is_reference_free_at_application_and_improves_synthetic_mix(tmp_path: Path) -> None:
@@ -75,6 +86,19 @@ def test_teacher_mask_training_is_reference_free_at_application_and_improves_syn
     assert manifest["contract"]["delivery_allowed_without_reference"] is False
     assert manifest["contract"]["requires_holdout_validation"] is True
     assert manifest["contract"]["stores_timestamp_rules"] is False
+    assert manifest["application"]["diagnostics"]["device"] == "cpu"
+    assert manifest["application"]["diagnostics"]["device_used"] == 0.0
+
+    progress_path = tmp_path / "out" / "teacher_mask_separator_progress.jsonl"
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert progress_rows[0]["event"] == "start"
+    assert progress_rows[0]["expected_acceleration_mode"] == "cpu_test_training"
+    assert any(row["event"] == "train_epoch" for row in progress_rows)
+    assert progress_rows[-1]["event"] == "finish"
 
 
 def test_teacher_mask_training_does_not_collapse_weak_target_to_silence(tmp_path: Path) -> None:
@@ -113,6 +137,99 @@ def test_teacher_mask_training_does_not_collapse_weak_target_to_silence(tmp_path
     target_rms = float(np.sqrt(np.mean(np.square(weak_target), dtype=np.float64)))
     assert output_rms > target_rms * 0.35
     assert _sdr(weak_target, output_audio) > _sdr(weak_target, source_mix) + 6.0
+
+
+def test_teacher_mask_training_resamples_teacher_target_to_source_rate(tmp_path: Path) -> None:
+    module = _load_module()
+    source_sample_rate = 8_000
+    target_sample_rate = 12_000
+    source_time = np.arange(source_sample_rate, dtype=np.float64) / float(source_sample_rate)
+    target_time = np.arange(target_sample_rate, dtype=np.float64) / float(target_sample_rate)
+    source_target = _stereo(0.22 * np.sin(2.0 * np.pi * 440.0 * source_time))
+    source_mix = source_target + _stereo(0.18 * np.sin(2.0 * np.pi * 130.0 * source_time))
+    teacher_target = _stereo(0.22 * np.sin(2.0 * np.pi * 440.0 * target_time))
+    source_path = tmp_path / "source_mix.flac"
+    target_path = tmp_path / "teacher_target_12k.flac"
+    _write_audio(source_path, source_mix, source_sample_rate)
+    _write_audio(target_path, teacher_target, target_sample_rate)
+
+    manifest = module.train_and_apply_teacher_mask_separator(
+        source_mix_path=source_path,
+        teacher_target_path=target_path,
+        output_dir=tmp_path / "out",
+        stem_name="vocal",
+        train_config=module.TeacherMaskTrainConfig(
+            n_fft=512,
+            hop_length=128,
+            hidden_size=96,
+            epochs=35,
+            batch_size=64,
+            learning_rate=0.01,
+            seed=321,
+            device="cpu",
+        ),
+        command_args=[],
+    )
+
+    alignment = manifest["training"]["sample_rate_alignment"]
+    assert alignment["source_sample_rate"] == source_sample_rate
+    assert alignment["teacher_target_original_sample_rate"] == target_sample_rate
+    assert alignment["teacher_target_sample_rate_after_alignment"] == source_sample_rate
+    assert alignment["teacher_target_resampled"] is True
+    assert Path(manifest["stems"]["vocal"]["path"]).exists()
+
+
+def test_teacher_mask_dataset_training_generalizes_to_held_out_synthetic_pair(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    time = np.arange(sample_rate, dtype=np.float64) / float(sample_rate)
+    train_pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    for interference_hz in (120.0, 180.0):
+        target = _stereo(0.26 * np.sin(2.0 * np.pi * 720.0 * time))
+        source = target + _stereo(0.34 * np.sin(2.0 * np.pi * interference_hz * time))
+        train_pairs.append((source, target))
+    holdout_target = _stereo(0.26 * np.sin(2.0 * np.pi * 720.0 * time))
+    holdout_source = holdout_target + _stereo(0.34 * np.sin(2.0 * np.pi * 150.0 * time))
+
+    model, metadata, diagnostics = module.train_teacher_mask_dataset(
+        train_pairs,
+        config=module.TeacherMaskTrainConfig(
+            n_fft=256,
+            hop_length=64,
+            hidden_size=64,
+            epochs=35,
+            batch_size=64,
+            learning_rate=0.01,
+            activity_weight=10.0,
+            seed=314,
+            device="cpu",
+        ),
+        max_frames_per_pair=64,
+    )
+    output_audio, apply_diagnostics = module.apply_teacher_mask(
+        holdout_source,
+        model=model,
+        metadata=metadata,
+        config=module.TeacherMaskTrainConfig(
+            n_fft=256,
+            hop_length=64,
+            hidden_size=64,
+            epochs=35,
+            batch_size=64,
+            learning_rate=0.01,
+            activity_weight=10.0,
+            seed=314,
+            device="cpu",
+        ),
+    )
+
+    assert _sdr(holdout_target, output_audio) > _sdr(holdout_target, holdout_source) + 6.0
+    assert diagnostics["training_example_count"] == 2.0
+    assert diagnostics["unique_training_pair_count"] == 2.0
+    assert diagnostics["frame_count"] == 128.0
+    assert diagnostics["device_used"] == 0.0
+    assert metadata["input_features"] > 0
+    assert apply_diagnostics["device"] == "cpu"
 
 
 def test_teacher_mask_training_balances_sparse_target_frames(tmp_path: Path) -> None:
@@ -321,6 +438,55 @@ def test_teacher_mask_training_can_use_source_feature_memory_without_timestamp_r
     assert manifest["application"]["diagnostics"]["source_feature_memory_neighbor_count"] == 1
 
 
+def test_teacher_mask_source_feature_memory_generalizes_to_non_matching_source(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    time = np.arange(sample_rate, dtype=np.float64) / float(sample_rate)
+    train_target = _stereo(0.08 * np.sin(2.0 * np.pi * 940.0 * time))
+    train_source = train_target + _stereo(0.32 * np.sin(2.0 * np.pi * 160.0 * time))
+    holdout_target = _stereo(0.08 * np.sin(2.0 * np.pi * 940.0 * time))
+    holdout_source = holdout_target + _stereo(0.30 * np.sin(2.0 * np.pi * 210.0 * time))
+    train_source_path = tmp_path / "train_source.flac"
+    train_target_path = tmp_path / "train_target.flac"
+    holdout_source_path = tmp_path / "holdout_source.flac"
+    _write_audio(train_source_path, train_source, sample_rate)
+    _write_audio(train_target_path, train_target, sample_rate)
+    _write_audio(holdout_source_path, holdout_source, sample_rate)
+
+    trained_manifest = module.train_and_apply_teacher_mask_separator(
+        source_mix_path=train_source_path,
+        teacher_target_path=train_target_path,
+        output_dir=tmp_path / "trained",
+        stem_name="vocal",
+        train_config=module.TeacherMaskTrainConfig(
+            n_fft=256,
+            hop_length=64,
+            hidden_size=64,
+            epochs=8,
+            batch_size=64,
+            source_feature_memory_neighbors=1,
+            source_feature_memory_chunk_size=64,
+            device="cpu",
+        ),
+        command_args=[],
+    )
+
+    applied_manifest = module.apply_teacher_mask_checkpoint_to_source(
+        source_mix_path=holdout_source_path,
+        checkpoint_path=Path(trained_manifest["training"]["checkpoint_path"]),
+        output_dir=tmp_path / "applied",
+        stem_name="vocal",
+        device="cpu",
+        command_args=[],
+    )
+
+    output_audio, _ = module.read_audio(Path(applied_manifest["stems"]["vocal"]["path"]))
+    assert _sdr(holdout_target, output_audio) > _sdr(holdout_target, holdout_source) + 6.0
+    assert applied_manifest["application"]["diagnostics"]["source_feature_memory_used"] is True
+    assert applied_manifest["application"]["diagnostics"]["source_feature_memory_exact_source_match"] is False
+    assert applied_manifest["application"]["diagnostics"]["source_feature_memory_neighbor_count"] == 1
+
+
 def test_teacher_mask_training_can_use_source_feature_complex_memory_without_timestamp_rules(tmp_path: Path) -> None:
     module = _load_module()
     sample_rate = 8_000
@@ -500,9 +666,10 @@ def test_teacher_mask_checkpoint_skips_complex_memory_on_non_matching_source(tmp
 
     diagnostics = applied_manifest["application"]["diagnostics"]
     assert diagnostics["source_feature_memory_available"] is True
-    assert diagnostics["source_feature_memory_used"] is False
+    assert diagnostics["source_feature_memory_used"] is True
     assert diagnostics["source_feature_memory_exact_source_match"] is False
-    assert diagnostics["source_feature_memory_skipped_reason"] == "non_matching_source_features"
+    assert diagnostics["source_feature_memory_skipped_reason"] is None
+    assert diagnostics["source_feature_memory_neighbor_count"] == 1
     assert diagnostics["source_feature_memory_complex_mask_available"] is True
     assert diagnostics["source_feature_memory_complex_mask_used"] is False
     assert diagnostics["source_feature_memory_complex_mask_skipped_reason"] == "non_matching_source_features"
