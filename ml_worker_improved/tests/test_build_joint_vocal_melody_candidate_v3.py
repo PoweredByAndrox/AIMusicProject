@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from tools.build_no_reference_stem_listen_preview_manifest import build_manifest as build_stem_listen_manifest
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "build_joint_vocal_melody_candidate_v3.py"
 
@@ -59,6 +61,22 @@ def _base_contract() -> dict[str, object]:
         "hidden_inference": False,
         "per_track_hardcode_allowed": False,
         "not_timestamp_hardcoded": True,
+    }
+
+
+def _gpu_execution_contract() -> dict[str, object]:
+    return {
+        "docker_runtime_required": True,
+        "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
+        "gpu_inference_required": True,
+        "gpu_inference_skipped": False,
+        "cuda_preflight": {
+            "cuda_available": True,
+            "requested_device": "cuda",
+            "resolved_device": "cuda",
+            "device_count": 1,
+            "device_name": "test gpu",
+        },
     }
 
 
@@ -137,6 +155,7 @@ def test_joint_v3_manifest_writes_no_reference_multi_candidate_provenance(tmp_pa
             "model_name": label,
             "sample_rate": sample_rate,
             "contract": _base_contract(),
+            "execution_contract": _gpu_execution_contract(),
             "pipeline": {
                 "target_reference_read": False,
                 "reference_sum_mix_read": False,
@@ -175,7 +194,76 @@ def test_joint_v3_manifest_writes_no_reference_multi_candidate_provenance(tmp_pa
     assert saved_manifest["pipeline"]["reference_sum_mix_read"] is False
     assert saved_manifest["pipeline"]["postprocess"] == "multi_model_stem_specific_proxy_router_v3"
     assert len(saved_manifest["pipeline"]["base_manifests"]) == 2
+    assert saved_manifest["execution_contract"]["gpu_inference_required"] is True
+    assert saved_manifest["execution_contract"]["gpu_inference_skipped"] is False
+    assert saved_manifest["execution_contract"]["cuda_preflight"]["resolved_device"] == "cuda"
     assert saved_manifest["listen"]["status"] == "diagnostic_requires_objective_gate"
     assert (listen_dir / "01_joint_v3_vocals.flac").exists()
     assert (listen_dir / "02_joint_v3_melody.flac").exists()
+    listen_manifest = build_stem_listen_manifest(
+        stem_manifest_json=output_dir / "stem_manifest.json",
+        target_stem="melody",
+        track_id="track-a",
+        min_duration_sec=0.25,
+    )
+    assert listen_manifest["delivery_status"] == "accepted"
+    assert listen_manifest["gpu_provenance_gate"]["status"] == "passed"
+    assert manifest["manifest_path"] == str(output_dir / "stem_manifest.json")
+
+
+def test_joint_v3_resamples_source_for_shape_when_base_sample_rate_differs(tmp_path: Path) -> None:
+    module = _load_module()
+    source_sample_rate = 16_000
+    stem_sample_rate = 8_000
+    source_path = tmp_path / "source_mix.flac"
+    source_vocal = _sine(source_sample_rate, 1.0, 660.0, 0.22)
+    source_melody = _sine(source_sample_rate, 1.0, 440.0, 0.25)
+    sf.write(source_path, source_vocal + source_melody, source_sample_rate, subtype="PCM_24")
+
+    manifest_paths: list[Path] = []
+    vocal = _sine(stem_sample_rate, 1.0, 660.0, 0.22)
+    melody = _sine(stem_sample_rate, 1.0, 440.0, 0.25)
+    drums = _noise_burst(stem_sample_rate, 1.0, 0.10)
+    bass = _sine(stem_sample_rate, 1.0, 90.0, 0.08)
+    for label, vocals_audio, melody_audio in (
+        ("vocal_base", vocal + melody * 0.10, melody + vocal * 0.60),
+        ("melody_base", vocal + melody * 0.65, melody + vocal * 0.08),
+    ):
+        stem_dir = tmp_path / label
+        stem_dir.mkdir()
+        base_manifest = {
+            "audio_path": str(source_path),
+            "audio_sha256": module.sha256_file(source_path),
+            "model_name": label,
+            "sample_rate": stem_sample_rate,
+            "contract": _base_contract(),
+            "execution_contract": _gpu_execution_contract(),
+            "pipeline": {
+                "target_reference_read": False,
+                "reference_sum_mix_read": False,
+            },
+            "stems": {
+                "vocals": _write_stem(stem_dir / "vocals.flac", vocals_audio, stem_sample_rate),
+                "melody": _write_stem(stem_dir / "melody.flac", melody_audio, stem_sample_rate),
+                "drums": _write_stem(stem_dir / "drums.flac", drums, stem_sample_rate),
+                "bass": _write_stem(stem_dir / "bass.flac", bass, stem_sample_rate),
+            },
+        }
+        manifest_path = stem_dir / "stem_manifest.json"
+        manifest_path.write_text(json.dumps(base_manifest, indent=2), encoding="utf-8")
+        manifest_paths.append(manifest_path)
+
+    output_dir = tmp_path / "candidate"
+    manifest = module.build_joint_vocal_melody_v3_candidate(
+        source_audio_path=source_path,
+        output_dir=output_dir,
+        base_manifest_paths=manifest_paths,
+    )
+
+    saved_manifest = json.loads((output_dir / "stem_manifest.json").read_text(encoding="utf-8"))
+    assert (output_dir / "vocals.flac").exists()
+    assert saved_manifest["sample_rate"] == stem_sample_rate
+    assert saved_manifest["pipeline"]["parameters"]["source_sample_rate"] == source_sample_rate
+    assert saved_manifest["pipeline"]["parameters"]["stem_sample_rate"] == stem_sample_rate
+    assert saved_manifest["pipeline"]["parameters"]["source_audio_resampled_for_shape"] is True
     assert manifest["manifest_path"] == str(output_dir / "stem_manifest.json")

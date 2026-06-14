@@ -186,6 +186,24 @@ def _no_reference_contract() -> dict[str, Any]:
     }
 
 
+def _cpu_dsp_execution_contract() -> dict[str, Any]:
+    return {
+        "route_name": ROUTE_NAME,
+        "docker_runtime_required": True,
+        "expected_acceleration_mode": "cpu_dsp_candidate_generation",
+        "gpu_inference_required": False,
+        "gpu_inference_skipped": True,
+        "gpu_inference_skip_reason": "cpu_only_dsp_route",
+        "cuda_preflight": {
+            "cuda_available": False,
+            "requested_device": "",
+            "resolved_device": "cpu",
+            "device_count": 0,
+            "device_name": "",
+        },
+    }
+
+
 def build_tonal_harmonic_melody_candidate(
     *,
     source_audio_path: str | Path,
@@ -227,7 +245,19 @@ def build_tonal_harmonic_melody_candidate(
         "sample_rate": int(sample_rate),
         "export_subtype": OUTPUT_SUBTYPE,
         "melody_stem_included": True,
+        "target_stem": "melody",
+        "target_stem_artifact": {
+            "target_stem": "melody",
+            "path": str(melody_path),
+            "source": "tonal_harmonic_cpu_dsp_candidate",
+            "source_stems": ["melody"],
+        },
+        "delivery_allowed": False,
+        "presentation_status": "diagnostic_candidate_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "release_ready": False,
         "contract": _no_reference_contract(),
+        "execution_contract": _cpu_dsp_execution_contract(),
         "pipeline": {
             "mode": ROUTE_NAME,
             "source": "authoritative_full_mix_only",

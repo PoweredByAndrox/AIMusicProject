@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
 
+import worker.model_registry as model_registry
 from worker.model_registry import ModelRegistry, ModelRegistryEntry, default_model_registry
 
 
@@ -48,7 +50,9 @@ def test_default_registry_contains_known_production_model_families() -> None:
     assert "mdx23c_vocals" in model_ids
     assert "melband_roformer_vocals" in model_ids
     assert "audio_separator_melband_roformer_viperx_vocals" in model_ids
+    assert "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals" in model_ids
     assert "becruily_karaoke_vocals" in model_ids
+    assert "becruily_instrumental_vocals" in model_ids
     assert "bs_mamba2_vocals" in model_ids
 
 
@@ -142,6 +146,48 @@ def test_joint_vocal_melody_v3_registry_route_is_no_reference_candidate() -> Non
     assert "vocal_residue_in_melody" in entry.issue_labels_addressed
     assert "melody_leakage_in_vocals" in entry.issue_labels_addressed
     assert "cross_stem_leakage" in entry.issue_labels_addressed
+    assert entry.cost_class == "high"
+
+
+def test_pitch_salience_melody_registry_route_targets_low_pitch_confidence() -> None:
+    registry = default_model_registry()
+    entry = registry.get("pitch_salience_melody_v1")
+
+    assert entry.family == "hybrid"
+    assert entry.target_stems == ("melody",)
+    assert entry.output_stems == ("melody",)
+    assert "/app/tools/build_pitch_salience_melody_candidate.py" in entry.command_template
+    assert "--listen-dir={listen_dir}" in entry.command_template
+    assert entry.expected_manifest == "{output_dir}/stem_manifest.json"
+    assert "melody_low_pitch_confidence" in entry.issue_labels_addressed
+    assert "vocal_residue_in_melody" in entry.issue_labels_addressed
+    assert entry.cost_class == "high"
+
+
+def test_pitch_salience_melody_v2_registry_route_targets_bass_dominant_melody() -> None:
+    registry = default_model_registry()
+    entry = registry.get("pitch_salience_melody_v2")
+
+    assert entry.family == "hybrid"
+    assert entry.target_stems == ("melody",)
+    assert entry.output_stems == ("melody",)
+    assert "/app/tools/build_pitch_salience_melody_candidate.py" in entry.command_template
+    assert "--route-name" in entry.command_template
+    assert "pitch_salience_melody_v2" in entry.command_template
+    assert "--min-frequency-hz" in entry.command_template
+    assert "120.0" in entry.command_template
+    assert "--max-harmonic-hz" in entry.command_template
+    assert "6000" in entry.command_template
+    assert "--bandwidth-ratio" in entry.command_template
+    assert "0.028" in entry.command_template
+    assert "--base-weight" in entry.command_template
+    assert "0.20" in entry.command_template
+    assert "--salience-weight" in entry.command_template
+    assert "1.10" in entry.command_template
+    assert "--salience-rms-gain" in entry.command_template
+    assert "0.85" in entry.command_template
+    assert "melody_bass_dominant" in entry.issue_labels_addressed
+    assert "melody_low_pitch_confidence" in entry.issue_labels_addressed
     assert entry.cost_class == "high"
 
 
@@ -266,6 +312,34 @@ def test_becruily_karaoke_registry_uses_melband_full_exporter_with_truthful_mani
     assert entry.target_stems == ("vocals", "instrumental")
 
 
+def test_becruily_instrumental_registry_uses_melband_full_exporter_with_truthful_manifest_metadata() -> None:
+    registry = default_model_registry()
+    entry = registry.get("becruily_instrumental_vocals")
+
+    assert "/app/tools/export_melband_vocal_full.py" in entry.command_template
+    assert "--model-path" in entry.command_template
+    assert "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt" in entry.command_template
+    assert "--config-path" in entry.command_template
+    assert "/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml" in entry.command_template
+    assert "--manifest-model-id" in entry.command_template
+    assert "becruily_instrumental_vocals" in entry.command_template
+    assert "--manifest-model-display-name" in entry.command_template
+    assert "Becruily MelBand RoFormer instrumental checkpoint" in entry.command_template
+    assert entry.expected_manifest == "{output_dir}/stem_manifest.json"
+    assert entry.target_stems == ("vocals", "instrumental")
+    assert entry.output_stems == ("vocals", "instrumental")
+    assert entry.required_paths == (
+        "/app/vendor/mel_band_roformer_vocal_model",
+        "/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml",
+        "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt",
+    )
+    assert "vocal_residue_in_minus" in entry.issue_labels_addressed
+    assert "wide_stereo_non_vocal_leakage" in entry.issue_labels_addressed
+    assert entry.task_scope == "vocal_instrumental"
+    assert entry.license_status == "checkpoint_license_unverified"
+    assert "instrumental/minus" in " ".join(entry.notes)
+
+
 def test_mdx23c_registry_uses_full_track_benchmark_exporter() -> None:
     registry = default_model_registry()
     entry = registry.get("mdx23c_vocals")
@@ -333,6 +407,33 @@ def test_audio_separator_melband_viperx_registry_uses_uvr_full_track_exporter() 
     assert entry.required_python_modules == ()
     assert "drop_melody_leakage" in entry.issue_labels_addressed
     assert "high_noise_or_robotic_artifact" in entry.issue_labels_addressed
+
+
+def test_audio_separator_bs_roformer_viperx_vendor_config_registry_uses_uvr_full_track_exporter() -> None:
+    registry = default_model_registry()
+    entry = registry.get("audio_separator_bs_roformer_viperx_1297_vendor_config_vocals")
+
+    assert "/app/tools/export_audio_separator_vocal_full.py" in entry.command_template
+    assert "--model-filename" in entry.command_template
+    assert "model_bs_roformer_ep_317_sdr_12.9755.ckpt" in entry.command_template
+    assert "--model-file-dir" in entry.command_template
+    assert "/app/vendor/bs_roformer_viperx_1297" in entry.command_template
+    assert "--audio-separator-python" in entry.command_template
+    assert "/opt/audio-separator-venv/bin/python" in entry.command_template
+    assert "--manifest-model-id" in entry.command_template
+    assert "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals" in entry.command_template
+    assert "--require-cuda-provider" in entry.command_template
+    assert entry.expected_manifest == "{output_dir}/stem_manifest.json"
+    assert entry.target_stems == ("vocals", "instrumental")
+    assert entry.output_stems == ("vocals", "instrumental")
+    assert entry.required_paths == (
+        "/opt/audio-separator-venv/bin/python",
+        "/app/vendor/bs_roformer_viperx_1297/model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+        "/app/vendor/bs_roformer_viperx_1297/model_bs_roformer_ep_317_sdr_12.9755.yaml",
+    )
+    assert entry.required_python_modules == ()
+    assert "same ViperX-1297 checkpoint" in " ".join(entry.notes)
+    assert "config variant" in " ".join(entry.notes)
 
 
 def test_registry_filters_by_stem_labels_and_evaluated_aliases() -> None:
@@ -604,6 +705,60 @@ def test_registry_suggests_joint_vocal_melody_v3_after_v2_exact_audit_failure() 
     assert "joint_vocal_melody_v1" not in suggested_ids
 
 
+def test_registry_suggests_pitch_salience_after_melody_low_pitch_routes_exhausted() -> None:
+    registry = default_model_registry()
+
+    suggestions = registry.suggest_next_candidates(
+        stem_names=["melody"],
+        failed_labels=["melody_low_pitch_confidence"],
+        evaluated_labels=[
+            "htdemucs_6s",
+            "htdemucs_6s_aggressive_melody_first",
+            "model_stack_melody_v1",
+            "tonal_harmonic_melody_v1",
+            "hybrid_htdemucs_ft_bs_roformer_6s",
+            "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first",
+            "joint_vocal_melody_v1",
+            "joint_vocal_melody_v2",
+            "joint_vocal_melody_v3",
+        ],
+        include_unavailable=True,
+        limit=20,
+    )
+
+    suggested_ids = {suggestion.model_id for suggestion in suggestions}
+    assert "pitch_salience_melody_v1" in suggested_ids
+    assert "joint_vocal_melody_v3" not in suggested_ids
+    assert "tonal_harmonic_melody_v1" not in suggested_ids
+
+
+def test_registry_suggests_pitch_salience_v2_after_v1_bass_dominant_failure() -> None:
+    registry = default_model_registry()
+
+    suggestions = registry.suggest_next_candidates(
+        stem_names=["melody"],
+        failed_labels=["melody_bass_dominant"],
+        evaluated_labels=[
+            "htdemucs_6s",
+            "htdemucs_6s_aggressive_melody_first",
+            "model_stack_melody_v1",
+            "tonal_harmonic_melody_v1",
+            "hybrid_htdemucs_ft_bs_roformer_6s",
+            "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first",
+            "joint_vocal_melody_v1",
+            "joint_vocal_melody_v2",
+            "joint_vocal_melody_v3",
+            "pitch_salience_melody_v1",
+        ],
+        include_unavailable=True,
+        limit=20,
+    )
+
+    suggested_ids = {suggestion.model_id for suggestion in suggestions}
+    assert "pitch_salience_melody_v2" in suggested_ids
+    assert "pitch_salience_melody_v1" not in suggested_ids
+
+
 def test_hybrid_drums_plus_percussive_fx_aux_registry_route_uses_full_mix_exporter() -> None:
     registry = default_model_registry()
     entry = registry.get("hybrid_htdemucs_ft_bs_roformer_6s_drums_plus_percussive_fx_aux")
@@ -675,11 +830,66 @@ def test_registry_availability_reports_missing_required_python_modules(tmp_path:
     assert availability.missing_python_modules == ("definitely_missing_audio_dependency_for_test",)
 
 
+def test_audio_separator_availability_requires_cuda_execution_provider(tmp_path: Path, monkeypatch) -> None:
+    audio_separator_python = tmp_path / "audio-separator-python"
+    audio_separator_python.write_text("# fake executable marker\n", encoding="utf-8")
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    (model_dir / "model.ckpt").write_text("fake", encoding="utf-8")
+    (model_dir / "model.yaml").write_text("fake", encoding="utf-8")
+    entry = ModelRegistryEntry(
+        model_id="audio_separator_demo",
+        display_name="Audio Separator demo",
+        family="audio_separator_uvr",
+        target_stems=("vocals",),
+        output_stems=("vocals", "instrumental"),
+        command_template=(
+            "python",
+            "/app/tools/export_audio_separator_vocal_full.py",
+            "{source_audio_path}",
+            "{output_dir}",
+            "--model-filename",
+            "model.ckpt",
+            "--model-file-dir",
+            str(model_dir),
+            "--audio-separator-python",
+            str(audio_separator_python),
+            "--require-cuda-provider",
+        ),
+        expected_manifest="{output_dir}/stem_manifest.json",
+        required_paths=(str(audio_separator_python), str(model_dir / "model.ckpt"), str(model_dir / "model.yaml")),
+    )
+    registry = ModelRegistry(entries=(entry,), runtime_root=tmp_path)
+
+    def fake_run(command, **kwargs):
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"available_providers": ["CPUExecutionProvider"]}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(model_registry.subprocess, "run", fake_run)
+
+    availability = registry.availability(entry)
+
+    assert availability.status == "unavailable"
+    assert availability.missing_paths == ()
+    assert availability.missing_python_modules == ()
+    assert availability.runtime_blockers == ("cuda_execution_provider_missing",)
+
+
 def test_bs_mamba2_registry_declares_mamba_runtime_dependencies() -> None:
     registry = default_model_registry()
     entry = registry.get("bs_mamba2_vocals")
 
     assert entry.required_python_modules == ("mamba_ssm", "causal_conv1d")
+
+
+def test_bs_mamba2_registry_requires_runtime_probe_success_marker() -> None:
+    registry = default_model_registry()
+    entry = registry.get("bs_mamba2_vocals")
+
+    assert "/app/vendor/bs_mamba2_vocals/runtime_probe_passed.json" in entry.required_paths
 
 
 def test_registry_renders_command_without_track_specific_state() -> None:

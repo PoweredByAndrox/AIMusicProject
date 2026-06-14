@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -56,6 +57,7 @@ def test_full_track_manifest_is_quality_gate_compatible(tmp_path: Path) -> None:
         sample_rate=44100,
         frames=441000,
         elapsed_sec=12.345,
+        cuda_preflight={"device_name": "NVIDIA GeForce RTX 4080 Laptop GPU"},
     )
 
     assert "preview_window_sec" not in manifest
@@ -66,6 +68,10 @@ def test_full_track_manifest_is_quality_gate_compatible(tmp_path: Path) -> None:
     assert manifest["contract"]["benchmark_compatible"] is True
     assert manifest["contract"]["fallback_used"] is False
     assert manifest["contract"]["hidden_inference"] is False
+    assert manifest["execution_contract"]["expected_acceleration_mode"] == "gpu_inference_then_cpu_dsp_scoring"
+    assert manifest["execution_contract"]["gpu_inference_required"] is True
+    assert manifest["execution_contract"]["gpu_inference_skipped"] is False
+    assert manifest["execution_contract"]["cuda_preflight"]["device_name"] == "NVIDIA GeForce RTX 4080 Laptop GPU"
     assert manifest["stems"]["vocals"]["path"] == str(vocals_path)
     assert manifest["stems"]["instrumental"]["path"] == str(instrumental_path)
     assert manifest["artifacts"]["raw_ref_flac"] == str(raw_ref_path)
@@ -98,6 +104,7 @@ def test_writes_full_track_manifest_to_expected_stem_manifest_path(tmp_path: Pat
         sample_rate=48000,
         frames=96000,
         elapsed_sec=3.0,
+        cuda_preflight={"device_name": "NVIDIA GeForce RTX 4080 Laptop GPU"},
     )
 
     assert manifest_path == output_dir / "stem_manifest.json"
@@ -105,3 +112,24 @@ def test_writes_full_track_manifest_to_expected_stem_manifest_path(tmp_path: Pat
     assert payload["stems"]["vocals"]["path"] == str(vocals_path)
     assert payload["stems"]["instrumental"]["path"] == str(instrumental_path)
     assert "preview_window_sec" not in payload
+    assert payload["execution_contract"]["cuda_preflight"]["device_name"] == "NVIDIA GeForce RTX 4080 Laptop GPU"
+
+
+def test_mdx23c_cuda_preflight_fails_closed_when_cuda_is_unavailable(monkeypatch) -> None:
+    module = _load_mdx23c_full_module()
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: False,
+            device_count=lambda: 0,
+            get_device_name=lambda _device_id: "missing",
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    try:
+        module.verify_cuda_inference_device(0)
+    except RuntimeError as exc:
+        assert "torch.cuda.is_available() is false" in str(exc)
+    else:  # pragma: no cover - asserts fail if exception is not raised
+        raise AssertionError("MDX23C CUDA preflight must fail closed when CUDA is unavailable")

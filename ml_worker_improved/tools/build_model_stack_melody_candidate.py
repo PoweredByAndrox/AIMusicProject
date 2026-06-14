@@ -73,6 +73,19 @@ def _fit_audio_shape(audio: np.ndarray, *, frames: int, channels: int) -> np.nda
     return fitted
 
 
+def _resample_stereo_audio(audio: np.ndarray, *, source_sample_rate: int, target_sample_rate: int) -> tuple[np.ndarray, bool]:
+    array = _ensure_stereo(audio)
+    if int(source_sample_rate) == int(target_sample_rate):
+        return array.astype(np.float32, copy=False), False
+    resampled = librosa.resample(
+        array.T,
+        orig_sr=int(source_sample_rate),
+        target_sr=int(target_sample_rate),
+        res_type="kaiser_best",
+    ).T
+    return _ensure_stereo(resampled), True
+
+
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     resolved_path = Path(path)
@@ -333,6 +346,37 @@ def _no_reference_contract() -> dict[str, Any]:
     }
 
 
+def _execution_contract_from_base(base_manifest: dict[str, Any], *, device: str) -> dict[str, Any]:
+    base_execution_contract = base_manifest.get("execution_contract")
+    if not isinstance(base_execution_contract, dict):
+        base_execution_contract = {}
+    base_cuda_preflight = base_execution_contract.get("cuda_preflight")
+    if not isinstance(base_cuda_preflight, dict):
+        base_cuda_preflight = {}
+    requested_device = str(base_cuda_preflight.get("requested_device") or device or "")
+    resolved_device = str(base_cuda_preflight.get("resolved_device") or "")
+    return {
+        "route_name": ROUTE_NAME,
+        "docker_runtime_required": True,
+        "expected_acceleration_mode": str(
+            base_execution_contract.get("expected_acceleration_mode")
+            or "gpu_inference_then_cpu_dsp_scoring"
+        ),
+        "gpu_inference_required": True,
+        "gpu_inference_skipped": base_execution_contract.get("gpu_inference_skipped") is True,
+        "cuda_preflight": {
+            "cuda_available": base_cuda_preflight.get("cuda_available") is True,
+            "requested_device": requested_device,
+            "resolved_device": resolved_device,
+            "device_count": int(base_cuda_preflight.get("device_count") or 0),
+            "device_name": str(base_cuda_preflight.get("device_name") or ""),
+        },
+        "base_route_name": str(base_execution_contract.get("route_name") or ""),
+        "base_model_name": str(base_manifest.get("model_name") or ""),
+        "base_execution_contract_inherited": bool(base_execution_contract),
+    }
+
+
 def _validate_no_reference_base_manifest(base_manifest: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
     contract = base_manifest.get("contract", {})
     failures: list[dict[str, Any]] = []
@@ -493,10 +537,11 @@ def build_model_stack_melody_candidate(
     )
     stems, stem_sample_rate, base_manifest, contract_check = _load_stems_from_manifest(resolved_base_manifest_path)
     source_audio, source_sample_rate = sf.read(str(source_path), always_2d=True)
-    if int(source_sample_rate) != int(stem_sample_rate):
-        raise ValueError(
-            f"source/base sample-rate mismatch: source={source_sample_rate}, base={stem_sample_rate}"
-        )
+    source_audio, source_resampled = _resample_stereo_audio(
+        source_audio,
+        source_sample_rate=int(source_sample_rate),
+        target_sample_rate=int(stem_sample_rate),
+    )
     source_sha256 = sha256_file(source_path)
     base_source_sha256 = _base_manifest_source_sha256(base_manifest, resolved_base_manifest_path)
     if str(base_source_sha256) != source_sha256:
@@ -539,7 +584,19 @@ def build_model_stack_melody_candidate(
         "sample_rate": int(stem_sample_rate),
         "export_subtype": OUTPUT_SUBTYPE,
         "melody_stem_included": True,
+        "target_stem": "melody",
+        "target_stem_artifact": {
+            "target_stem": "melody",
+            "path": str(melody_path),
+            "source": "model_stack_melody_candidate",
+            "source_stems": ["melody"],
+        },
+        "delivery_allowed": False,
+        "presentation_status": "diagnostic_candidate_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "release_ready": False,
         "contract": _no_reference_contract(),
+        "execution_contract": _execution_contract_from_base(base_manifest, device=str(device)),
         "pipeline": {
             "mode": ROUTE_NAME,
             "source": "authoritative_full_mix_plus_no_reference_model_stack",
@@ -547,6 +604,9 @@ def build_model_stack_melody_candidate(
             "base_manifest_model_name": base_manifest.get("model_name"),
             "base_manifest_contract_checked": contract_check["status"] == "accepted",
             "base_manifest_contract": contract_check,
+            "source_sample_rate": int(source_sample_rate),
+            "source_resampled_to_sample_rate": int(stem_sample_rate),
+            "source_resampled": bool(source_resampled),
             "target_reference_read": False,
             "reference_sum_mix_read": False,
             "postprocess": "model_stack_harmonic_candidate_with_projection_debleed_v1",

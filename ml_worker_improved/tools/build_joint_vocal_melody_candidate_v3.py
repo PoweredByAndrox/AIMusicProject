@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 import soundfile as sf
+from scipy import signal
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -37,6 +40,17 @@ DEFAULT_MODEL_NAMES = (
     "htdemucs_6s",
     "htdemucs_ft",
 )
+PROCESS_START_MONOTONIC = time.monotonic()
+
+
+def _emit_progress(event: str, **metadata: Any) -> None:
+    record = {
+        "event": event,
+        "route_name": ROUTE_NAME,
+        "elapsed_sec": round(time.monotonic() - PROCESS_START_MONOTONIC, 6),
+        **metadata,
+    }
+    print(json.dumps(record, sort_keys=True), flush=True)
 
 
 def _no_reference_contract() -> dict[str, Any]:
@@ -55,6 +69,45 @@ def _no_reference_contract() -> dict[str, Any]:
         "not_timestamp_hardcoded": True,
         "no_reference_production_claim": True,
         "route_name": ROUTE_NAME,
+    }
+
+
+def _execution_contract_from_base_summaries(base_summaries: Sequence[dict[str, Any]], *, device: str) -> dict[str, Any]:
+    base_execution_contracts = [
+        summary.get("execution_contract")
+        for summary in base_summaries
+        if isinstance(summary.get("execution_contract"), dict)
+    ]
+    selected_contract: dict[str, Any] = {}
+    for contract in base_execution_contracts:
+        cuda_preflight = contract.get("cuda_preflight")
+        if isinstance(cuda_preflight, dict) and cuda_preflight.get("cuda_available") is True:
+            selected_contract = contract
+            break
+    if not selected_contract and base_execution_contracts:
+        selected_contract = base_execution_contracts[0]
+
+    cuda_preflight = selected_contract.get("cuda_preflight") if isinstance(selected_contract, dict) else {}
+    if not isinstance(cuda_preflight, dict):
+        cuda_preflight = {}
+    return {
+        "route_name": ROUTE_NAME,
+        "docker_runtime_required": True,
+        "expected_acceleration_mode": str(
+            selected_contract.get("expected_acceleration_mode")
+            or "gpu_inference_then_cpu_dsp_scoring"
+        ),
+        "gpu_inference_required": True,
+        "gpu_inference_skipped": selected_contract.get("gpu_inference_skipped") is True,
+        "cuda_preflight": {
+            "cuda_available": cuda_preflight.get("cuda_available") is True,
+            "requested_device": str(cuda_preflight.get("requested_device") or device or ""),
+            "resolved_device": str(cuda_preflight.get("resolved_device") or ""),
+            "device_count": int(cuda_preflight.get("device_count") or 0),
+            "device_name": str(cuda_preflight.get("device_name") or ""),
+        },
+        "base_models": [str(summary.get("model_name") or "") for summary in base_summaries],
+        "base_execution_contract_count": len(base_execution_contracts),
     }
 
 
@@ -103,6 +156,15 @@ def _fit_candidate_sets(
             for stem_name, stem_audio in stems.items()
         }
     return fitted, frames, channels
+
+
+def _resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if int(source_rate) == int(target_rate):
+        return np.asarray(audio, dtype=np.float32)
+    gcd = math.gcd(int(source_rate), int(target_rate))
+    up = int(target_rate) // gcd
+    down = int(source_rate) // gcd
+    return signal.resample_poly(audio, up, down, axis=0).astype(np.float32)
 
 
 def _aggregate_suppressor(
@@ -216,6 +278,13 @@ def build_joint_vocal_melody_v3_candidate_audio(
     melody_leak_weight: float = 2.4,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     fitted_sets, frames, channels = _fit_candidate_sets(candidate_sets, source_audio=source_audio)
+    _emit_progress(
+        "candidate_audio_start",
+        candidate_set_count=len(candidate_sets),
+        frame_count=frames,
+        channel_count=channels,
+        sample_rate=int(sample_rate),
+    )
     vocals_label, vocals_candidate, vocal_scores = _score_and_select(
         fitted_sets,
         "vocals",
@@ -224,6 +293,7 @@ def build_joint_vocal_melody_v3_candidate_audio(
         channels=channels,
         leak_weight=float(vocal_leak_weight),
     )
+    _emit_progress("candidate_audio_vocals_selected", selected_label=str(vocals_label))
     melody_label, melody_candidate, melody_scores = _score_and_select(
         fitted_sets,
         "melody",
@@ -232,6 +302,7 @@ def build_joint_vocal_melody_v3_candidate_audio(
         channels=channels,
         leak_weight=float(melody_leak_weight),
     )
+    _emit_progress("candidate_audio_melody_selected", selected_label=str(melody_label))
     drum_suppressor = _aggregate_suppressor(fitted_sets, "drums", frames=frames, channels=channels)
     bass_suppressor = _aggregate_suppressor(fitted_sets, "bass", frames=frames, channels=channels)
     non_target_suppressors = [suppressor for suppressor in (drum_suppressor, bass_suppressor) if suppressor is not None]
@@ -259,6 +330,7 @@ def build_joint_vocal_melody_v3_candidate_audio(
 
     vocals_candidate = _limit_peak(vocals_candidate)
     melody_candidate = _limit_peak(melody_candidate)
+    _emit_progress("candidate_audio_end", frame_count=int(melody_candidate.shape[0]))
     diagnostics = {
         "route_name": ROUTE_NAME,
         "sample_rate": int(sample_rate),
@@ -349,6 +421,9 @@ def _load_candidate_sets(
                 "manifest_path": str(manifest_path),
                 "model_name": model_name,
                 "contract_check": contract_check,
+                "execution_contract": base_manifest.get("execution_contract")
+                if isinstance(base_manifest.get("execution_contract"), dict)
+                else {},
             }
         )
     if sample_rate is None:
@@ -367,6 +442,13 @@ def build_joint_vocal_melody_v3_candidate(
     cross_stem_suppression: float = 0.92,
     non_target_suppression: float = 0.85,
 ) -> dict[str, Any]:
+    _emit_progress(
+        "candidate_build_start",
+        source_audio_path=str(source_audio_path),
+        output_dir=str(output_dir),
+        device=str(device),
+        model_names=[str(model_name) for model_name in model_names],
+    )
     source_path = Path(source_audio_path).resolve()
     resolved_output_dir = Path(output_dir).resolve()
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
@@ -387,25 +469,44 @@ def build_joint_vocal_melody_v3_candidate(
         resolved_base_manifest_paths,
         source_audio_path=source_path,
     )
+    _emit_progress(
+        "base_manifests_loaded",
+        base_manifest_count=len(base_summaries),
+        stem_sample_rate=int(stem_sample_rate),
+        candidate_set_count=len(candidate_sets),
+    )
     source_audio, source_sample_rate = sf.read(str(source_path), always_2d=True)
-    if int(source_sample_rate) != int(stem_sample_rate):
-        raise ValueError(
-            f"source/base sample-rate mismatch: source={source_sample_rate}, base={stem_sample_rate}"
-        )
+    source_audio_for_candidate = _resample_audio(
+        np.asarray(source_audio, dtype=np.float32),
+        int(source_sample_rate),
+        int(stem_sample_rate),
+    )
+    source_audio_resampled_for_shape = int(source_sample_rate) != int(stem_sample_rate)
+    _emit_progress(
+        "source_audio_ready",
+        source_sample_rate=int(source_sample_rate),
+        target_sample_rate=int(stem_sample_rate),
+        source_resampled=bool(source_audio_resampled_for_shape),
+        frame_count=int(source_audio_for_candidate.shape[0]),
+    )
 
+    _emit_progress("build_candidate_audio_call_start")
     outputs, diagnostics = build_joint_vocal_melody_v3_candidate_audio(
         candidate_sets,
-        source_audio=source_audio.astype(np.float32),
+        source_audio=source_audio_for_candidate,
         sample_rate=int(stem_sample_rate),
         cross_stem_suppression=float(cross_stem_suppression),
         non_target_suppression=float(non_target_suppression),
     )
+    _emit_progress("build_candidate_audio_call_end", output_stems=sorted(outputs))
 
     stem_paths: dict[str, Path] = {}
     for stem_name, stem_audio in outputs.items():
         stem_path = resolved_output_dir / f"{stem_name}.flac"
+        _emit_progress("write_stem_start", stem_name=str(stem_name), path=str(stem_path))
         sf.write(str(stem_path), stem_audio, int(stem_sample_rate), subtype=OUTPUT_SUBTYPE)
         stem_paths[stem_name] = stem_path
+        _emit_progress("write_stem_end", stem_name=str(stem_name), path=str(stem_path))
 
     manifest = {
         "audio_path": str(source_path),
@@ -416,6 +517,7 @@ def build_joint_vocal_melody_v3_candidate(
         "melody_stem_included": True,
         "vocals_stem_included": True,
         "contract": _no_reference_contract(),
+        "execution_contract": _execution_contract_from_base_summaries(base_summaries, device=str(device)),
         "pipeline": {
             "mode": ROUTE_NAME,
             "source": "authoritative_full_mix_plus_multiple_no_reference_model_stack_candidates",
@@ -426,9 +528,12 @@ def build_joint_vocal_melody_v3_candidate(
             "parameters": {
                 "cross_stem_suppression": float(cross_stem_suppression),
                 "non_target_suppression": float(non_target_suppression),
+                "source_sample_rate": int(source_sample_rate),
+                "stem_sample_rate": int(stem_sample_rate),
+                "source_audio_resampled_for_shape": bool(source_audio_resampled_for_shape),
             },
             "diagnostics": diagnostics,
-            "source_audio": _audio_summary(source_audio.astype(np.float32)),
+            "source_audio": _audio_summary(source_audio_for_candidate),
         },
         "delivery": {
             "status": "requires_objective_quality_gate",
@@ -445,6 +550,7 @@ def build_joint_vocal_melody_v3_candidate(
     if listen_dir is not None:
         resolved_listen_dir = Path(listen_dir).resolve()
         resolved_listen_dir.mkdir(parents=True, exist_ok=True)
+        _emit_progress("write_listen_diagnostic_start", listen_dir=str(resolved_listen_dir))
         source_listen_path = resolved_listen_dir / "00_source_mix.flac"
         vocals_listen_path = resolved_listen_dir / "01_joint_v3_vocals.flac"
         melody_listen_path = resolved_listen_dir / "02_joint_v3_melody.flac"
@@ -466,10 +572,13 @@ def build_joint_vocal_melody_v3_candidate(
             "melody": str(melody_listen_path),
             "status": "diagnostic_requires_objective_gate",
         }
+        _emit_progress("write_listen_diagnostic_end", listen_dir=str(resolved_listen_dir))
 
     manifest_path = resolved_output_dir / "stem_manifest.json"
+    _emit_progress("write_manifest_start", manifest_path=str(manifest_path))
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     manifest["manifest_path"] = str(manifest_path)
+    _emit_progress("write_manifest_end", manifest_path=str(manifest_path))
     return manifest
 
 

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -96,5 +97,62 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
     assert manifest["contract"]["fallback_used"] is False
     assert manifest["contract"]["per_track_hardcode_allowed"] is False
     assert manifest["contract"]["not_timestamp_hardcoded"] is True
+    assert manifest["execution_contract"]["expected_acceleration_mode"] == "gpu_inference_then_cpu_dsp_scoring"
+    assert manifest["execution_contract"]["gpu_inference_required"] is True
+    assert manifest["execution_contract"]["gpu_inference_skipped"] is False
     assert set(manifest["stems"]) == {"drums", "bass", "other", "vocals"}
     assert manifest["stems"]["drums"]["role"] == "target"
+
+
+def test_scnet_cuda_preflight_fails_closed_when_cuda_is_unavailable(monkeypatch) -> None:
+    module = _load_module()
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: False,
+            device_count=lambda: 0,
+            get_device_name=lambda _device_id: "missing",
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    try:
+        module.verify_cuda_inference_device(0)
+    except RuntimeError as exc:
+        assert "torch.cuda.is_available() is false" in str(exc)
+    else:  # pragma: no cover - asserts fail if exception is not raised
+        raise AssertionError("SCNet CUDA preflight must fail closed when CUDA is unavailable")
+
+
+def test_scnet_manifest_records_cuda_preflight(tmp_path: Path) -> None:
+    module = _load_module()
+    source_audio_path = tmp_path / "source.flac"
+    raw_ref_path = tmp_path / "raw_ref.flac"
+    stems_dir = tmp_path / "stems"
+    stems_dir.mkdir()
+    _write_audio = np.zeros((64, 2), dtype=np.float32)
+    sf.write(source_audio_path, _write_audio, 44100)
+    sf.write(raw_ref_path, _write_audio, 44100)
+    stem_paths = {}
+    for stem_name in ("drums", "bass", "other", "vocals"):
+        stem_path = stems_dir / f"{stem_name}.flac"
+        sf.write(stem_path, _write_audio, 44100)
+        stem_paths[stem_name] = stem_path
+
+    manifest = module.build_full_track_stem_manifest(
+        source_audio_path=source_audio_path,
+        stem_flac_paths=stem_paths,
+        raw_ref_flac_path=raw_ref_path,
+        repo_path=Path("/repo"),
+        model_path=Path("/model.ckpt"),
+        config_template_path=Path("/config.yaml"),
+        runtime_config_path=Path("/runtime.yaml"),
+        device_id=0,
+        num_overlap=4,
+        sample_rate=44100,
+        frames=64,
+        elapsed_sec=1.0,
+        cuda_preflight={"device_name": "NVIDIA GeForce RTX 4080 Laptop GPU"},
+    )
+
+    assert manifest["execution_contract"]["cuda_preflight"]["device_name"] == "NVIDIA GeForce RTX 4080 Laptop GPU"

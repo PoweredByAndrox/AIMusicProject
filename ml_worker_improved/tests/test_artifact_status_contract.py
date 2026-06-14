@@ -128,6 +128,40 @@ def test_plain_accepted_presentation_status_is_not_listenable(tmp_path: Path) ->
         view.assert_promotable()
 
 
+def test_explicit_both_stem_type_overrides_minus_path_heuristic(tmp_path: Path) -> None:
+    manifest = write_manifest(
+        tmp_path / "vocal_minus_master_manifest.json",
+        {
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "stem_type": "both",
+        },
+    )
+
+    view = status_view_from_manifest(manifest)
+
+    assert view.stem_type == "both"
+
+
+def test_explicit_non_vocal_stem_type_is_preserved(tmp_path: Path) -> None:
+    manifest = write_manifest(
+        tmp_path / "stem_listen_preview_manifest.json",
+        {
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "stem_type": "melody",
+        },
+    )
+
+    view = status_view_from_manifest(manifest)
+
+    assert view.stem_type == "melody"
+
+
 def test_artifact_without_manifest_provenance_cannot_be_promoted() -> None:
     view = ArtifactStatusView(
         delivery_status="accepted",

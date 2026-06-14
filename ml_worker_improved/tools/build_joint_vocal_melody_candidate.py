@@ -27,6 +27,7 @@ from build_model_stack_melody_candidate import (  # noqa: E402
     _limit_peak,
     _load_stems_from_manifest,
     _remove_positive_projection,
+    _resample_stereo_audio,
     build_model_stack_melody_candidate_audio,
     sha256_file,
 )
@@ -115,6 +116,35 @@ def _no_reference_contract() -> dict[str, Any]:
         "not_timestamp_hardcoded": True,
         "no_reference_production_claim": True,
         "route_name": ROUTE_NAME,
+    }
+
+
+def _execution_contract_from_base(base_manifest: dict[str, Any], *, device: str) -> dict[str, Any]:
+    base_execution_contract = base_manifest.get("execution_contract")
+    if not isinstance(base_execution_contract, dict):
+        base_execution_contract = {}
+    base_cuda_preflight = base_execution_contract.get("cuda_preflight")
+    if not isinstance(base_cuda_preflight, dict):
+        base_cuda_preflight = {}
+    return {
+        "route_name": ROUTE_NAME,
+        "docker_runtime_required": True,
+        "expected_acceleration_mode": str(
+            base_execution_contract.get("expected_acceleration_mode")
+            or "gpu_inference_then_cpu_dsp_scoring"
+        ),
+        "gpu_inference_required": True,
+        "gpu_inference_skipped": base_execution_contract.get("gpu_inference_skipped") is True,
+        "cuda_preflight": {
+            "cuda_available": base_cuda_preflight.get("cuda_available") is True,
+            "requested_device": str(base_cuda_preflight.get("requested_device") or device or ""),
+            "resolved_device": str(base_cuda_preflight.get("resolved_device") or ""),
+            "device_count": int(base_cuda_preflight.get("device_count") or 0),
+            "device_name": str(base_cuda_preflight.get("device_name") or ""),
+        },
+        "base_route_name": str(base_execution_contract.get("route_name") or ""),
+        "base_model_name": str(base_manifest.get("model_name") or ""),
+        "base_execution_contract_inherited": bool(base_execution_contract),
     }
 
 
@@ -273,10 +303,11 @@ def build_joint_vocal_melody_candidate(
     )
     stems, stem_sample_rate, base_manifest, contract_check = _load_stems_from_manifest(resolved_base_manifest_path)
     source_audio, source_sample_rate = sf.read(str(source_path), always_2d=True)
-    if int(source_sample_rate) != int(stem_sample_rate):
-        raise ValueError(
-            f"source/base sample-rate mismatch: source={source_sample_rate}, base={stem_sample_rate}"
-        )
+    source_audio, source_resampled = _resample_stereo_audio(
+        source_audio,
+        source_sample_rate=int(source_sample_rate),
+        target_sample_rate=int(stem_sample_rate),
+    )
 
     source_sha256 = sha256_file(source_path)
     base_source_sha256 = _base_manifest_source_sha256(base_manifest, resolved_base_manifest_path)
@@ -316,6 +347,7 @@ def build_joint_vocal_melody_candidate(
         "melody_stem_included": True,
         "vocals_stem_included": True,
         "contract": _no_reference_contract(),
+        "execution_contract": _execution_contract_from_base(base_manifest, device=str(device)),
         "pipeline": {
             "mode": ROUTE_NAME,
             "source": "authoritative_full_mix_plus_no_reference_joint_vocal_melody_stack",
@@ -323,6 +355,9 @@ def build_joint_vocal_melody_candidate(
             "base_manifest_model_name": base_manifest.get("model_name"),
             "base_manifest_contract_checked": contract_check["status"] == "accepted",
             "base_manifest_contract": contract_check,
+            "source_sample_rate": int(source_sample_rate),
+            "source_resampled_to_sample_rate": int(stem_sample_rate),
+            "source_resampled": bool(source_resampled),
             "target_reference_read": False,
             "reference_sum_mix_read": False,
             "postprocess": "joint_vocal_melody_cross_projection_debleed_v1",

@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from tools.build_no_reference_stem_listen_preview_manifest import build_manifest as build_stem_listen_manifest
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "build_tonal_harmonic_melody_candidate.py"
 
@@ -90,9 +92,28 @@ def test_manifest_declares_no_reference_route_and_writes_melody(tmp_path: Path) 
     assert saved_manifest["contract"]["hidden_inference"] is False
     assert saved_manifest["contract"]["per_track_hardcode_allowed"] is False
     assert saved_manifest["contract"]["no_reference_production_claim"] is True
+    assert saved_manifest["target_stem"] == "melody"
+    assert saved_manifest["target_stem_artifact"]["target_stem"] == "melody"
+    assert saved_manifest["target_stem_artifact"]["path"] == str(melody_path)
+    assert saved_manifest["delivery_allowed"] is False
+    assert saved_manifest["presentation_status"] == "diagnostic_candidate_not_for_listen_pack"
+    assert saved_manifest["release_status"] == "not_release_ready"
+    assert saved_manifest["release_ready"] is False
+    assert saved_manifest["execution_contract"]["expected_acceleration_mode"] == "cpu_dsp_candidate_generation"
+    assert saved_manifest["execution_contract"]["gpu_inference_required"] is False
+    assert saved_manifest["execution_contract"]["gpu_inference_skipped"] is True
+    assert saved_manifest["execution_contract"]["gpu_inference_skip_reason"] == "cpu_only_dsp_route"
     assert saved_manifest["pipeline"]["source"] == "authoritative_full_mix_only"
     assert saved_manifest["pipeline"]["target_reference_read"] is False
     assert saved_manifest["pipeline"]["reference_sum_mix_read"] is False
     assert saved_manifest["pipeline"]["mode"] == "tonal_harmonic_melody_v1"
     assert saved_manifest["stems"]["melody"]["path"] == str(melody_path)
+    listen_manifest = build_stem_listen_manifest(
+        stem_manifest_json=manifest_path,
+        target_stem="melody",
+        track_id="track-a",
+        min_duration_sec=0.25,
+    )
+    assert listen_manifest["delivery_status"] == "accepted"
+    assert listen_manifest["gpu_provenance_gate"]["cpu_dsp_only_route"] is True
     assert manifest["manifest_path"] == str(manifest_path)

@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from tools.build_no_reference_stem_listen_preview_manifest import build_manifest as build_stem_listen_manifest
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "build_model_stack_melody_candidate.py"
 
@@ -179,6 +181,19 @@ def test_model_stack_manifest_requires_no_reference_base_and_writes_melody(tmp_p
             "per_track_hardcode_allowed": False,
             "not_timestamp_hardcoded": True,
         },
+        "execution_contract": {
+            "docker_runtime_required": True,
+            "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
+            "gpu_inference_required": True,
+            "gpu_inference_skipped": False,
+            "cuda_preflight": {
+                "cuda_available": True,
+                "requested_device": "cuda",
+                "resolved_device": "cuda",
+                "device_count": 1,
+                "device_name": "test gpu",
+            },
+        },
         "pipeline": {
             "mode": "synthetic_base",
             "target_reference_read": False,
@@ -217,7 +232,90 @@ def test_model_stack_manifest_requires_no_reference_base_and_writes_melody(tmp_p
     assert saved_manifest["pipeline"]["reference_sum_mix_read"] is False
     assert saved_manifest["pipeline"]["source"] == "authoritative_full_mix_plus_no_reference_model_stack"
     assert saved_manifest["stems"]["melody"]["path"] == str(output_dir / "melody.flac")
+    assert saved_manifest["target_stem"] == "melody"
+    assert saved_manifest["target_stem_artifact"]["target_stem"] == "melody"
+    assert saved_manifest["target_stem_artifact"]["path"] == str(output_dir / "melody.flac")
+    assert saved_manifest["delivery_allowed"] is False
+    assert saved_manifest["presentation_status"] == "diagnostic_candidate_not_for_listen_pack"
+    assert saved_manifest["release_status"] == "not_release_ready"
+    assert saved_manifest["release_ready"] is False
+    assert saved_manifest["execution_contract"]["gpu_inference_required"] is True
+    assert saved_manifest["execution_contract"]["gpu_inference_skipped"] is False
+    assert saved_manifest["execution_contract"]["cuda_preflight"]["cuda_available"] is True
+    assert saved_manifest["execution_contract"]["cuda_preflight"]["resolved_device"] == "cuda"
+    listen_manifest = build_stem_listen_manifest(
+        stem_manifest_json=output_dir / "stem_manifest.json",
+        target_stem="melody",
+        track_id="track-a",
+        min_duration_sec=0.25,
+    )
+    assert listen_manifest["delivery_status"] == "accepted"
+    assert listen_manifest["gpu_provenance_gate"]["status"] == "passed"
     assert manifest["manifest_path"] == str(output_dir / "stem_manifest.json")
+
+
+def test_model_stack_manifest_resamples_source_to_base_sample_rate(tmp_path: Path) -> None:
+    module = _load_module()
+    source_sample_rate = 12000
+    base_sample_rate = 8000
+    source_path = tmp_path / "source_mix.flac"
+    source_audio = _sine(source_sample_rate, 1.0, 330.0, 0.25)
+    sf.write(source_path, source_audio, source_sample_rate, subtype="PCM_24")
+
+    stem_dir = tmp_path / "base"
+    stem_dir.mkdir()
+    melody = _sine(base_sample_rate, 1.0, 330.0, 0.25)
+    vocals = _sine(base_sample_rate, 1.0, 660.0, 0.18)
+    drums = _noise_burst(base_sample_rate, 1.0, 0.35)
+    bass = _sine(base_sample_rate, 1.0, 80.0, 0.20)
+    base_manifest = {
+        "audio_path": str(source_path),
+        "audio_sha256": module.sha256_file(source_path),
+        "model_name": "synthetic_no_reference_base",
+        "sample_rate": base_sample_rate,
+        "contract": {
+            "target_reference_assisted": False,
+            "target_reference_used": False,
+            "target_reference_used_at_application": False,
+            "application_reference_free": True,
+            "delivery_allowed_without_reference": True,
+            "registered_model_candidate": True,
+            "fallback_used": False,
+            "hidden_inference": False,
+            "per_track_hardcode_allowed": False,
+            "not_timestamp_hardcoded": True,
+        },
+        "pipeline": {
+            "mode": "synthetic_base",
+            "target_reference_read": False,
+            "reference_sum_mix_read": False,
+        },
+        "stems": {
+            "melody": _write_stem(stem_dir / "melody.flac", melody + vocals * 0.6, base_sample_rate),
+            "vocals": _write_stem(stem_dir / "vocals.flac", vocals, base_sample_rate),
+            "drums": _write_stem(stem_dir / "drums.flac", drums, base_sample_rate),
+            "bass": _write_stem(stem_dir / "bass.flac", bass, base_sample_rate),
+        },
+    }
+    base_manifest_path = stem_dir / "stem_manifest.json"
+    base_manifest_path.write_text(json.dumps(base_manifest, indent=2), encoding="utf-8")
+
+    output_dir = tmp_path / "candidate"
+    module.build_model_stack_melody_candidate(
+        source_audio_path=source_path,
+        output_dir=output_dir,
+        base_manifest_path=base_manifest_path,
+        harmonic_n_fft=512,
+        harmonic_hop_length=128,
+    )
+
+    saved_manifest = json.loads((output_dir / "stem_manifest.json").read_text(encoding="utf-8"))
+    assert (output_dir / "melody.flac").exists()
+    assert saved_manifest["sample_rate"] == base_sample_rate
+    assert saved_manifest["pipeline"]["source_sample_rate"] == source_sample_rate
+    assert saved_manifest["pipeline"]["source_resampled_to_sample_rate"] == base_sample_rate
+    assert saved_manifest["pipeline"]["source_resampled"] is True
+    assert saved_manifest["pipeline"]["source_audio"]["frames"] == base_sample_rate
 
 
 def test_model_stack_rejects_base_manifest_without_source_hash_or_hashable_audio_path(tmp_path: Path) -> None:

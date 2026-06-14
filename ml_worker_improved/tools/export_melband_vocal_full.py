@@ -11,7 +11,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import soundfile as sf
+import yaml
 
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
@@ -40,6 +42,31 @@ MODEL_INPUT_STEM = "full_track"
 
 def _emit(message: str) -> None:
     print(f"[melband_vocal_full] {message}", flush=True)
+
+
+def verify_cuda_inference_device(device_id: int) -> dict[str, Any]:
+    if int(device_id) < 0:
+        raise RuntimeError(f"CUDA inference required for MelBand exporter but device_id is invalid: {device_id}")
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover - depends on runtime image packaging
+        raise RuntimeError("CUDA inference required for MelBand exporter but torch could not be imported") from exc
+
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not bool(cuda.is_available()):
+        raise RuntimeError("CUDA inference required for MelBand exporter but torch.cuda.is_available() is false")
+    device_count = int(cuda.device_count())
+    if int(device_id) >= device_count:
+        raise RuntimeError(
+            "CUDA inference required for MelBand exporter but requested device_id "
+            f"{device_id} is outside available CUDA device count {device_count}"
+        )
+    return {
+        "cuda_available": True,
+        "device_id": int(device_id),
+        "device_count": device_count,
+        "device_name": str(cuda.get_device_name(int(device_id))),
+    }
 
 
 def _sha256_file(path: Path) -> str:
@@ -79,7 +106,23 @@ def build_full_track_stem_manifest(
     postprocess: dict[str, Any],
     model_id: str = MODEL_ID,
     model_display_name: str = MODEL_DISPLAY_NAME,
+    stem_provenance: dict[str, dict[str, Any]] | None = None,
+    residual_companion_materialized: bool = False,
+    cuda_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    stem_provenance = stem_provenance or {}
+    vocals_summary = {
+        "path": str(vocals_flac_path),
+        "role": "target",
+        **_audio_file_summary(vocals_flac_path),
+    }
+    vocals_summary.update(stem_provenance.get("vocals", {}))
+    instrumental_summary = {
+        "path": str(instrumental_flac_path),
+        "role": "companion",
+        **_audio_file_summary(instrumental_flac_path),
+    }
+    instrumental_summary.update(stem_provenance.get("instrumental", {}))
     return {
         "schema_version": 1,
         "source_audio_path": str(source_audio_path),
@@ -104,18 +147,18 @@ def build_full_track_stem_manifest(
             "hidden_inference": False,
             "registered_model_candidate": True,
             "per_track_hardcode_allowed": False,
+            "residual_companion_materialized": bool(residual_companion_materialized),
+        },
+        "execution_contract": {
+            "docker_runtime_required": True,
+            "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
+            "gpu_inference_required": True,
+            "gpu_inference_skipped": False,
+            "cuda_preflight": dict(cuda_preflight or {}),
         },
         "stems": {
-            "vocals": {
-                "path": str(vocals_flac_path),
-                "role": "target",
-                **_audio_file_summary(vocals_flac_path),
-            },
-            "instrumental": {
-                "path": str(instrumental_flac_path),
-                "role": "companion",
-                **_audio_file_summary(instrumental_flac_path),
-            },
+            "vocals": vocals_summary,
+            "instrumental": instrumental_summary,
         },
         "artifacts": {
             "raw_ref_flac": str(raw_ref_flac_path),
@@ -151,6 +194,9 @@ def write_full_track_stem_manifest(
     postprocess: dict[str, Any],
     model_id: str = MODEL_ID,
     model_display_name: str = MODEL_DISPLAY_NAME,
+    stem_provenance: dict[str, dict[str, Any]] | None = None,
+    residual_companion_materialized: bool = False,
+    cuda_preflight: dict[str, Any] | None = None,
 ) -> Path:
     manifest = build_full_track_stem_manifest(
         source_audio_path=source_audio_path,
@@ -169,6 +215,9 @@ def write_full_track_stem_manifest(
         postprocess=postprocess,
         model_id=model_id,
         model_display_name=model_display_name,
+        stem_provenance=stem_provenance,
+        residual_companion_materialized=residual_companion_materialized,
+        cuda_preflight=cuda_preflight,
     )
     manifest_path = output_dir / "stem_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -186,6 +235,146 @@ def resolve_model_output_path(model_output_dir: Path, stem_name: str) -> Path:
             return candidate_path
 
     raise FileNotFoundError(f"MelBand {stem_name} output is missing: {exact_path}")
+
+
+def try_resolve_model_output_path(model_output_dir: Path, stem_name: str) -> Path | None:
+    try:
+        return resolve_model_output_path(model_output_dir, stem_name)
+    except FileNotFoundError:
+        return None
+
+
+def normalize_model_stem_name(raw_value: Any) -> str:
+    value = str(raw_value or "").strip().lower()
+    if value in {"vocal", "vocals", "voice"}:
+        return "vocals"
+    if value in {"instrumental", "instrumentals", "minus"}:
+        return "instrumental"
+    return value
+
+
+def load_melband_output_contract(config_path: Path) -> dict[str, Any]:
+    payload = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.FullLoader) or {}
+    model = payload.get("model") or {}
+    training = payload.get("training") or {}
+    num_stems = int(model.get("num_stems") or 0)
+    target_instrument = training.get("target_instrument")
+    normalized_target = normalize_model_stem_name(target_instrument)
+    if num_stems == 1 and normalized_target in {"vocals", "instrumental"}:
+        return {
+            "num_stems": num_stems,
+            "target_instrument": target_instrument,
+            "expected_model_stems": (normalized_target,),
+            "allow_residual_companion_materialization": True,
+        }
+    return {
+        "num_stems": num_stems,
+        "target_instrument": target_instrument,
+        "expected_model_stems": ("vocals", "instrumental"),
+        "allow_residual_companion_materialization": False,
+    }
+
+
+def _require_matching_audio_layout(
+    *,
+    raw_audio: np.ndarray,
+    raw_sample_rate: int,
+    stem_audio: np.ndarray,
+    stem_sample_rate: int | None,
+    stem_name: str,
+) -> None:
+    if stem_sample_rate is None:
+        raise RuntimeError(f"{stem_name} sample rate is required for residual companion materialization")
+    if int(stem_sample_rate) != int(raw_sample_rate):
+        raise RuntimeError(
+            f"{stem_name} sample rate mismatch for residual companion materialization: "
+            f"{stem_sample_rate} != {raw_sample_rate}"
+        )
+    if tuple(stem_audio.shape) != tuple(raw_audio.shape):
+        raise RuntimeError(
+            f"{stem_name} audio shape mismatch for residual companion materialization: "
+            f"{tuple(stem_audio.shape)} != {tuple(raw_audio.shape)}"
+        )
+
+
+def materialize_missing_companion_stems(
+    *,
+    output_contract: dict[str, Any],
+    raw_audio: np.ndarray,
+    raw_sample_rate: int,
+    vocals_audio: np.ndarray | None,
+    vocals_sample_rate: int | None,
+    instrumental_audio: np.ndarray | None,
+    instrumental_sample_rate: int | None,
+) -> dict[str, Any]:
+    if vocals_audio is None and instrumental_audio is None:
+        raise FileNotFoundError("MelBand output is missing both vocals and instrumental stems")
+
+    residual_companion_materialized = False
+    stem_provenance: dict[str, dict[str, Any]] = {}
+    expected_model_stems = {
+        normalize_model_stem_name(stem_name)
+        for stem_name in tuple(output_contract.get("expected_model_stems") or ())
+    }
+    allow_residual = bool(output_contract.get("allow_residual_companion_materialization"))
+
+    if expected_model_stems == {"instrumental"} and instrumental_audio is None:
+        raise RuntimeError("MelBand output contract expected instrumental output but it is missing")
+    if expected_model_stems == {"vocals"} and vocals_audio is None:
+        raise RuntimeError("MelBand output contract expected vocals output but it is missing")
+    if expected_model_stems != {"instrumental"} and vocals_audio is None and not allow_residual:
+        raise FileNotFoundError("MelBand vocals output is missing")
+    if expected_model_stems != {"vocals"} and instrumental_audio is None and not allow_residual:
+        raise FileNotFoundError("MelBand instrumental output is missing")
+
+    if vocals_audio is None:
+        assert instrumental_audio is not None
+        _require_matching_audio_layout(
+            raw_audio=raw_audio,
+            raw_sample_rate=raw_sample_rate,
+            stem_audio=instrumental_audio,
+            stem_sample_rate=instrumental_sample_rate,
+            stem_name="instrumental",
+        )
+        vocals_audio = raw_audio - instrumental_audio
+        vocals_sample_rate = int(raw_sample_rate)
+        residual_companion_materialized = True
+        stem_provenance["vocals"] = {
+            "source": "residual_from_raw_minus_instrumental",
+            "model_output": False,
+            "residual_companion": True,
+        }
+    else:
+        stem_provenance["vocals"] = {"source": "model_output", "model_output": True}
+
+    if instrumental_audio is None:
+        assert vocals_audio is not None
+        _require_matching_audio_layout(
+            raw_audio=raw_audio,
+            raw_sample_rate=raw_sample_rate,
+            stem_audio=vocals_audio,
+            stem_sample_rate=vocals_sample_rate,
+            stem_name="vocals",
+        )
+        instrumental_audio = raw_audio - vocals_audio
+        instrumental_sample_rate = int(raw_sample_rate)
+        residual_companion_materialized = True
+        stem_provenance["instrumental"] = {
+            "source": "residual_from_raw_minus_vocals",
+            "model_output": False,
+            "residual_companion": True,
+        }
+    else:
+        stem_provenance["instrumental"] = {"source": "model_output", "model_output": True}
+
+    return {
+        "vocals_audio": vocals_audio,
+        "vocals_sample_rate": int(vocals_sample_rate or raw_sample_rate),
+        "instrumental_audio": instrumental_audio,
+        "instrumental_sample_rate": int(instrumental_sample_rate or raw_sample_rate),
+        "stem_provenance": stem_provenance,
+        "residual_companion_materialized": residual_companion_materialized,
+    }
 
 
 def parse_frequency_list(raw_value: str) -> list[float]:
@@ -326,6 +515,14 @@ def main() -> None:
     if not config_path.exists():
         raise FileNotFoundError(f"MelBand config is missing: {config_path}")
 
+    cuda_preflight = verify_cuda_inference_device(int(args.device_id))
+    _emit(
+        "cuda_preflight "
+        f"device_id={cuda_preflight['device_id']} "
+        f"device_count={cuda_preflight['device_count']} "
+        f"device_name={cuda_preflight['device_name']}"
+    )
+
     start_wall = time.time()
     with tempfile.TemporaryDirectory(prefix="melband_full_input_") as input_dir_str, tempfile.TemporaryDirectory(
         prefix="melband_full_output_"
@@ -345,6 +542,7 @@ def main() -> None:
         )
         _emit(f"prepared_full_track_wav sample_rate={sample_rate} frames={frames}")
         write_config_with_overlap(config_path, runtime_config_path, num_overlap=int(args.num_overlap))
+        output_contract = load_melband_output_contract(runtime_config_path)
 
         command = [
             "python",
@@ -374,12 +572,33 @@ def main() -> None:
         if completed.stderr.strip():
             print(completed.stderr, end="" if completed.stderr.endswith("\n") else "\n", flush=True)
 
-        vocals_wav = resolve_model_output_path(model_output_dir, "vocals")
-        instrumental_wav = resolve_model_output_path(model_output_dir, "instrumental")
+        vocals_wav = try_resolve_model_output_path(model_output_dir, "vocals")
+        instrumental_wav = try_resolve_model_output_path(model_output_dir, "instrumental")
 
-        vocals_audio, vocals_sr = sf.read(str(vocals_wav), always_2d=True)
-        instrumental_audio, instrumental_sr = sf.read(str(instrumental_wav), always_2d=True)
+        vocals_audio: np.ndarray | None
+        instrumental_audio: np.ndarray | None
+        vocals_sr: int | None
+        instrumental_sr: int | None
+        vocals_audio, vocals_sr = (
+            sf.read(str(vocals_wav), always_2d=True) if vocals_wav is not None else (None, None)
+        )
+        instrumental_audio, instrumental_sr = (
+            sf.read(str(instrumental_wav), always_2d=True) if instrumental_wav is not None else (None, None)
+        )
         raw_audio, raw_sr = sf.read(str(full_input_path), always_2d=True)
+        resolved_stems = materialize_missing_companion_stems(
+            output_contract=output_contract,
+            raw_audio=raw_audio,
+            raw_sample_rate=int(raw_sr),
+            vocals_audio=vocals_audio,
+            vocals_sample_rate=vocals_sr,
+            instrumental_audio=instrumental_audio,
+            instrumental_sample_rate=instrumental_sr,
+        )
+        vocals_audio = resolved_stems["vocals_audio"]
+        vocals_sr = int(resolved_stems["vocals_sample_rate"])
+        instrumental_audio = resolved_stems["instrumental_audio"]
+        instrumental_sr = int(resolved_stems["instrumental_sample_rate"])
         tuned_vocals_audio = apply_light_debleed_presence(
             vocals_audio,
             instrumental_audio,
@@ -472,6 +691,9 @@ def main() -> None:
             postprocess=build_postprocess_manifest(args, surgical_centers, band_subtract_centers),
             model_id=str(args.manifest_model_id),
             model_display_name=str(args.manifest_model_display_name),
+            stem_provenance=resolved_stems["stem_provenance"],
+            residual_companion_materialized=bool(resolved_stems["residual_companion_materialized"]),
+            cuda_preflight=cuda_preflight,
         )
 
         if listen_dir is not None:

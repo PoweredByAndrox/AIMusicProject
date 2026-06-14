@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import importlib.util
+import subprocess
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -73,6 +76,7 @@ class ModelAvailability:
     status: str
     missing_paths: tuple[str, ...] = ()
     missing_python_modules: tuple[str, ...] = ()
+    runtime_blockers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,11 +107,12 @@ class ModelSuggestion:
             "family": self.family,
             "target_stems": list(self.target_stems),
             "output_stems": list(self.output_stems),
-            "availability": {
-                "status": self.availability.status,
-                "missing_paths": list(self.availability.missing_paths),
-                "missing_python_modules": list(self.availability.missing_python_modules),
-            },
+                "availability": {
+                    "status": self.availability.status,
+                    "missing_paths": list(self.availability.missing_paths),
+                    "missing_python_modules": list(self.availability.missing_python_modules),
+                    "runtime_blockers": list(self.availability.runtime_blockers),
+                },
             "reason": self.reason,
             "command_template": list(self.command_template),
             "expected_manifest": self.expected_manifest,
@@ -145,11 +150,13 @@ class ModelRegistry:
             for module_name in entry.required_python_modules
             if not self._python_module_is_available(module_name)
         )
+        runtime_blockers = tuple(self._runtime_blockers(entry))
         return ModelAvailability(
             model_id=entry.model_id,
-            status="available" if not missing_paths and not missing_python_modules else "unavailable",
+            status="available" if not missing_paths and not missing_python_modules and not runtime_blockers else "unavailable",
             missing_paths=missing_paths,
             missing_python_modules=missing_python_modules,
+            runtime_blockers=runtime_blockers,
         )
 
     def supported_entries(self, stem_names: Sequence[str]) -> list[ModelRegistryEntry]:
@@ -215,6 +222,7 @@ class ModelRegistry:
                     "status": availability.status,
                     "missing_paths": list(availability.missing_paths),
                     "missing_python_modules": list(availability.missing_python_modules),
+                    "runtime_blockers": list(availability.runtime_blockers),
                 },
                 "issue_labels_addressed": list(entry.issue_labels_addressed),
                 "runtime_tags": list(entry.runtime_tags),
@@ -246,12 +254,73 @@ class ModelRegistry:
             return path
         return self.runtime_root / path
 
+    def _runtime_blockers(self, entry: ModelRegistryEntry) -> list[str]:
+        command_template = list(entry.command_template)
+        if "--require-cuda-provider" not in command_template:
+            return []
+        try:
+            python_index = command_template.index("--audio-separator-python") + 1
+            audio_separator_python = command_template[python_index]
+        except (ValueError, IndexError):
+            return ["audio_separator_python_arg_missing"]
+        python_path = self._resolve_required_path(audio_separator_python)
+        declared_runtime_paths = {
+            str(self._resolve_required_path(required_path))
+            for required_path in entry.required_paths
+        }
+        # Tests and diagnostic fixtures may strip required_paths to validate
+        # command contracts without depending on the local audio-separator venv.
+        # Production audio-separator entries declare this runtime path, so their
+        # CUDA-provider probe remains fail-closed.
+        if str(python_path) not in declared_runtime_paths:
+            return []
+        if not python_path.exists():
+            return []
+        providers, probe_error = _probe_onnxruntime_providers(str(python_path))
+        if probe_error:
+            return ["audio_separator_runtime_probe_failed"]
+        if "CUDAExecutionProvider" not in providers:
+            return ["cuda_execution_provider_missing"]
+        return []
+
     @staticmethod
     def _python_module_is_available(module_name: str) -> bool:
         try:
             return importlib.util.find_spec(module_name) is not None
         except (ImportError, ModuleNotFoundError, ValueError):
             return False
+
+
+@lru_cache(maxsize=16)
+def _probe_onnxruntime_providers(audio_separator_python: str) -> tuple[tuple[str, ...], str]:
+    runner_code = (
+        "from __future__ import annotations\n"
+        "import json\n"
+        "try:\n"
+        "    import onnxruntime as ort\n"
+        "    print(json.dumps({'available_providers': list(ort.get_available_providers())}, ensure_ascii=False))\n"
+        "except Exception as exc:\n"
+        "    print(json.dumps({'error': f'{type(exc).__name__}: {exc}'}, ensure_ascii=False))\n"
+        "    raise\n"
+    )
+    completed = subprocess.run(
+        [audio_separator_python, "-c", runner_code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    last_json_line = next((line for line in reversed(completed.stdout.splitlines()) if line.strip().startswith("{")), "")
+    if not last_json_line:
+        return (), completed.stderr.strip() or f"probe_returncode={completed.returncode}"
+    try:
+        payload = json.loads(last_json_line)
+    except json.JSONDecodeError as exc:
+        return (), f"JSONDecodeError: {exc}"
+    providers = tuple(str(provider) for provider in payload.get("available_providers") or [])
+    error = str(payload.get("error") or "")
+    if completed.returncode != 0 and not error:
+        error = completed.stderr.strip() or f"probe_returncode={completed.returncode}"
+    return providers, error
 
 
 def build_suggestion_reason(entry: ModelRegistryEntry, failed_labels: Sequence[str]) -> str:
@@ -400,6 +469,93 @@ def default_model_registry(runtime_root: Path = DEFAULT_DOCKER_APP_ROOT) -> Mode
             notes=(
                 "No-reference source-mix STFT/HPSS tonal candidate for melody; "
                 "must pass objective gate before delivery.",
+            ),
+        ),
+        ModelRegistryEntry(
+            model_id="pitch_salience_melody_v1",
+            display_name="Pitch-salience reinforced melody candidate",
+            family="hybrid",
+            target_stems=("melody",),
+            output_stems=("melody",),
+            command_template=(
+                "python",
+                "/app/tools/build_pitch_salience_melody_candidate.py",
+                "{source_audio_path}",
+                "{output_dir}",
+                "--model-name",
+                "hybrid_htdemucs_ft_bs_roformer_6s",
+                "--device",
+                "{device}",
+                "--listen-dir={listen_dir}",
+            ),
+            expected_manifest="{output_dir}/stem_manifest.json",
+            issue_labels_addressed=(
+                "melody_low_pitch_confidence",
+                "reference_likeness_below_threshold",
+                "vocal_residue_in_melody",
+                "non_target_leakage",
+                "reference_stem_leakage",
+                "micro_reference_stem_leakage",
+                "low_sdr",
+                "low_si_sdr",
+            ),
+            aliases=("pitch_salience_melody", "melody_pitch_salience"),
+            cost_class="high",
+            notes=(
+                "Builds a no-reference base melody from the source mix, then reinforces the adaptive "
+                "dominant pitch/harmonic salience before the same listen and semantic gates.",
+            ),
+        ),
+        ModelRegistryEntry(
+            model_id="pitch_salience_melody_v2",
+            display_name="Midband-safe pitch-salience melody candidate",
+            family="hybrid",
+            target_stems=("melody",),
+            output_stems=("melody",),
+            command_template=(
+                "python",
+                "/app/tools/build_pitch_salience_melody_candidate.py",
+                "{source_audio_path}",
+                "{output_dir}",
+                "--route-name",
+                "pitch_salience_melody_v2",
+                "--model-name",
+                "hybrid_htdemucs_ft_bs_roformer_6s",
+                "--device",
+                "{device}",
+                "--min-frequency-hz",
+                "120.0",
+                "--max-harmonic-hz",
+                "6000",
+                "--bandwidth-ratio",
+                "0.028",
+                "--base-weight",
+                "0.20",
+                "--salience-weight",
+                "1.10",
+                "--salience-rms-gain",
+                "0.85",
+                "--listen-dir={listen_dir}",
+            ),
+            expected_manifest="{output_dir}/stem_manifest.json",
+            issue_labels_addressed=(
+                "melody_bass_dominant",
+                "melody_low_pitch_confidence",
+                "reference_likeness_below_threshold",
+                "vocal_residue_in_melody",
+                "non_target_leakage",
+                "reference_stem_leakage",
+                "micro_reference_stem_leakage",
+                "low_sdr",
+                "low_si_sdr",
+            ),
+            aliases=("pitch_salience_melody_midband_safe", "melody_pitch_salience_midband_safe"),
+            cost_class="high",
+            notes=(
+                "Uses the same registered pitch-salience builder with an explicit v2 route label "
+                "and a 120 Hz minimum dominant-frequency search plus narrow midband salience "
+                "to avoid bass-dominant melody acceptance.",
+                "Must pass listen, GPU provenance, semantic judge, and stem matrix gates before delivery.",
             ),
         ),
         ModelRegistryEntry(
@@ -1052,6 +1208,66 @@ def default_model_registry(runtime_root: Path = DEFAULT_DOCKER_APP_ROOT) -> Mode
             notes=("Uses the shared MelBand exporter with config-schema normalization for karaoke checkpoints.",),
         ),
         ModelRegistryEntry(
+            model_id="becruily_instrumental_vocals",
+            display_name="Becruily MelBand RoFormer instrumental checkpoint",
+            family="roformer",
+            target_stems=("vocals", "instrumental"),
+            output_stems=("vocals", "instrumental"),
+            command_template=(
+                "python",
+                "/app/tools/export_melband_vocal_full.py",
+                "{source_audio_path}",
+                "{output_dir}",
+                "--model-path",
+                "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt",
+                "--config-path",
+                "/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml",
+                "--manifest-model-id",
+                "becruily_instrumental_vocals",
+                "--manifest-model-display-name",
+                "Becruily MelBand RoFormer instrumental checkpoint",
+            ),
+            expected_manifest="{output_dir}/stem_manifest.json",
+            required_paths=(
+                "/app/vendor/mel_band_roformer_vocal_model",
+                "/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml",
+                "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt",
+            ),
+            issue_labels_addressed=(
+                "vocal_residue_in_minus",
+                "wide_stereo_non_vocal_leakage",
+                "reference_likeness_below_threshold",
+                "target_shape_mismatch",
+                "vocal_dropout",
+                "vocal_tail_loss",
+                "presence_loss",
+            ),
+            aliases=("becruily_instrumental", "instrumental_becruily"),
+            cost_class="high",
+            notes=(
+                "Uses the shared MelBand exporter with config-schema normalization for the Becruily instrumental checkpoint.",
+                "Registered primarily as an instrumental/minus candidate; the companion vocal stem must still pass mode-specific gates before delivery.",
+            ),
+            task_scope="vocal_instrumental",
+            canonical_name_status="community_checkpoint",
+            benchmark_score_context={
+                "metric_family": "vocal_instrumental_checkpoint_sdr",
+                "reported_score": "No trusted local score yet; this route is a candidate for local no-reference and exact-reference gates",
+                "directly_comparable_with": "same_task_local_benchmark",
+                "comparability_warning": "Community checkpoint labels are provenance metadata, not production quality claims.",
+            },
+            code_license="wrapper_mit",
+            weights_license="checkpoint_specific",
+            license_status="checkpoint_license_unverified",
+            commercial_use_status="requires_checkpoint_rights_review",
+            comparability_notes=(
+                "Instrumental-focused checkpoints are local candidates for minus preservation, not release-ready artifacts by registration alone.",
+            ),
+            report_alignment_notes=(
+                "Adds a reproducible MelBand/MSST candidate that can run in the existing GPU Docker image without the audio-separator venv.",
+            ),
+        ),
+        ModelRegistryEntry(
             model_id="bs_mamba2_vocals",
             display_name="BS-Mamba2 vocal checkpoint",
             family="mamba",
@@ -1067,6 +1283,7 @@ def default_model_registry(runtime_root: Path = DEFAULT_DOCKER_APP_ROOT) -> Mode
             required_paths=(
                 "/app/vendor/bs_mamba2_vocals/config_bs_mamba2_vocals.yaml",
                 "/app/vendor/bs_mamba2_vocals/bs_mamba2_vocals.ckpt",
+                "/app/vendor/bs_mamba2_vocals/runtime_probe_passed.json",
             ),
             required_python_modules=("mamba_ssm", "causal_conv1d"),
             issue_labels_addressed=(
@@ -1077,7 +1294,10 @@ def default_model_registry(runtime_root: Path = DEFAULT_DOCKER_APP_ROOT) -> Mode
             ),
             aliases=("bs_mamba2",),
             cost_class="high",
-            notes=("Optional external candidate; availability depends on local checkpoint/runtime.",),
+            notes=(
+                "Optional external candidate; availability depends on local checkpoint/runtime.",
+                "Requires an explicit runtime_probe_passed.json marker because module presence alone has reached model load and then SIGSEGVed before manifest creation.",
+            ),
         ),
         ModelRegistryEntry(
             model_id="audio_separator_bs_roformer_vocals",
@@ -1141,6 +1361,71 @@ def default_model_registry(runtime_root: Path = DEFAULT_DOCKER_APP_ROOT) -> Mode
             ),
             report_alignment_notes=(
                 "Source report treats BS/RoFormer-style routes as strong candidates, but local exact-reference gates decide delivery.",
+            ),
+        ),
+        ModelRegistryEntry(
+            model_id="audio_separator_bs_roformer_viperx_1297_vendor_config_vocals",
+            display_name="Audio Separator BS-RoFormer ViperX-1297 vendor config variant",
+            family="audio_separator_uvr",
+            target_stems=("vocals", "instrumental"),
+            output_stems=("vocals", "instrumental"),
+            command_template=(
+                "python",
+                "/app/tools/export_audio_separator_vocal_full.py",
+                "{source_audio_path}",
+                "{output_dir}",
+                "--model-filename",
+                "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+                "--model-file-dir",
+                "/app/vendor/bs_roformer_viperx_1297",
+                "--audio-separator-python",
+                "/opt/audio-separator-venv/bin/python",
+                "--manifest-model-id",
+                "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals",
+                "--manifest-model-display-name",
+                "Audio Separator BS-RoFormer ViperX-1297 vendor config variant",
+                "--require-cuda-provider",
+            ),
+            expected_manifest="{output_dir}/stem_manifest.json",
+            required_paths=(
+                "/opt/audio-separator-venv/bin/python",
+                "/app/vendor/bs_roformer_viperx_1297/model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+                "/app/vendor/bs_roformer_viperx_1297/model_bs_roformer_ep_317_sdr_12.9755.yaml",
+            ),
+            issue_labels_addressed=(
+                "vocal_dropout",
+                "vocal_tail_loss",
+                "presence_loss",
+                "thin_or_overcleaned",
+                "high_noise_or_robotic_artifact",
+                "kick_punch_bleed",
+                "wide_stereo_non_vocal_leakage",
+                "reference_likeness_below_threshold",
+            ),
+            aliases=("audio_separator_bs_roformer_viperx_1297_vendor_config", "uvr_bs_roformer_viperx_1297_vendor_config"),
+            cost_class="high",
+            notes=(
+                "Uses the same ViperX-1297 checkpoint as audio_separator_bs_roformer_vocals with the vendor sidecar YAML as a config variant.",
+                "Registered candidate only; must pass mode-specific judge, selector, and artifact contract before any listen delivery.",
+            ),
+            task_scope="vocal_instrumental",
+            canonical_name_status="community_checkpoint_config_variant",
+            benchmark_score_context={
+                "metric_family": "vocal_checkpoint_sdr",
+                "reported_score": "Checkpoint filename reports SDR 12.9755; this route varies only the local sidecar config",
+                "directly_comparable_with": "same_task_local_benchmark",
+                "comparability_warning": "Same-checkpoint config variants are candidates for local judging, not separate leaderboard claims.",
+            },
+            code_license="audio_separator_runtime",
+            weights_license="checkpoint_specific",
+            license_status="checkpoint_license_unverified",
+            commercial_use_status="requires_checkpoint_rights_review",
+            comparability_notes=(
+                "This route is a config variant over the same checkpoint, not a new model-family result.",
+                "Community checkpoint labels are not paper-defined model names and must be benchmarked locally.",
+            ),
+            report_alignment_notes=(
+                "Adds a reproducible sidecar-config variation to the local candidate matrix without relaxing gates.",
             ),
         ),
         ModelRegistryEntry(

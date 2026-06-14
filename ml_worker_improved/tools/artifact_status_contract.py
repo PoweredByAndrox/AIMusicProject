@@ -113,14 +113,28 @@ def _first_bool(payload: dict[str, Any], paths: Iterable[tuple[str, ...]], defau
 
 
 def infer_stem_type(payload: dict[str, Any], manifest_path: Path | None = None) -> str:
+    explicit_values = (
+        payload.get("stem_type"),
+        payload.get("target_stem"),
+        payload.get("stem"),
+        payload.get("selected_stem"),
+        payload.get("mode"),
+    )
+    for value in explicit_values:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"both", "pair", "vocal_minus", "vocal+minus", "vocal_minus_pair"}:
+            return "both"
+        if normalized in {"minus", "instrumental"}:
+            return "minus"
+        if normalized in {"vocal", "vocals"}:
+            return "vocal"
+        if normalized in {"melody", "drums", "bass", "other"}:
+            return normalized
+        if normalized in {"full_stem_pack", "full-stem-pack", "stem_pack", "stem-pack"}:
+            return "full_stem_pack"
     text = " ".join(
         str(value).lower()
         for value in (
-            payload.get("stem_type"),
-            payload.get("target_stem"),
-            payload.get("stem"),
-            payload.get("selected_stem"),
-            payload.get("mode"),
             manifest_path.name if manifest_path else "",
             str(manifest_path.parent) if manifest_path else "",
         )
@@ -295,6 +309,7 @@ def normalize_manifest_status(payload: dict[str, Any], manifest_path: Path) -> A
             ("selected_artifacts", "listen_selected_vocals_flac"),
             ("selected_artifacts", "selected_minus_flac"),
             ("selected_artifacts", "listen_minus_flac"),
+            ("selected_artifacts", "listen_stem_flac"),
         ),
     ) or None
 

@@ -58,6 +58,31 @@ def _audio_file_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def verify_cuda_inference_device(device_id: int) -> dict[str, Any]:
+    if int(device_id) < 0:
+        raise RuntimeError(f"CUDA inference required for MDX23C exporter but device_id is invalid: {device_id}")
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover - depends on runtime image packaging
+        raise RuntimeError("CUDA inference required for MDX23C exporter but torch could not be imported") from exc
+
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not bool(cuda.is_available()):
+        raise RuntimeError("CUDA inference required for MDX23C exporter but torch.cuda.is_available() is false")
+    device_count = int(cuda.device_count())
+    if int(device_id) >= device_count:
+        raise RuntimeError(
+            "CUDA inference required for MDX23C exporter but requested device_id "
+            f"{device_id} is outside available CUDA device count {device_count}"
+        )
+    return {
+        "cuda_available": True,
+        "device_id": int(device_id),
+        "device_count": device_count,
+        "device_name": str(cuda.get_device_name(int(device_id))),
+    }
+
+
 def build_full_track_stem_manifest(
     *,
     source_audio_path: Path,
@@ -73,6 +98,7 @@ def build_full_track_stem_manifest(
     sample_rate: int,
     frames: int,
     elapsed_sec: float,
+    cuda_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -100,6 +126,13 @@ def build_full_track_stem_manifest(
             "hidden_inference": False,
             "registered_model_candidate": True,
             "per_track_hardcode_allowed": False,
+        },
+        "execution_contract": {
+            "docker_runtime_required": True,
+            "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
+            "gpu_inference_required": True,
+            "gpu_inference_skipped": False,
+            "cuda_preflight": dict(cuda_preflight or {}),
         },
         "stems": {
             "vocals": {
@@ -143,6 +176,7 @@ def write_full_track_stem_manifest(
     sample_rate: int,
     frames: int,
     elapsed_sec: float,
+    cuda_preflight: dict[str, Any] | None = None,
 ) -> Path:
     manifest = build_full_track_stem_manifest(
         source_audio_path=source_audio_path,
@@ -158,6 +192,7 @@ def write_full_track_stem_manifest(
         sample_rate=sample_rate,
         frames=frames,
         elapsed_sec=elapsed_sec,
+        cuda_preflight=cuda_preflight,
     )
     manifest_path = output_dir / "stem_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -200,6 +235,14 @@ def main() -> None:
         raise FileNotFoundError(f"MDX23C config is missing: {config_path}")
     if not model_path.exists():
         raise FileNotFoundError(f"MDX23C model is missing: {model_path}")
+
+    cuda_preflight = verify_cuda_inference_device(int(args.device_id))
+    _emit(
+        "cuda_preflight "
+        f"device_id={cuda_preflight['device_id']} "
+        f"device_count={cuda_preflight['device_count']} "
+        f"device_name={cuda_preflight['device_name']}"
+    )
 
     start_wall = time.time()
     with tempfile.TemporaryDirectory(prefix="mdx23c_full_input_") as input_dir_str, tempfile.TemporaryDirectory(
@@ -294,6 +337,7 @@ def main() -> None:
             sample_rate=int(raw_sr),
             frames=int(raw_audio.shape[0]),
             elapsed_sec=time.time() - start_wall,
+            cuda_preflight=cuda_preflight,
         )
 
         if listen_dir is not None:
