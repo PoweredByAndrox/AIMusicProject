@@ -40,6 +40,7 @@ def unit_config(
         produces_minus=produces_minus,
         materialized_candidate_modes=materialized_modes,
         reuse_outputs_across_modes=True,
+        hard_case_routes=("generate_minus_focused_variants",) if target_mode == "minus" else (),
     )
 
 
@@ -90,3 +91,26 @@ def test_scheduler_writes_plan_and_skips_lower_priority_when_budget_is_low(tmp_p
     assert [row["can_run"] for row in plan] == [True, False]
     assert plan[1]["reason_skipped"] == "insufficient_runtime_budget"
     assert written == plan
+
+
+def test_scheduler_can_select_minus_hard_case_route(tmp_path: Path) -> None:
+    configs = [
+        unit_config("unit-both", target_mode="both", family="balanced_pair_default", group_id="group-a", produces_vocal=True, produces_minus=True, materialized_modes=("vocal", "minus", "both")),
+        unit_config("unit-minus", target_mode="minus", family="minus_focused_existing_model", group_id="group-b", produces_vocal=False, produces_minus=True, materialized_modes=("minus",)),
+    ]
+
+    plan = build_candidate_job_plan(
+        input_audio_path=tmp_path / "song.wav",
+        registry_configs=configs,
+        candidate_profile="balanced",
+        candidate_diversity_profile="balanced",
+        max_candidates=4,
+        max_runtime_sec=300,
+        candidate_route_filter="generate_minus_focused_variants",
+    )
+
+    runnable = [row for row in plan if row["can_run"] is True]
+    route_skips = [row for row in plan if row["reason_skipped"] == "route_not_selected"]
+    assert [row["candidate_config_id"] for row in runnable] == ["unit-minus"]
+    assert runnable[0]["target_modes_produced"] == ["minus"]
+    assert route_skips[0]["candidate_config_id"] == "unit-both"

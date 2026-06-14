@@ -23,6 +23,11 @@ from tools.plan_no_reference_segment_blends import build_segment_blend_plan  # n
 from tools.prepare_no_reference_segment_blend_dry_run import build_dry_run_contract  # noqa: E402
 from tools.render_no_reference_segment_blend_preview import build_preview_result  # noqa: E402
 from tools.run_no_reference_candidate_wave import run_candidate_wave  # noqa: E402
+from tools.no_reference_minus_hard_case_router import run_minus_hard_case_router  # noqa: E402
+from tools.build_music_intelligence_input_manifest import (  # noqa: E402
+    music_intelligence_run_section,
+    write_music_intelligence_input_manifest,
+)
 
 
 ALLOWED_RUNTIME_STATUSES = {
@@ -44,6 +49,7 @@ REQUIRED_OUTPUTS = {
     "preview_manifest": "preview_manifest.json",
     "post_render_judge": "post_render_judge.jsonl",
     "learning_outcome": "learning_outcome.jsonl",
+    "music_intelligence_input_manifest": "music_intelligence_input_manifest.json",
 }
 
 SAFETY_FLAGS = {
@@ -55,6 +61,7 @@ SAFETY_FLAGS = {
     "fine_tune_started": False,
     "separator_training_started": False,
     "models_changed": False,
+    "model_downloaded": False,
     "model_registry_edited": False,
     "cleanup_routes_added": False,
     "thresholds_relaxed": False,
@@ -199,6 +206,27 @@ def select_best_candidate(rows: Iterable[dict[str, Any]], mode: str) -> dict[str
     )[0]
 
 
+def minus_hard_case_blockers(rows: Iterable[dict[str, Any]]) -> list[str]:
+    blockers: set[str] = set()
+    for row in rows:
+        for key in ("minus_blockers", "blockers", "failure_reasons"):
+            value = row.get(key)
+            if isinstance(value, list):
+                blockers.update(str(item) for item in value)
+            elif isinstance(value, dict):
+                blockers.update(str(item) for item in value)
+            elif value:
+                blockers.add(str(value))
+        for key in ("minus_dominant_defect", "dominant_defect", "failure_reason", "judge_reason"):
+            if row.get(key):
+                blockers.add(str(row[key]))
+    return sorted(
+        blocker
+        for blocker in blockers
+        if blocker in {"severe_vocal_bleed_in_minus", "severe_phase_collapse", "severe_phase_comb_filtering"}
+    )
+
+
 def evaluate_pair_compatibility(vocal_row: dict[str, Any], minus_row: dict[str, Any]) -> dict[str, Any]:
     pair = pair_compatibility_score(vocal_row, minus_row)
     compatible = pair["pair_decision"] == "pair_compatible"
@@ -265,7 +293,9 @@ def learning_outcome_row(
     selected_minus: dict[str, Any] | None,
     model_info: dict[str, Any],
     blockers: list[str],
+    music_intelligence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    music_intelligence = music_intelligence or {}
     return {
         "track_id": Path(input_audio).stem,
         "input_audio": str(input_audio),
@@ -279,10 +309,27 @@ def learning_outcome_row(
         "can_train_from_row": False,
         "release_ready": False,
         "can_publish_as_result": False,
+        "music_intelligence_manifest_written": music_intelligence.get("manifest_written") is True,
+        "music_intelligence_analysis_ready_stems_count": int(music_intelligence.get("analysis_ready_stems_count") or 0),
+        "music_intelligence_blocked_stems_count": int(music_intelligence.get("blocked_stems_count") or 0),
+        "melody_transcription_ran": False,
+        "recommendation_index_updated": False,
     }
 
 
+def write_music_intelligence_contract(output_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    manifest_path = output_dir / REQUIRED_OUTPUTS["music_intelligence_input_manifest"]
+    write_music_intelligence_input_manifest(
+        run_dir=output_dir,
+        output_path=manifest_path,
+        runtime_manifest={**manifest, "release_ready": False},
+    )
+    payload = read_json(manifest_path)
+    return music_intelligence_run_section(payload, manifest_path)
+
+
 def write_runtime_summary(path: Path, manifest: dict[str, Any]) -> None:
+    music = manifest.get("music_intelligence") if isinstance(manifest.get("music_intelligence"), dict) else {}
     lines = [
         "# Autonomous No-Reference Runtime Summary",
         "",
@@ -301,6 +348,12 @@ def write_runtime_summary(path: Path, manifest: dict[str, Any]) -> None:
         f"- escalation_reason: {manifest.get('escalation_reason') or ''}",
         f"- candidate_pool_jsonl: {manifest.get('candidate_pool_jsonl') or ''}",
         f"- release_ready: false",
+        f"- music_intelligence_manifest_written: {str(music.get('manifest_written') is True).lower()}",
+        f"- music_intelligence_analysis_ready_stems_count: {int(music.get('analysis_ready_stems_count') or 0)}",
+        f"- music_intelligence_blocked_stems_count: {int(music.get('blocked_stems_count') or 0)}",
+        f"- future_analysis_supported: false",
+        f"- melody_transcription_ran: false",
+        f"- recommendation_index_updated: false",
         "",
         "## Candidate Wave",
         "",
@@ -361,19 +414,6 @@ def build_failure_manifest(
     write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["pair_compatibility"])
     write_json(output_dir / REQUIRED_OUTPUTS["preview_manifest"], preview_manifest_for(output_status, [], None))
     write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["post_render_judge"])
-    write_jsonl(
-        output_dir / REQUIRED_OUTPUTS["learning_outcome"],
-        [
-            learning_outcome_row(
-                status=output_status,
-                input_audio=input_audio,
-                selected_vocal=None,
-                selected_minus=None,
-                model_info=model_info,
-                blockers=blockers,
-            )
-        ],
-    )
     manifest = {
         "input_audio": str(input_audio),
         "output_dir": str(output_dir),
@@ -394,6 +434,23 @@ def build_failure_manifest(
         **(escalation or {}),
         **SAFETY_FLAGS,
     }
+    manifest["artifacts"] = {name: str(output_dir / filename) for name, filename in REQUIRED_OUTPUTS.items()}
+    manifest["music_intelligence"] = write_music_intelligence_contract(output_dir, manifest)
+    stages.append(stage("write_music_intelligence_input_manifest", "completed", **manifest["music_intelligence"]))
+    write_jsonl(
+        output_dir / REQUIRED_OUTPUTS["learning_outcome"],
+        [
+            learning_outcome_row(
+                status=output_status,
+                input_audio=input_audio,
+                selected_vocal=None,
+                selected_minus=None,
+                model_info=model_info,
+                blockers=blockers,
+                music_intelligence=manifest["music_intelligence"],
+            )
+        ],
+    )
     write_json(output_dir / REQUIRED_OUTPUTS["run_manifest"], manifest)
     write_runtime_summary(output_dir / REQUIRED_OUTPUTS["runtime_summary"], manifest)
     return manifest
@@ -416,6 +473,9 @@ def run_pipeline(
     allow_shape_normalization: bool = True,
     candidate_diversity_profile: str = "safe",
     auto_escalate_profile: bool = False,
+    enable_minus_hard_case_routing: bool = False,
+    max_hard_case_extra_jobs: int = 4,
+    hard_case_runtime_sec: int = 1800,
     window_seconds: float = 12.0,
     max_windows_per_candidate: int = 5,
     window_step_seconds: float = 0.0,
@@ -434,6 +494,17 @@ def run_pipeline(
         "escalation_executed": False,
         "additional_jobs_attempted": 0,
         "additional_candidates_generated": 0,
+    }
+    minus_hard_case = {
+        "minus_hard_case_routing_enabled": bool(enable_minus_hard_case_routing),
+        "minus_hard_case_route_executed": False,
+        "minus_hard_case_recommended_route": "",
+        "minus_hard_case_available_route_configs": [],
+        "minus_hard_case_extra_jobs_attempted": 0,
+        "minus_hard_case_extra_jobs_generated": 0,
+        "minus_hard_case_extra_candidates_generated": 0,
+        "minus_hard_case_initial_blockers": [],
+        "minus_hard_case_final_blockers": [],
     }
 
     validation = validate_input_audio(input_audio)
@@ -593,22 +664,153 @@ def run_pipeline(
     selected_minus = select_best_candidate(shadow_result["rows"], "minus")
     stages.append(stage("select_best_minus_candidate", "completed" if selected_minus else "failed", candidate_id=str((selected_minus or {}).get("candidate_id") or "")))
     if selected_vocal is None or selected_minus is None:
-        return build_failure_manifest(
-            output_dir=output_dir,
-            input_audio=input_audio,
-            output_status="needs_more_candidates",
-            reason="missing_safe_mode_candidate",
-            stages=stages,
-            model_info=model_info,
-            candidate_wave_executed=candidate_wave_executed,
-            candidate_wave_summary=candidate_wave_summary,
-            candidate_pool_jsonl=candidate_source,
-            candidate_execution_mode=candidate_execution_mode,
-            profile=profile,
-            allow_shape_normalization=allow_shape_normalization,
-            candidate_diversity_profile=candidate_diversity_profile,
-            escalation=escalation,
-        )
+        initial_minus_blockers = minus_hard_case_blockers(minus_judge["rows"])
+        minus_hard_case["minus_hard_case_initial_blockers"] = initial_minus_blockers
+        if (
+            enable_minus_hard_case_routing
+            and selected_minus is None
+            and initial_minus_blockers
+        ):
+            router_summary = run_minus_hard_case_router(
+                run_dir=output_dir,
+                output_jsonl=output_dir / "minus_hard_case_router.jsonl",
+                summary_md=output_dir / "minus_hard_case_router_summary.md",
+            )
+            recommended_route = str(router_summary.get("recommended_route") or "")
+            available_route_configs = list(router_summary.get("available_route_configs") or [])
+            minus_hard_case.update(
+                {
+                    "minus_hard_case_route_executed": True,
+                    "minus_hard_case_recommended_route": recommended_route,
+                    "minus_hard_case_available_route_configs": available_route_configs,
+                }
+            )
+            stages.append(
+                stage(
+                    "minus_hard_case_router",
+                    "completed",
+                    recommended_route=recommended_route,
+                    available_route_configs=available_route_configs,
+                    can_run_without_new_models=router_summary.get("can_run_without_new_models") is True,
+                )
+            )
+            if router_summary.get("can_run_without_new_models") is True and recommended_route:
+                hard_case_wave = run_candidate_wave(
+                    input_audio=input_audio,
+                    output_dir=output_dir / "candidates_minus_hard_case",
+                    candidate_pool_jsonl=candidate_source,
+                    profile="balanced",
+                    source_jsonl=candidate_source,
+                    max_candidates=max_candidates,
+                    max_job_count=int(max_hard_case_extra_jobs),
+                    execution_mode="auto",
+                    max_runtime_sec=int(hard_case_runtime_sec),
+                    continue_on_failure=continue_on_candidate_failure,
+                    allow_shape_normalization=allow_shape_normalization,
+                    candidate_diversity_profile="balanced",
+                    candidate_route_filter=recommended_route,
+                )
+                candidate_wave_summary = hard_case_wave["summary"]
+                minus_hard_case.update(
+                    {
+                        "minus_hard_case_extra_jobs_attempted": int(candidate_wave_summary.get("jobs_attempted") or 0),
+                        "minus_hard_case_extra_jobs_generated": int(candidate_wave_summary.get("jobs_generated") or 0),
+                        "minus_hard_case_extra_candidates_generated": int(candidate_wave_summary.get("candidates_generated") or 0),
+                    }
+                )
+                stages.append(stage("run_minus_hard_case_candidate_wave", "completed", candidate_pool_jsonl=str(candidate_source), **candidate_wave_summary))
+                candidate_rows, candidate_source = load_candidate_rows(output_dir, candidate_source)
+                usable_candidate_rows, invalid_candidate_rows = validate_candidate_pool_rows(candidate_rows)
+                write_jsonl(output_dir / "candidate_pool_invalid_rows.jsonl", invalid_candidate_rows)
+                candidate_rows = usable_candidate_rows
+                vocal_judge = judge_candidate_rows_windowed(
+                    candidate_rows,
+                    cache_jsonl=output_dir / "vocal_windowed_metric_cache.jsonl",
+                    window_seconds=float(window_seconds),
+                    max_windows_per_candidate=int(max_windows_per_candidate),
+                    window_step_seconds=float(window_step_seconds),
+                    score_mode="vocal",
+                )
+                write_windowed_result(vocal_judge, output_jsonl=output_dir / "vocal_windowed_judge.jsonl", summary_json=output_dir / "vocal_windowed_judge_summary.json")
+                minus_judge = judge_candidate_rows_windowed(
+                    candidate_rows,
+                    cache_jsonl=output_dir / "minus_windowed_metric_cache.jsonl",
+                    window_seconds=float(window_seconds),
+                    max_windows_per_candidate=int(max_windows_per_candidate),
+                    window_step_seconds=float(window_step_seconds),
+                    score_mode="minus",
+                )
+                write_windowed_result(minus_judge, output_jsonl=output_dir / "minus_windowed_judge.jsonl", summary_json=output_dir / "minus_windowed_judge_summary.json")
+                minus_hard_case["minus_hard_case_final_blockers"] = minus_hard_case_blockers(minus_judge["rows"])
+                optimizer_result = optimize_tracks_mode_specific(vocal_judge["rows"], minus_judge["rows"])
+                write_jsonl(output_dir / "optimizer_mode_specific_result.jsonl", optimizer_result["rows"])
+                shadow_result = build_shadow_rerank(
+                    candidate_pool_rows=candidate_rows,
+                    windowed_judge_rows=vocal_judge["rows"] + minus_judge["rows"],
+                    optimizer_result_rows=optimizer_result["rows"],
+                    bundles=load_model_dir(model_dir),
+                )
+                write_jsonl(output_dir / REQUIRED_OUTPUTS["learned_critic_scores"], shadow_result["rows"])
+                write_jsonl(output_dir / "learned_critic_disagreements.jsonl", shadow_result["disagreements"])
+                selected_vocal = select_best_candidate(shadow_result["rows"], "vocal")
+                selected_minus = select_best_candidate(shadow_result["rows"], "minus")
+                stages.append(stage("rerun_hard_case_vocal_selection", "completed" if selected_vocal else "failed", candidate_id=str((selected_vocal or {}).get("candidate_id") or "")))
+                stages.append(stage("rerun_hard_case_minus_selection", "completed" if selected_minus else "failed", candidate_id=str((selected_minus or {}).get("candidate_id") or "")))
+                if selected_vocal is not None and selected_minus is not None:
+                    pass
+                else:
+                    return build_failure_manifest(
+                        output_dir=output_dir,
+                        input_audio=input_audio,
+                        output_status="needs_more_candidates",
+                        reason="minus_hard_case_route_exhausted",
+                        stages=stages,
+                        model_info=model_info,
+                        candidate_wave_executed=candidate_wave_executed,
+                        candidate_wave_summary=candidate_wave_summary,
+                        candidate_pool_jsonl=candidate_source,
+                        candidate_execution_mode=candidate_execution_mode,
+                        profile=profile,
+                        allow_shape_normalization=allow_shape_normalization,
+                        candidate_diversity_profile=candidate_diversity_profile,
+                        escalation={**escalation, **minus_hard_case},
+                    )
+            else:
+                return build_failure_manifest(
+                    output_dir=output_dir,
+                    input_audio=input_audio,
+                    output_status="blocked_hard_case",
+                    reason="minus_hard_case_route_unavailable",
+                    stages=stages,
+                    model_info=model_info,
+                    candidate_wave_executed=candidate_wave_executed,
+                    candidate_wave_summary=candidate_wave_summary,
+                    candidate_pool_jsonl=candidate_source,
+                    candidate_execution_mode=candidate_execution_mode,
+                    profile=profile,
+                    allow_shape_normalization=allow_shape_normalization,
+                    candidate_diversity_profile=candidate_diversity_profile,
+                    escalation={**escalation, **minus_hard_case},
+                )
+        if selected_vocal is not None and selected_minus is not None:
+            pass
+        else:
+            return build_failure_manifest(
+                output_dir=output_dir,
+                input_audio=input_audio,
+                output_status="needs_more_candidates",
+                reason="missing_safe_mode_candidate",
+                stages=stages,
+                model_info=model_info,
+                candidate_wave_executed=candidate_wave_executed,
+                candidate_wave_summary=candidate_wave_summary,
+                candidate_pool_jsonl=candidate_source,
+                candidate_execution_mode=candidate_execution_mode,
+                profile=profile,
+                allow_shape_normalization=allow_shape_normalization,
+                candidate_diversity_profile=candidate_diversity_profile,
+                escalation={**escalation, **minus_hard_case},
+            )
 
     selected_rows = [
         {
@@ -706,21 +908,6 @@ def run_pipeline(
                 stages.append(stage("targeted_post_render_judge", "skipped_no_preview_render"))
 
     blockers = stable_unique(list(pair_row.get("pair_blockers") or []) + extra_blockers)
-    write_jsonl(
-        output_dir / REQUIRED_OUTPUTS["learning_outcome"],
-        [
-            learning_outcome_row(
-                status=output_status,
-                input_audio=input_audio,
-                selected_vocal=selected_vocal,
-                selected_minus=selected_minus,
-                model_info=model_info,
-                blockers=blockers,
-            )
-        ],
-    )
-    stages.append(stage("write_learning_outcome_row", "completed", rows=1))
-
     manifest = {
         "input_audio": str(input_audio),
         "output_dir": str(output_dir),
@@ -739,11 +926,29 @@ def run_pipeline(
         "candidate_pool_jsonl": str(candidate_source),
         "artifacts": {name: str(output_dir / filename) for name, filename in REQUIRED_OUTPUTS.items()},
         **escalation,
+        **minus_hard_case,
         **SAFETY_FLAGS,
     }
     if output_status not in ALLOWED_RUNTIME_STATUSES:
         manifest["output_status"] = "failed_safety_contract"
         manifest["safety_blockers"] = stable_unique(blockers + ["invalid_runtime_status"])
+    manifest["music_intelligence"] = write_music_intelligence_contract(output_dir, manifest)
+    stages.append(stage("write_music_intelligence_input_manifest", "completed", **manifest["music_intelligence"]))
+    write_jsonl(
+        output_dir / REQUIRED_OUTPUTS["learning_outcome"],
+        [
+            learning_outcome_row(
+                status=manifest["output_status"],
+                input_audio=input_audio,
+                selected_vocal=selected_vocal,
+                selected_minus=selected_minus,
+                model_info=model_info,
+                blockers=manifest["safety_blockers"],
+                music_intelligence=manifest["music_intelligence"],
+            )
+        ],
+    )
+    stages.append(stage("write_learning_outcome_row", "completed", rows=1))
     write_json(output_dir / REQUIRED_OUTPUTS["run_manifest"], manifest)
     write_runtime_summary(output_dir / REQUIRED_OUTPUTS["runtime_summary"], manifest)
     return manifest
@@ -766,6 +971,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--allow-shape-normalization", type=parse_bool, default=True)
     parser.add_argument("--candidate-diversity-profile", choices=("safe", "balanced", "exploration"), default="safe")
     parser.add_argument("--auto-escalate-profile", type=parse_bool, default=False)
+    parser.add_argument("--enable-minus-hard-case-routing", type=parse_bool, default=False)
+    parser.add_argument("--max-hard-case-extra-jobs", type=int, default=4)
+    parser.add_argument("--hard-case-runtime-sec", type=int, default=1800)
     parser.add_argument("--window-seconds", type=float, default=12.0)
     parser.add_argument("--max-windows-per-candidate", type=int, default=5)
     parser.add_argument("--window-step-seconds", type=float, default=0.0)
@@ -786,6 +994,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         allow_shape_normalization=args.allow_shape_normalization,
         candidate_diversity_profile=args.candidate_diversity_profile,
         auto_escalate_profile=args.auto_escalate_profile,
+        enable_minus_hard_case_routing=args.enable_minus_hard_case_routing,
+        max_hard_case_extra_jobs=args.max_hard_case_extra_jobs,
+        hard_case_runtime_sec=args.hard_case_runtime_sec,
         window_seconds=args.window_seconds,
         max_windows_per_candidate=args.max_windows_per_candidate,
         window_step_seconds=args.window_step_seconds,

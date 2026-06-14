@@ -21,6 +21,10 @@ ALLOWED_FAMILIES = (
     "balanced_pair_default",
     "vocal_focused_default",
     "minus_focused_default",
+    "minus_focused_existing_model",
+    "phase_safe_existing_model",
+    "artifact_safe_existing_model",
+    "balanced_existing_model_variant",
     "artifact_safe_default",
     "vocal_focused",
     "minus_focused",
@@ -56,6 +60,9 @@ class CandidateJobConfig:
     materialized_candidate_modes: tuple[str, ...] = ()
     reuse_outputs_across_modes: bool = False
     target_stem: str = ""
+    hard_case_routes: tuple[str, ...] = ()
+    available: bool = True
+    unavailable_reason: str = ""
     source_config_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -100,6 +107,9 @@ class CandidateJobConfig:
             "materialized_candidate_modes": list(self.materialized_candidate_modes),
             "reuse_outputs_across_modes": bool(self.reuse_outputs_across_modes),
             "target_stem": self.target_stem,
+            "hard_case_routes": list(self.hard_case_routes),
+            "available": bool(self.available),
+            "unavailable_reason": self.unavailable_reason,
         }
         if include_hash:
             payload["source_config_hash"] = self.source_config_hash
@@ -191,6 +201,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "produces_minus": True,
             "materialized_candidate_modes": ("minus",),
             "reuse_outputs_across_modes": True,
+            "hard_case_routes": ("generate_minus_focused_variants",),
         },
         {
             "model_id": "htdemucs_6s",
@@ -231,6 +242,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "produces_minus": True,
             "materialized_candidate_modes": ("minus",),
             "reuse_outputs_across_modes": True,
+            "hard_case_routes": ("generate_phase_safe_variants", "generate_artifact_safe_variants"),
         },
         {
             "model_id": "scnet_xl_ihf_musdb18",
@@ -266,6 +278,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "variant_suffix": "chunk_overlap",
             "shared_execution_group_id": "local_registered__htdemucs_ft__chunk_overlap",
             "unsupported_parameters": ("chunk_size", "overlap"),
+            "hard_case_routes": ("generate_phase_safe_variants",),
         },
         {
             "model_id": "htdemucs_ft",
@@ -288,6 +301,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "variant_suffix": "high_overlap",
             "shared_execution_group_id": "local_registered__htdemucs_ft__high_overlap",
             "unsupported_parameters": ("overlap",),
+            "hard_case_routes": ("generate_phase_safe_variants",),
         },
         {
             "model_id": "htdemucs_ft",
@@ -299,6 +313,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "variant_suffix": "high_overlap",
             "shared_execution_group_id": "local_registered__htdemucs_ft__high_overlap",
             "unsupported_parameters": ("overlap",),
+            "hard_case_routes": ("generate_artifact_safe_variants",),
         },
         {
             "model_id": "htdemucs_ft",
@@ -357,6 +372,7 @@ def build_candidate_job_registry(
         produces_minus = bool(spec.get("produces_minus", target_mode in {"minus", "both"}))
         materialized_modes = tuple(str(value) for value in spec.get("materialized_candidate_modes", (target_mode,)))
         can_run = can_run and not unsupported_parameters
+        unavailable_reason = ";".join(unavailable_notes)
         configs.append(
             CandidateJobConfig(
                 candidate_config_id=config_id,
@@ -388,6 +404,9 @@ def build_candidate_job_registry(
                 materialized_candidate_modes=materialized_modes,
                 reuse_outputs_across_modes=bool(spec.get("reuse_outputs_across_modes", False)),
                 target_stem=str(spec["target_stem"]),
+                hard_case_routes=tuple(str(value) for value in spec.get("hard_case_routes", ())),
+                available=bool(can_run),
+                unavailable_reason=unavailable_reason,
             )
         )
     return sorted(configs, key=lambda config: config.candidate_config_id)

@@ -83,6 +83,7 @@ def build_candidate_job_plan(
     max_candidates: int,
     max_runtime_sec: int,
     previous_runtime_estimates: dict[str, float] | None = None,
+    candidate_route_filter: str = "",
 ) -> list[dict[str, Any]]:
     configs = sorted(list(registry_configs), key=config_priority)
     limit = max(0, int(max_candidates))
@@ -96,7 +97,11 @@ def build_candidate_job_plan(
         can_run = True
         reason_selected = "selected"
         reason_skipped = ""
-        if config.entrypoint_type == "unavailable":
+        if candidate_route_filter and candidate_route_filter not in set(config.hard_case_routes):
+            can_run = False
+            reason_selected = ""
+            reason_skipped = "route_not_selected"
+        elif config.entrypoint_type == "unavailable":
             can_run = False
             reason_selected = ""
             reason_skipped = "unavailable_entrypoint"
@@ -135,6 +140,7 @@ def build_candidate_job_plan(
                 "can_run": bool(can_run),
                 "candidate_profile": candidate_profile,
                 "candidate_diversity_profile": candidate_diversity_profile,
+                "candidate_route_filter": candidate_route_filter,
                 "source_config_hash": config.source_config_hash,
                 "created_at": DETERMINISTIC_CREATED_AT,
             }
@@ -152,6 +158,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-jsonl", type=Path, required=True)
     parser.add_argument("--candidate-profile", choices=("safe", "balanced", "exploration"), default="safe")
     parser.add_argument("--candidate-diversity-profile", choices=("safe", "balanced", "exploration"), default="safe")
+    parser.add_argument("--candidate-route-filter", default="")
     parser.add_argument("--max-candidates", type=int, default=6)
     parser.add_argument("--max-runtime-sec", type=int, default=600)
     args = parser.parse_args(argv)
@@ -163,6 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidate_diversity_profile=args.candidate_diversity_profile,
         max_candidates=args.max_candidates,
         max_runtime_sec=args.max_runtime_sec,
+        candidate_route_filter=args.candidate_route_filter,
     )
     write_candidate_job_plan(args.output_jsonl, plan)
     print(json.dumps({"candidate_job_plan_jsonl": str(args.output_jsonl), "planned_rows": len(plan)}, ensure_ascii=False, sort_keys=True))

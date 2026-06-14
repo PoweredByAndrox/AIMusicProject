@@ -445,6 +445,75 @@ def test_candidate_wave_reuses_shared_execution_and_materializes_modes(tmp_path:
     assert persisted_job_manifest["materialized_candidate_modes"] == ["vocal", "minus", "both"]
 
 
+def test_candidate_wave_runs_only_route_filtered_hard_case_configs(tmp_path: Path, monkeypatch) -> None:
+    input_audio = write_wav(tmp_path / "input" / "song.wav", sine(220, 1.0))
+    configs = [
+        shared_job_config("unit-both", target_mode="both", family="balanced_pair_default", group_id="shared-a", produces_vocal=True, produces_minus=True, materialized_modes=("vocal", "minus", "both")),
+        shared_job_config("unit-minus-a", target_mode="minus", family="minus_focused_existing_model", group_id="shared-b", produces_vocal=False, produces_minus=True, materialized_modes=("minus",)),
+        shared_job_config("unit-minus-b", target_mode="minus", family="minus_focused_existing_model", group_id="shared-c", produces_vocal=False, produces_minus=True, materialized_modes=("minus",)),
+    ]
+    configs[1] = CandidateJobConfig(**{**configs[1].to_manifest(), "hard_case_routes": ["generate_minus_focused_variants"]})
+    configs[2] = CandidateJobConfig(**{**configs[2].to_manifest(), "hard_case_routes": ["generate_minus_focused_variants"]})
+    calls: list[str] = []
+
+    def fake_registry(profile: str | None = None):
+        return configs
+
+    def fake_job(**kwargs):
+        calls.append(kwargs["candidate_config_id"])
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        minus_path = write_wav(output_dir / "minus.wav", sine(120, 1.0))
+        manifest = {
+            "candidate_config_id": kwargs["candidate_config_id"],
+            "candidate_family": "minus_focused_existing_model",
+            "target_mode": "minus",
+            "source_model_id": "unit-model",
+            "source_tool": "unit-tool",
+            "source_config_hash": configs[1].source_config_hash,
+            "generation_status": "generated",
+            "skip_reason": "",
+            "output_paths": {"vocal_path": "", "minus_path": minus_path},
+            "raw_minus_path": minus_path,
+            "normalized_minus_path": minus_path,
+            "shape_normalization_applied": False,
+            "shape_normalization_reason": "shape_already_valid",
+            "job_manifest_path": str(kwargs["job_manifest_json"]),
+            "job_progress_path": str(kwargs["job_progress_jsonl"]),
+            "audio_rendered": True,
+            "release_ready": False,
+        }
+        kwargs["job_manifest_json"].write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+        kwargs["job_progress_jsonl"].write_text(json.dumps({"phase": "complete"}) + "\n", encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(wave, "build_candidate_job_registry", fake_registry)
+    monkeypatch.setattr(wave, "run_local_separator_candidate_job", fake_job)
+
+    result = run_candidate_wave(
+        input_audio=Path(input_audio),
+        output_dir=tmp_path / "wave",
+        candidate_pool_jsonl=tmp_path / "wave" / "candidate_pool.jsonl",
+        profile="balanced",
+        execution_mode="run_jobs",
+        max_candidates=4,
+        max_runtime_sec=60,
+        candidate_diversity_profile="balanced",
+        candidate_route_filter="generate_minus_focused_variants",
+        max_job_count=1,
+    )
+
+    plan_rows = [
+        json.loads(line)
+        for line in (tmp_path / "wave" / "candidate_job_plan.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert calls == ["unit-minus-a"]
+    assert result["summary"]["candidate_route_filter"] == "generate_minus_focused_variants"
+    assert result["summary"]["max_job_count"] == 1
+    assert any(row["reason_skipped"] == "route_not_selected" for row in plan_rows)
+    assert any(row["reason_skipped"] == "max_candidates_limit" for row in plan_rows)
+
+
 def test_candidate_wave_auto_falls_back_to_run_jobs_when_no_existing_outputs(tmp_path: Path, monkeypatch) -> None:
     input_audio = write_wav(tmp_path / "input" / "song.wav", sine(220, 1.0))
     configs = [unit_job_config("unit-vocal", "vocal"), unit_job_config("unit-minus", "minus")]

@@ -76,6 +76,46 @@ diagnostics show the safe pass is under-covered. Escalation only adds candidate
 diversity; it does not change thresholds, judges, cleanup, training, or
 release status.
 
+`--enable-minus-hard-case-routing true` enables an opt-in second-stage minus
+hard-case route. It is intended for balanced runs where candidate generation
+succeeds but minus selection fails with blockers such as
+`severe_vocal_bleed_in_minus`, `severe_phase_collapse`, or
+`severe_phase_comb_filtering`.
+
+```bash
+docker compose run --rm ml-worker python tools/run_autonomous_no_reference_pipeline.py \
+  --input-audio /app/input/song.wav \
+  --output-dir /app/lab_artifacts/autonomous_runs/song_minus_hard_case \
+  --model-dir /app/lab_artifacts/no_reference_ml_critic/models \
+  --profile balanced \
+  --generate-candidates true \
+  --candidate-profile balanced \
+  --candidate-execution-mode auto \
+  --allow-shape-normalization true \
+  --candidate-diversity-profile balanced \
+  --auto-escalate-profile false \
+  --enable-minus-hard-case-routing true \
+  --max-hard-case-extra-jobs 4 \
+  --hard-case-runtime-sec 1800 \
+  --max-candidates 12 \
+  --max-candidate-runtime-sec 1800 \
+  --continue-on-candidate-failure true
+```
+
+The router writes:
+
+```text
+minus_hard_case_router.jsonl
+minus_hard_case_router_summary.md
+```
+
+If a supported existing-model route is available, the controller runs an
+additional candidate wave under `candidates_minus_hard_case/`, re-runs the
+windowed judges, optimizer, learned critic, selector, and pair compatibility.
+If no supported route exists, the runtime stops honestly with
+`blocked_hard_case` or `needs_more_candidates`. It still cannot publish a final
+result or mark `release_ready`.
+
 Use `--candidate-pool-jsonl /app/path/candidate_pool.jsonl
 --generate-candidates false` when you intentionally want to use a provided
 pool. If the candidate wave or provided pool yields zero usable complete pairs,
@@ -115,8 +155,9 @@ still writes the required artifacts.
 12. render bounded segment-blend preview only when a safe `render_ready`
     contract exists
 13. run targeted post-render judge when preview render exists
-14. write final runtime report
+14. write music intelligence input manifest for future analysis hooks
 15. write learning outcome row
+16. write final runtime report
 
 Allowed final statuses:
 
@@ -139,10 +180,14 @@ pair_compatibility.jsonl
 preview_manifest.json
 post_render_judge.jsonl
 learning_outcome.jsonl
+music_intelligence_input_manifest.json
 ```
 
 Every run writes machine-readable artifacts. If a stage fails, downstream
 artifacts are written as empty/blocked diagnostics rather than silently omitted.
+The music-intelligence manifest includes accepted and blocked stem provenance,
+but only safe accepted stems can set `analysis_allowed=true`; melody
+transcription and recommendation indexing remain disabled.
 
 Candidate-wave diagnostics are written next to the runtime artifacts:
 
@@ -156,6 +201,8 @@ candidates/candidate_wave_progress.jsonl
 candidates/candidate_wave_summary.md
 candidates/candidate_wave_summary.json
 candidates/candidate_wave_manifest.json
+minus_hard_case_router.jsonl
+minus_hard_case_router_summary.md
 ```
 
 Candidate-wave summaries include:

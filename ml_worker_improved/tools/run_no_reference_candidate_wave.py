@@ -40,6 +40,7 @@ SAFETY_FLAGS = {
     "fine_tune_started": False,
     "separator_training_started": False,
     "models_changed": False,
+    "model_downloaded": False,
     "model_registry_edited": False,
     "cleanup_routes_added": False,
     "thresholds_relaxed": False,
@@ -576,10 +577,12 @@ def run_job_wave(
     output_dir: Path,
     profile: str,
     max_candidates: int,
+    max_job_count: int | None,
     max_runtime_sec: int,
     continue_on_failure: bool,
     allow_shape_normalization: bool,
     candidate_diversity_profile: str,
+    candidate_route_filter: str,
     progress_rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     configs = sorted(build_candidate_job_registry(profile=candidate_diversity_profile), key=lambda config: config.candidate_config_id)
@@ -589,8 +592,9 @@ def run_job_wave(
         registry_configs=configs,
         candidate_profile=profile,
         candidate_diversity_profile=candidate_diversity_profile,
-        max_candidates=max_candidates,
+        max_candidates=int(max_job_count) if max_job_count is not None else max_candidates,
         max_runtime_sec=max_runtime_sec,
+        candidate_route_filter=candidate_route_filter,
     )
     write_candidate_job_plan(output_dir / "candidate_job_plan.jsonl", plan_rows)
     stats = {
@@ -690,6 +694,8 @@ def build_summary(
     execution_mode: str,
     allow_shape_normalization: bool,
     candidate_diversity_profile: str,
+    candidate_route_filter: str,
+    max_job_count: int | None,
     job_rows: list[dict[str, Any]],
     plan_rows: list[dict[str, Any]],
     materialized_assets: list[dict[str, Any]],
@@ -700,6 +706,8 @@ def build_summary(
         "candidate_execution_mode": execution_mode,
         "allow_shape_normalization": bool(allow_shape_normalization),
         "candidate_diversity_profile": candidate_diversity_profile,
+        "candidate_route_filter": candidate_route_filter,
+        "max_job_count": int(max_job_count) if max_job_count is not None else None,
         "source_jsonl_paths": [str(path) for path in source_paths],
         "input_validation": input_validation,
         "candidates_attempted": len(source_rows) + len(job_rows),
@@ -733,6 +741,8 @@ def run_candidate_wave(
     continue_on_failure: bool = True,
     allow_shape_normalization: bool = True,
     candidate_diversity_profile: str = "safe",
+    candidate_route_filter: str = "",
+    max_job_count: int | None = None,
 ) -> dict[str, Any]:
     if profile not in ALLOWED_PROFILES:
         raise ValueError(f"Unsupported candidate profile: {profile}")
@@ -751,6 +761,8 @@ def run_candidate_wave(
             "input_audio_sha256": file_digest(input_audio) if input_validation["ok"] else "",
         "profile": profile,
         "candidate_diversity_profile": candidate_diversity_profile,
+        "candidate_route_filter": candidate_route_filter,
+        "max_job_count": int(max_job_count) if max_job_count is not None else None,
         "execution_mode": execution_mode,
         "allow_shape_normalization": bool(allow_shape_normalization),
         "source_rows": [{key: row.get(key) for key in sorted(row)} for row in source_rows],
@@ -804,7 +816,9 @@ def run_candidate_wave(
                     failures.append(failure)
             progress_rows.append(wave_progress_row("collect_existing", "completed", assets=len(assets), failures=len(failures)))
         existing_rows = build_pairs(assets, max_candidates=max_candidates)
-        should_run_jobs = execution_mode == "run_jobs" or (execution_mode == "auto" and len(existing_rows) < int(max_candidates))
+        should_run_jobs = execution_mode == "run_jobs" or (
+            execution_mode == "auto" and (len(existing_rows) < int(max_candidates) or bool(candidate_route_filter))
+        )
         if should_run_jobs:
             progress_rows.append(wave_progress_row("run_jobs", "started", existing_pairs=len(existing_rows)))
             job_assets, job_materialized_assets, job_failures, job_rows, plan_rows, job_stats = run_job_wave(
@@ -814,10 +828,12 @@ def run_candidate_wave(
                 output_dir=output_dir,
                 profile=profile,
                 max_candidates=max_candidates,
+                max_job_count=max_job_count,
                 max_runtime_sec=max_runtime_sec,
                 continue_on_failure=continue_on_failure,
                 allow_shape_normalization=allow_shape_normalization,
                 candidate_diversity_profile=candidate_diversity_profile,
+                candidate_route_filter=candidate_route_filter,
                 progress_rows=progress_rows,
             )
             assets.extend(job_assets)
@@ -854,6 +870,8 @@ def run_candidate_wave(
         execution_mode=execution_mode,
         allow_shape_normalization=allow_shape_normalization,
         candidate_diversity_profile=candidate_diversity_profile,
+        candidate_route_filter=candidate_route_filter,
+        max_job_count=max_job_count,
         job_rows=job_rows,
         plan_rows=plan_rows,
         materialized_assets=materialized_assets,
@@ -877,7 +895,9 @@ def run_candidate_wave(
             "candidate_execution_mode": execution_mode,
             "allow_shape_normalization": bool(allow_shape_normalization),
             "candidate_diversity_profile": candidate_diversity_profile,
+            "candidate_route_filter": candidate_route_filter,
             "max_candidates": int(max_candidates),
+            "max_job_count": int(max_job_count) if max_job_count is not None else None,
             "max_runtime_sec": int(max_runtime_sec),
             "continue_on_failure": bool(continue_on_failure),
             "summary": summary,
@@ -895,11 +915,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile", choices=tuple(sorted(ALLOWED_PROFILES)), default="safe")
     parser.add_argument("--source-jsonl", type=Path)
     parser.add_argument("--max-candidates", type=int, default=6)
+    parser.add_argument("--max-job-count", type=int)
     parser.add_argument("--execution-mode", choices=tuple(sorted(ALLOWED_EXECUTION_MODES)), default="collect_existing")
     parser.add_argument("--max-runtime-sec", type=int, default=600)
     parser.add_argument("--continue-on-failure", type=parse_bool, default=True)
     parser.add_argument("--allow-shape-normalization", type=parse_bool, default=True)
     parser.add_argument("--candidate-diversity-profile", choices=tuple(sorted(ALLOWED_PROFILES)), default="safe")
+    parser.add_argument("--candidate-route-filter", default="")
     args = parser.parse_args(argv)
     result = run_candidate_wave(
         input_audio=args.input_audio,
@@ -908,11 +930,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile=args.profile,
         source_jsonl=args.source_jsonl,
         max_candidates=args.max_candidates,
+        max_job_count=args.max_job_count,
         execution_mode=args.execution_mode,
         max_runtime_sec=args.max_runtime_sec,
         continue_on_failure=args.continue_on_failure,
         allow_shape_normalization=args.allow_shape_normalization,
         candidate_diversity_profile=args.candidate_diversity_profile,
+        candidate_route_filter=args.candidate_route_filter,
     )
     print(json.dumps({"candidate_pool_jsonl": str(args.candidate_pool_jsonl), **result["summary"]}, ensure_ascii=False, sort_keys=True))
     return 0
