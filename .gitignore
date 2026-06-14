@@ -45,6 +45,7 @@ __pycache__/
 /ml_worker_improved/.pytest_cache/
 
 # Local AI tool caches and vendored dependencies
+/.codegraph/
 /.playwright-mcp/
 /.cursor/mcp/**/node_modules/
 /.cursor/mcp/**/dist/
