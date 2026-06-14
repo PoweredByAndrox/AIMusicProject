@@ -66,5 +66,6 @@ Every pool row includes `run_id`, `track_id`, `input_audio_path`,
 `candidate_id`, `candidate_family`, `candidate_config_id`, `target_mode`,
 `vocal_path`, `minus_path`, `can_use_for_vocal`, `can_use_for_minus`,
 `can_use_for_pair`, `generation_profile`, `generation_status`, `skip_reason`,
-`source_tool`, `source_model_id`, `source_config_hash`, `created_at`, and
-`release_ready=false`.
+`source_tool`, `source_model_id`, `source_config_hash`, `route_id`,
+`route_family`, `can_run_without_download`, `can_run_without_registry_edit`,
+`forbidden_reason`, `created_at`, and `release_ready=false`.

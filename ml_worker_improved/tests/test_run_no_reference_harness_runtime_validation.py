@@ -7,8 +7,10 @@ from typing import Any
 from tools.optimize_no_reference_harness import mutate_candidate
 from tools.replay_no_reference_harness_candidate import default_harness_candidate
 from tools.run_no_reference_harness_runtime_validation import (
+    decide_candidate,
     map_candidate_to_runtime_args,
     run_harness_runtime_validation,
+    track_improvement,
 )
 
 
@@ -225,7 +227,7 @@ def test_validation_runs_baseline_and_pareto_candidate_with_runtime_comparison(t
     )
 
     assert len(calls) == 4
-    assert result["candidate_runtime_improved_count"] == 1
+    assert result["candidate_quality_improved_count"] == 1
     assert result["candidate_specialist_only_count"] == 0
     assert result["release_ready_count"] == 0
     assert result["melody_transcription_ran"] is False
@@ -233,7 +235,7 @@ def test_validation_runs_baseline_and_pareto_candidate_with_runtime_comparison(t
     candidate_rows = read_jsonl(tmp_path / "out" / "harness_runtime_candidate_results.jsonl")
     track_rows = read_jsonl(tmp_path / "out" / "harness_runtime_track_results.jsonl")
     baseline_row = next(row for row in candidate_rows if row["harness_candidate_id"] == "baseline_safe_harness")
-    assert {row["decision"] for row in candidate_rows} == {"keep_baseline", "candidate_runtime_improved"}
+    assert {row["decision"] for row in candidate_rows} == {"keep_baseline", "candidate_quality_improved"}
     assert baseline_row["severe_phase_collapse_count"] == 8
     assert baseline_row["severe_vocal_bleed_in_minus_count"] == 10
     assert all(row["release_ready"] is False for row in candidate_rows)
@@ -421,6 +423,125 @@ def test_preview_render_failed_penalizes_candidate(tmp_path: Path) -> None:
     rows = read_jsonl(tmp_path / "out" / "harness_runtime_candidate_results.jsonl")
     candidate_row = next(row for row in rows if row["harness_candidate_id"] == candidate["harness_candidate_id"])
     assert candidate_row["preview_render_failed_count"] == 2
-    assert candidate_row["decision"] != "candidate_runtime_improved"
+    assert candidate_row["decision"] != "candidate_quality_improved"
     assert result["preview_render_failed_count"] == 2
     assert result["best_global_candidate"] == ""
+
+
+def test_runtime_lower_runtime_without_quality_gain_is_efficiency_only() -> None:
+    baseline = {
+        "harness_candidate_id": "baseline_safe_harness",
+        "mutation_type": "baseline_keep",
+        "audio_preview_ready_count": 2,
+        "rendered_preview_audio_count": 2,
+        "accepted_minus_count": 2,
+        "pair_compatible_count": 2,
+        "analysis_ready_stems_count": 4,
+        "blocked_stems_count": 0,
+        "severe_phase_collapse_count": 0,
+        "severe_vocal_bleed_in_minus_count": 0,
+        "preview_render_failed_count": 0,
+        "preview_validation_failed_count": 0,
+        "failed_safety_contract_count": 0,
+        "release_ready_count": 0,
+        "runtime_sec": 100.0,
+    }
+    candidate = {**baseline, "harness_candidate_id": "faster", "mutation_type": "lower_runtime_same_policy", "runtime_sec": 80.0}
+
+    result = decide_candidate(
+        candidate_result=candidate,
+        candidate_track_rows=[{"track_id": "track-a", **candidate}],
+        baseline_result=baseline,
+        baseline_by_track={"track-a": {"track_id": "track-a", **baseline}},
+    )
+
+    assert result["decision"] == "candidate_efficiency_only"
+    assert result["decision_class"] == "candidate_efficiency_only"
+    assert result["quality_improvement_detected"] is False
+    assert result["efficiency_improvement_detected"] is True
+    assert result["promotion_eligible"] is False
+    assert result["promotion_block_reason"] == "efficiency_only_no_quality_improvement"
+
+
+def test_runtime_identical_metrics_is_no_op() -> None:
+    baseline = {
+        "harness_candidate_id": "baseline_safe_harness",
+        "mutation_type": "baseline_keep",
+        "audio_preview_ready_count": 1,
+        "rendered_preview_audio_count": 1,
+        "accepted_minus_count": 1,
+        "pair_compatible_count": 1,
+        "analysis_ready_stems_count": 2,
+        "blocked_stems_count": 0,
+        "severe_phase_collapse_count": 0,
+        "severe_vocal_bleed_in_minus_count": 0,
+        "preview_render_failed_count": 0,
+        "preview_validation_failed_count": 0,
+        "failed_safety_contract_count": 0,
+        "release_ready_count": 0,
+        "runtime_sec": 50.0,
+    }
+    candidate = {**baseline, "harness_candidate_id": "same", "mutation_type": "same_policy"}
+
+    result = decide_candidate(
+        candidate_result=candidate,
+        candidate_track_rows=[{"track_id": "track-a", **candidate}],
+        baseline_result=baseline,
+        baseline_by_track={"track-a": {"track_id": "track-a", **baseline}},
+    )
+
+    assert result["decision"] == "candidate_no_op"
+    assert result["decision_class"] == "candidate_no_op"
+    assert result["quality_improvement_detected"] is False
+    assert result["efficiency_improvement_detected"] is False
+    assert result["promotion_eligible"] is False
+    assert result["promotion_block_reason"] == "no_quality_or_efficiency_improvement"
+
+
+def test_runtime_quality_gain_uses_quality_decision_class() -> None:
+    baseline_track = {
+        "audio_preview_ready": False,
+        "rendered_preview_audio_count": 0,
+        "accepted_minus_count": 1,
+        "pair_compatible_count": 1,
+        "analysis_ready_stems_count": 0,
+        "blocked_stems_count": 2,
+        "severe_phase_collapse_count": 2,
+        "severe_vocal_bleed_in_minus_count": 2,
+    }
+    candidate_track = {
+        **baseline_track,
+        "audio_preview_ready": True,
+        "rendered_preview_audio_count": 1,
+        "accepted_minus_count": 2,
+        "pair_compatible_count": 2,
+        "analysis_ready_stems_count": 2,
+        "blocked_stems_count": 0,
+        "severe_phase_collapse_count": 0,
+        "severe_vocal_bleed_in_minus_count": 1,
+    }
+    baseline = {"harness_candidate_id": "baseline_safe_harness", "mutation_type": "baseline_keep", **baseline_track, "runtime_sec": 100.0}
+    candidate = {"harness_candidate_id": "quality", "mutation_type": "quality_route", **candidate_track, "runtime_sec": 100.0}
+
+    result = decide_candidate(
+        candidate_result=candidate,
+        candidate_track_rows=[{"track_id": "track-a", **candidate_track}, {"track_id": "track-b", **candidate_track}],
+        baseline_result=baseline,
+        baseline_by_track={"track-a": {"track_id": "track-a", **baseline_track}, "track-b": {"track_id": "track-b", **baseline_track}},
+    )
+
+    assert result["decision"] == "candidate_quality_improved"
+    assert result["decision_class"] == "candidate_quality_improved"
+    assert result["quality_improvement_detected"] is True
+    assert result["promotion_eligible"] is True
+    assert result["promotion_block_reason"] == ""
+
+
+def test_manifest_preview_ready_gain_alone_is_not_track_quality_improvement() -> None:
+    improved, reasons = track_improvement(
+        {"manifest_preview_ready": True, "audio_preview_ready": False, "rendered_preview_audio_count": 0},
+        {"manifest_preview_ready": False, "audio_preview_ready": False, "rendered_preview_audio_count": 0},
+    )
+
+    assert improved is False
+    assert reasons == []

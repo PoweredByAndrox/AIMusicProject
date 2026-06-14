@@ -22,7 +22,9 @@ from tools.replay_no_reference_harness_candidate import (  # noqa: E402
 
 ALLOWED_DECISIONS = {
     "keep_baseline",
-    "candidate_runtime_improved",
+    "candidate_quality_improved",
+    "candidate_efficiency_only",
+    "candidate_no_op",
     "candidate_specialist_only",
     "candidate_rejected_runtime",
     "candidate_rejected_safety",
@@ -89,6 +91,23 @@ BLOCKER_FIELDS = (
     "safety_blockers",
     "failure_reasons",
     "quality_blockers",
+)
+
+QUALITY_POSITIVE_OBJECTIVES = (
+    "audio_preview_ready_count",
+    "rendered_preview_audio_count",
+    "accepted_minus_count",
+    "pair_compatible_count",
+    "analysis_ready_stems_count",
+)
+QUALITY_NEGATIVE_OBJECTIVES = (
+    "severe_phase_collapse_count",
+    "severe_vocal_bleed_in_minus_count",
+    "blocked_stems_count",
+)
+EFFICIENCY_OBJECTIVES = (
+    "runtime_sec",
+    "estimated_runtime_sec",
 )
 
 
@@ -519,6 +538,7 @@ def aggregate_track_rows(candidate: dict[str, Any], track_rows: list[dict[str, A
         "parent_id": str(candidate.get("parent_id") or ""),
         "mutation_type": str(candidate.get("mutation_type") or ""),
         "tracks_tested": len(track_rows),
+        "runtime_sec": round(sum(numeric(row, "runtime_elapsed_sec") for row in track_rows), 3),
         "jobs_attempted": sum(numeric(row, "jobs_attempted") for row in track_rows),
         "jobs_generated": sum(numeric(row, "jobs_generated") for row in track_rows),
         "jobs_failed": sum(numeric(row, "jobs_failed") for row in track_rows),
@@ -565,7 +585,46 @@ def track_improvement(candidate_row: dict[str, Any], baseline_row: dict[str, Any
         reasons.append("severe_vocal_bleed_in_minus_count_decreased")
     if numeric(candidate_row, "pair_compatible_count") > numeric(baseline_row, "pair_compatible_count"):
         reasons.append("pair_compatible_count_increased")
+    if numeric(candidate_row, "analysis_ready_stems_count") > numeric(baseline_row, "analysis_ready_stems_count"):
+        reasons.append("analysis_ready_stems_count_increased")
+    if numeric(candidate_row, "blocked_stems_count") < numeric(baseline_row, "blocked_stems_count"):
+        reasons.append("blocked_stems_count_decreased")
     return bool(reasons), reasons
+
+
+def aggregate_quality_improvement_reasons(candidate: dict[str, Any], baseline: dict[str, Any] | None) -> list[str]:
+    if baseline is None:
+        return []
+    reasons: list[str] = []
+    for key in QUALITY_POSITIVE_OBJECTIVES:
+        if numeric(candidate, key) > numeric(baseline, key):
+            reasons.append(f"{key}_increased")
+    for key in QUALITY_NEGATIVE_OBJECTIVES:
+        if numeric(candidate, key) < numeric(baseline, key):
+            reasons.append(f"{key}_decreased")
+    return reasons
+
+
+def aggregate_quality_regression_reasons(candidate: dict[str, Any], baseline: dict[str, Any] | None) -> list[str]:
+    if baseline is None:
+        return []
+    reasons: list[str] = []
+    for key in QUALITY_POSITIVE_OBJECTIVES:
+        if numeric(candidate, key) < numeric(baseline, key):
+            reasons.append(f"{key}_decreased")
+    for key in QUALITY_NEGATIVE_OBJECTIVES:
+        if numeric(candidate, key) > numeric(baseline, key):
+            reasons.append(f"{key}_increased")
+    return reasons
+
+
+def efficiency_improvement_detected(candidate: dict[str, Any], baseline: dict[str, Any] | None) -> bool:
+    if baseline is None:
+        return False
+    return any(
+        numeric(candidate, key) > 0.0 and numeric(baseline, key) > 0.0 and numeric(candidate, key) < numeric(baseline, key)
+        for key in EFFICIENCY_OBJECTIVES
+    )
 
 
 def has_safety_regression(candidate: dict[str, Any], baseline: dict[str, Any] | None = None) -> bool:
@@ -611,9 +670,29 @@ def decide_candidate(
     baseline_by_track: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     if candidate_result.get("mutation_type") == "baseline_keep":
-        return {**candidate_result, "decision": "keep_baseline", "improved_tracks": [], "improvement_reasons": {}}
+        return {
+            **candidate_result,
+            "decision": "keep_baseline",
+            "decision_class": "keep_baseline",
+            "improved_tracks": [],
+            "improvement_reasons": {},
+            "quality_improvement_detected": False,
+            "efficiency_improvement_detected": False,
+            "promotion_eligible": False,
+            "promotion_block_reason": "baseline",
+        }
     if baseline_result is None:
-        return {**candidate_result, "decision": "candidate_inconclusive", "improved_tracks": [], "improvement_reasons": {}}
+        return {
+            **candidate_result,
+            "decision": "candidate_inconclusive",
+            "decision_class": "candidate_inconclusive",
+            "improved_tracks": [],
+            "improvement_reasons": {},
+            "quality_improvement_detected": False,
+            "efficiency_improvement_detected": False,
+            "promotion_eligible": False,
+            "promotion_block_reason": "missing_baseline",
+        }
     improved_tracks: list[str] = []
     improvement_reasons: dict[str, list[str]] = {}
     for row in candidate_track_rows:
@@ -625,21 +704,50 @@ def decide_candidate(
             track_id = str(row.get("track_id") or "")
             improved_tracks.append(track_id)
             improvement_reasons[track_id] = reasons
+    aggregate_quality_reasons = aggregate_quality_improvement_reasons(candidate_result, baseline_result)
+    aggregate_quality_regressions = aggregate_quality_regression_reasons(candidate_result, baseline_result)
+    quality_improved = bool(improved_tracks or aggregate_quality_reasons)
+    efficiency_improved = efficiency_improvement_detected(candidate_result, baseline_result)
     if has_safety_regression(candidate_result, baseline_result):
         decision = "candidate_rejected_safety"
+        promotion_eligible = False
+        promotion_block_reason = "safety_regression"
     elif not candidate_track_rows:
         decision = "candidate_inconclusive"
+        promotion_eligible = False
+        promotion_block_reason = "no_track_measurements"
     elif improved_tracks and len(improved_tracks) >= 2:
-        decision = "candidate_runtime_improved"
-    elif improved_tracks:
+        decision = "candidate_quality_improved"
+        promotion_eligible = True
+        promotion_block_reason = ""
+    elif improved_tracks or aggregate_quality_reasons:
         decision = "candidate_specialist_only"
-    else:
+        promotion_eligible = False
+        promotion_block_reason = "specialist_only_not_global"
+    elif aggregate_quality_regressions:
         decision = "candidate_rejected_runtime"
+        promotion_eligible = False
+        promotion_block_reason = "quality_regression"
+    elif efficiency_improved:
+        decision = "candidate_efficiency_only"
+        promotion_eligible = False
+        promotion_block_reason = "efficiency_only_no_quality_improvement"
+    else:
+        decision = "candidate_no_op"
+        promotion_eligible = False
+        promotion_block_reason = "no_quality_or_efficiency_improvement"
     return {
         **candidate_result,
         "decision": decision,
+        "decision_class": decision,
         "improved_tracks": improved_tracks,
         "improvement_reasons": improvement_reasons,
+        "aggregate_quality_improvement_reasons": aggregate_quality_reasons,
+        "aggregate_quality_regression_reasons": aggregate_quality_regressions,
+        "quality_improvement_detected": quality_improved,
+        "efficiency_improvement_detected": efficiency_improved,
+        "promotion_eligible": promotion_eligible,
+        "promotion_block_reason": promotion_block_reason,
         "accepted_minus_delta": numeric(candidate_result, "accepted_minus_count") - numeric(baseline_result, "accepted_minus_count"),
         "phase_collapse_delta": numeric(candidate_result, "severe_phase_collapse_count") - numeric(baseline_result, "severe_phase_collapse_count"),
         "vocal_bleed_delta": numeric(candidate_result, "severe_vocal_bleed_in_minus_count")
@@ -661,8 +769,13 @@ def rejected_safety_result(candidate: dict[str, Any], validation: dict[str, Any]
         "mutation_type": str(candidate.get("mutation_type") or ""),
         "tracks_tested": 0,
         "decision": "candidate_rejected_safety",
+        "decision_class": "candidate_rejected_safety",
         "validation_valid": False,
         "validation_rejection_reasons": validation.get("rejection_reasons") or [],
+        "quality_improvement_detected": False,
+        "efficiency_improvement_detected": False,
+        "promotion_eligible": False,
+        "promotion_block_reason": "safety_regression",
         "release_ready": False,
         "release_ready_count": 0,
         "melody_transcription_ran": False,
@@ -731,6 +844,9 @@ def build_summary_md(manifest: dict[str, Any], candidate_rows: list[dict[str, An
         "",
         f"- candidates_tested: {manifest['candidates_tested']}",
         f"- tracks_tested: {manifest['tracks_tested']}",
+        f"- candidate_quality_improved_count: {manifest['candidate_quality_improved_count']}",
+        f"- candidate_efficiency_only_count: {manifest['candidate_efficiency_only_count']}",
+        f"- candidate_no_op_count: {manifest['candidate_no_op_count']}",
         f"- candidate_runtime_improved_count: {manifest['candidate_runtime_improved_count']}",
         f"- candidate_specialist_only_count: {manifest['candidate_specialist_only_count']}",
         f"- candidate_rejected_runtime_count: {manifest['candidate_rejected_runtime_count']}",
@@ -836,7 +952,9 @@ def run_harness_runtime_validation(
     candidate_result_rows = decided_rows
 
     candidate_rows_without_baseline = [row for row in candidate_result_rows if row.get("decision") != "keep_baseline"]
-    improved_rows = [row for row in candidate_rows_without_baseline if row.get("decision") == "candidate_runtime_improved"]
+    improved_rows = [row for row in candidate_rows_without_baseline if row.get("decision") == "candidate_quality_improved"]
+    efficiency_only_rows = [row for row in candidate_rows_without_baseline if row.get("decision") == "candidate_efficiency_only"]
+    no_op_rows = [row for row in candidate_rows_without_baseline if row.get("decision") == "candidate_no_op"]
     specialist_rows = [row for row in candidate_rows_without_baseline if row.get("decision") == "candidate_specialist_only"]
     best_global = max(improved_rows, key=lambda row: numeric(row, "runtime_improvement_score"), default={})
     track002_specialists = [
@@ -856,7 +974,10 @@ def run_harness_runtime_validation(
         "require_audio_preview_ready": bool(require_audio_preview_ready),
         "candidates_tested": len([row for row in candidate_result_rows if row.get("decision") != "candidate_rejected_safety"]),
         "tracks_tested": len(track_paths),
-        "candidate_runtime_improved_count": sum(1 for row in candidate_result_rows if row.get("decision") == "candidate_runtime_improved"),
+        "candidate_quality_improved_count": sum(1 for row in candidate_result_rows if row.get("decision") == "candidate_quality_improved"),
+        "candidate_runtime_improved_count": sum(1 for row in candidate_result_rows if row.get("decision") == "candidate_quality_improved"),
+        "candidate_efficiency_only_count": len(efficiency_only_rows),
+        "candidate_no_op_count": len(no_op_rows),
         "candidate_specialist_only_count": sum(1 for row in candidate_result_rows if row.get("decision") == "candidate_specialist_only"),
         "candidate_rejected_runtime_count": sum(1 for row in candidate_result_rows if row.get("decision") == "candidate_rejected_runtime"),
         "candidate_rejected_safety_count": sum(1 for row in candidate_result_rows if row.get("decision") == "candidate_rejected_safety"),

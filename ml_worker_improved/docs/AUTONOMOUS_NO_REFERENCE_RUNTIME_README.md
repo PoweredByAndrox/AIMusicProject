@@ -22,6 +22,8 @@ docker compose run --rm ml-worker python tools/run_autonomous_no_reference_pipel
   --preview-render-mode bounded \
   --require-preview-audio-for-preview-ready true \
   --auto-escalate-profile false \
+  --enable-conditional-hard-case-routes false \
+  --conditional-route-policy disabled \
   --max-candidates 6 \
   --max-candidate-runtime-sec 600 \
   --continue-on-candidate-failure true
@@ -124,6 +126,44 @@ If no supported route exists, the runtime stops honestly with
 `blocked_hard_case` or `needs_more_candidates`. It still cannot publish a final
 result or mark `release_ready`.
 
+`--enable-conditional-hard-case-routes true` enables the STEM-3 conditional
+hard-case policy. This is separate from default profile routing and is disabled
+by default. The policy writes root-level control-plane artifacts:
+
+```text
+hard_case_route_policy.json
+hard_case_route_policy_summary.md
+```
+
+The policy can select `local_registered__htdemucs_6s__both__shared` only when a
+minus hard-case trigger is present, the route is locally available, and the
+route is known from STEM-2 quality-improved evidence or explicitly safe for
+measurement. The selected route is run as an extra bounded hard-case candidate
+only, then the controller re-runs the minus/vocal judges, optimizer, learned
+critic selector, and pair compatibility. It does not change the default
+profile, baseline route ordering, thresholds, separator models, or release
+status.
+
+```bash
+docker compose run --rm ml-worker python tools/run_autonomous_no_reference_pipeline.py \
+  --input-audio /app/input/song.wav \
+  --output-dir /app/lab_artifacts/autonomous_runs/song_conditional_hard_case \
+  --model-dir /app/lab_artifacts/no_reference_ml_critic/models \
+  --profile balanced \
+  --generate-candidates true \
+  --candidate-profile balanced \
+  --candidate-execution-mode auto \
+  --allow-shape-normalization true \
+  --candidate-diversity-profile balanced \
+  --enable-conditional-hard-case-routes true \
+  --conditional-route-policy hard_case_only \
+  --max-conditional-route-jobs 2 \
+  --conditional-route-runtime-sec 1800 \
+  --max-candidates 12 \
+  --max-candidate-runtime-sec 1800 \
+  --continue-on-candidate-failure true
+```
+
 Use `--candidate-pool-jsonl /app/path/candidate_pool.jsonl
 --generate-candidates false` when you intentionally want to use a provided
 pool. If the candidate wave or provided pool yields zero usable complete pairs,
@@ -152,6 +192,9 @@ still writes the required artifacts.
 - Local separator jobs use only existing project entrypoints and
   `worker/model_registry.py` entries. Unavailable configs are skipped, not
   faked.
+- Conditional hard-case routes are opt-in, route-id filtered, and hard-case
+  scoped. `default_profile_changed=false` and `release_ready=false` remain hard
+  contract fields.
 
 ## Stages
 
@@ -162,18 +205,20 @@ still writes the required artifacts.
 5. run learned critic shadow/hybrid scoring
 6. select best vocal candidate
 7. select best minus candidate
-8. run pair compatibility
-9. if compatible, mark selected pair as `accepted_pair_ready`
-10. render bounded vocal/minus audio preview when enabled and safe
-11. write preview render contract artifacts
-12. if incompatible, run segment blend planner
-13. run dry-run render contract for segment plans
-14. render bounded segment-blend preview only when a safe `render_ready`
+8. if enabled and minus selection is blocked, run conditional hard-case route
+   policy and a bounded route-id filtered extra wave
+9. run pair compatibility
+10. if compatible, mark selected pair as `accepted_pair_ready`
+11. render bounded vocal/minus audio preview when enabled and safe
+12. write preview render contract artifacts
+13. if incompatible, run segment blend planner
+14. run dry-run render contract for segment plans
+15. render bounded segment-blend preview only when a safe `render_ready`
     contract exists
-15. run targeted post-render judge when preview render exists
-16. write music intelligence input manifest for future analysis hooks
-17. write learning outcome row
-18. write final runtime report
+16. run targeted post-render judge when preview render exists
+17. write music intelligence input manifest for future analysis hooks
+18. write learning outcome row
+19. write final runtime report
 
 Allowed final statuses:
 
@@ -205,6 +250,8 @@ preview_render_summary.md
 post_render_judge.jsonl
 learning_outcome.jsonl
 music_intelligence_input_manifest.json
+hard_case_route_policy.json
+hard_case_route_policy_summary.md
 ```
 
 Every run writes machine-readable artifacts. If a stage fails, downstream

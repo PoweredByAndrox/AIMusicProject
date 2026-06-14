@@ -123,7 +123,9 @@ music_intelligence_input_manifest.json
 Allowed validation decisions are:
 
 - `keep_baseline`
-- `candidate_runtime_improved`
+- `candidate_quality_improved`
+- `candidate_efficiency_only`
+- `candidate_no_op`
 - `candidate_specialist_only`
 - `candidate_rejected_runtime`
 - `candidate_rejected_safety`
@@ -137,15 +139,33 @@ without safety regression:
 - fewer `severe_phase_collapse` blockers
 - fewer `severe_vocal_bleed_in_minus` blockers
 - more pair-compatible candidates
+- more analysis-ready stems
+- fewer blocked stems
 
 One improved track is a specialist-only route. Two or more improved tracks is a
-runtime-improved candidate. Track002/sub-zero specialist candidates are reported
-separately and must not become a global baseline automatically.
+quality-improved candidate. Track002/sub-zero specialist candidates are
+reported separately and must not become a global baseline automatically.
+
+A candidate with lower `runtime_sec` but no quality gain is
+`candidate_efficiency_only`. It is logged, but `promotion_eligible=false` and
+`promotion_block_reason=efficiency_only_no_quality_improvement`. A candidate
+with identical quality and no material runtime improvement is `candidate_no_op`.
+Runtime improvement alone cannot set `best_global_candidate`.
 
 An increased `preview_render_failed_count` blocks runtime promotion. Existing
 hard-case failures remain negative counters; more complete pairs without
 `audio_preview_ready` evidence remains inconclusive unless another quality
 metric improves without regressions.
+
+Each candidate row includes:
+
+```text
+decision_class
+quality_improvement_detected
+efficiency_improvement_detected
+promotion_eligible
+promotion_block_reason
+```
 
 ## Preview Counters
 

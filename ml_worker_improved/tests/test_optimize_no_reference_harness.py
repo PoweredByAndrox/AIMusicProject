@@ -94,9 +94,20 @@ def candidate_eval(
     preview_render_failed_count: int = 0,
     preview_validation_failed_count: int = 0,
     preview_contract_missing_count: int = 0,
+    estimated_runtime_sec: int = 100,
+    minus_accepted_count: int = 1,
+    pair_compatible_count: int = 1,
+    severe_phase_collapse_count: int = 0,
+    severe_vocal_bleed_in_minus_count: int = 0,
+    analysis_ready_stems_count: int = 2,
+    blocked_stems_count: int = 0,
+    release_ready_count: int = 0,
+    release_ready: bool = False,
+    mutation_type: str = "candidate",
 ) -> dict:
     return {
         "harness_candidate_id": candidate_id,
+        "mutation_type": mutation_type,
         "safety_valid": True,
         "preview_ready_count": 1,
         "accepted_pair_ready_count": 1,
@@ -107,13 +118,17 @@ def candidate_eval(
         "preview_render_skipped_count": 0,
         "preview_validation_failed_count": preview_validation_failed_count,
         "preview_contract_missing_count": preview_contract_missing_count,
-        "minus_accepted_count": 1,
-        "pair_compatible_count": 1,
-        "severe_vocal_bleed_in_minus_count": 0,
-        "severe_phase_collapse_count": 0,
+        "accepted_minus_count": minus_accepted_count,
+        "minus_accepted_count": minus_accepted_count,
+        "pair_compatible_count": pair_compatible_count,
+        "analysis_ready_stems_count": analysis_ready_stems_count,
+        "blocked_stems_count": blocked_stems_count,
+        "severe_vocal_bleed_in_minus_count": severe_vocal_bleed_in_minus_count,
+        "severe_phase_collapse_count": severe_phase_collapse_count,
         "failed_run_count": 0,
-        "release_ready_count": 0,
-        "estimated_runtime_sec": 100,
+        "release_ready_count": release_ready_count,
+        "release_ready": release_ready,
+        "estimated_runtime_sec": estimated_runtime_sec,
         "complexity_score": complexity,
         "per_track_scores": per_track_scores,
     }
@@ -140,8 +155,114 @@ def test_candidate_good_on_one_track_bad_on_another_becomes_specialist() -> None
 
     specialist_rows = [row for row in selected["specialist_rows"] if row["harness_candidate_id"] == "specialist"]
     assert specialist_rows
-    assert specialist_rows[0]["selection_decision"] == "candidate_specialist_route_only"
+    assert specialist_rows[0]["selection_decision"] == "candidate_specialist_only"
     assert all(row["harness_candidate_id"] != "specialist" for row in selected["frontier_rows"])
+
+
+def test_lower_runtime_same_quality_is_efficiency_only_not_global() -> None:
+    baseline = candidate_eval(
+        "baseline",
+        mutation_type="baseline_keep",
+        complexity=1,
+        per_track_scores={"a": 1.0, "b": 1.0},
+        estimated_runtime_sec=200,
+    )
+    faster = candidate_eval(
+        "faster",
+        complexity=1,
+        per_track_scores={"a": 1.0, "b": 1.0},
+        estimated_runtime_sec=150,
+    )
+
+    selected = select_pareto_frontier([baseline, faster], baseline_eval=baseline)
+
+    assert all(row["harness_candidate_id"] != "faster" for row in selected["frontier_rows"])
+    assert [row["harness_candidate_id"] for row in selected["efficiency_only_rows"]] == ["faster"]
+    assert selected["efficiency_only_rows"][0]["selection_decision"] == "candidate_efficiency_only"
+
+
+def test_identical_quality_and_runtime_is_no_op() -> None:
+    baseline = candidate_eval(
+        "baseline",
+        mutation_type="baseline_keep",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        estimated_runtime_sec=100,
+    )
+    same = candidate_eval(
+        "same",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        estimated_runtime_sec=100,
+    )
+
+    selected = select_pareto_frontier([baseline, same], baseline_eval=baseline)
+
+    assert [row["harness_candidate_id"] for row in selected["no_op_rows"]] == ["same"]
+    assert selected["no_op_rows"][0]["selection_decision"] == "candidate_no_op"
+
+
+def test_quality_improved_candidate_can_be_global_candidate() -> None:
+    baseline = candidate_eval(
+        "baseline",
+        mutation_type="baseline_keep",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        audio_preview_ready_count=1,
+    )
+    better = candidate_eval(
+        "better",
+        complexity=2,
+        per_track_scores={"a": 2.0},
+        audio_preview_ready_count=2,
+    )
+
+    selected = select_pareto_frontier([baseline, better], baseline_eval=baseline)
+
+    assert [row["harness_candidate_id"] for row in selected["frontier_rows"] if row.get("mutation_type") != "baseline_keep"] == ["better"]
+    assert selected["frontier_rows"][-1]["selection_decision"] == "candidate_quality_improved"
+
+
+def test_manifest_preview_ready_gain_alone_is_no_op() -> None:
+    baseline = candidate_eval(
+        "baseline",
+        mutation_type="baseline_keep",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        manifest_preview_ready_count=1,
+        audio_preview_ready_count=0,
+        rendered_preview_audio_count=0,
+    )
+    manifest_gain = candidate_eval(
+        "manifest-gain",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        manifest_preview_ready_count=3,
+        audio_preview_ready_count=0,
+        rendered_preview_audio_count=0,
+    )
+
+    selected = select_pareto_frontier([baseline, manifest_gain], baseline_eval=baseline)
+
+    assert selected["no_op_rows"][0]["harness_candidate_id"] == "manifest-gain"
+    assert all(row["harness_candidate_id"] != "manifest-gain" for row in selected["frontier_rows"])
+
+
+def test_release_ready_candidate_is_rejected_before_promotion() -> None:
+    baseline = candidate_eval("baseline", mutation_type="baseline_keep", complexity=1, per_track_scores={"a": 1.0})
+    unsafe = candidate_eval(
+        "unsafe",
+        complexity=1,
+        per_track_scores={"a": 2.0},
+        audio_preview_ready_count=2,
+        release_ready_count=1,
+        release_ready=True,
+    )
+
+    selected = select_pareto_frontier([baseline, unsafe], baseline_eval=baseline)
+
+    rejected = {row["harness_candidate_id"]: row["selection_decision"] for row in selected["rejected_rows"]}
+    assert rejected["unsafe"] == "candidate_rejected_safety"
 
 
 def test_pareto_prioritizes_audio_preview_over_manifest_only_preview() -> None:

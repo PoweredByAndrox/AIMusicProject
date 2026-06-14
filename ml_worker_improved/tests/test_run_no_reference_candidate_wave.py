@@ -359,7 +359,80 @@ def test_candidate_wave_uses_normalized_job_paths_and_preserves_raw_provenance(t
     assert "/raw/" in rows[0]["raw_vocal_path"].replace("\\", "/")
     assert "/raw/" in rows[0]["raw_minus_path"].replace("\\", "/")
     assert rows[0]["shape_normalization_applied"] is True
+    assert rows[0]["route_id"]
+    assert "route_family" in rows[0]
+    assert rows[0]["can_run_without_download"] is True
+    assert rows[0]["can_run_without_registry_edit"] is True
     assert rows[0]["release_ready"] is False
+
+
+def test_job_manifest_to_asset_preserves_direct_route_provenance(tmp_path: Path) -> None:
+    input_audio = write_wav(tmp_path / "input" / "song.wav", sine(220, 1.0))
+    vocal_path = write_wav(tmp_path / "job" / "vocals.wav", sine(440, 1.0))
+    minus_path = write_wav(tmp_path / "job" / "minus.wav", sine(120, 1.0))
+
+    asset, failure = wave.job_manifest_to_asset(
+        run_id="run-a",
+        track_id="track-a",
+        input_audio=Path(input_audio),
+        profile="hard_case",
+        manifest={
+            "candidate_config_id": "local_registered__htdemucs_6s__both__shared",
+            "route_id": "route-htdemucs-6s",
+            "route_family": "htdemucs_6s",
+            "candidate_family": "artifact_safe_default",
+            "target_mode": "both",
+            "source_model_id": "htdemucs_6s",
+            "source_tool": "tools/run_registered_model_candidate.py",
+            "source_config_hash": "hash-a",
+            "generation_status": "generated",
+            "output_paths": {"vocal_path": vocal_path, "minus_path": minus_path},
+            "can_run_without_download": True,
+            "can_run_without_registry_edit": True,
+            "forbidden_reason": "",
+            "release_ready": False,
+            "audio_rendered": True,
+        },
+    )
+
+    assert failure is None
+    assert asset is not None
+    assert asset["route_id"] == "route-htdemucs-6s"
+    assert asset["route_family"] == "htdemucs_6s"
+    assert asset["can_run_without_download"] is True
+    assert asset["can_run_without_registry_edit"] is True
+    assert asset["forbidden_reason"] == ""
+
+
+def test_materialize_asset_adds_default_route_provenance_for_source_both_rows(tmp_path: Path) -> None:
+    input_audio = write_wav(tmp_path / "input" / "song.wav", sine(220, 1.0))
+    vocal_path = write_wav(tmp_path / "source" / "vocals.wav", sine(440, 1.0))
+    minus_path = write_wav(tmp_path / "source" / "minus.wav", sine(120, 1.0))
+
+    asset, failure = wave.materialize_asset(
+        run_id="run-a",
+        track_id="track-a",
+        input_audio=Path(input_audio),
+        output_dir=tmp_path / "out",
+        row={
+            "candidate_config_id": "source-both",
+            "candidate_family": "source_pair",
+            "target_mode": "both",
+            "vocal_path": vocal_path,
+            "minus_path": minus_path,
+            "source_tool": "existing_source_pool",
+            "source_model_id": "source-model",
+        },
+        profile="safe",
+    )
+
+    assert failure is None
+    assert asset is not None
+    assert asset["route_id"] == "source-both"
+    assert "route_family" in asset
+    assert asset["can_run_without_download"] is True
+    assert asset["can_run_without_registry_edit"] is True
+    assert asset["forbidden_reason"] == ""
 
 
 def test_candidate_wave_reuses_shared_execution_and_materializes_modes(tmp_path: Path, monkeypatch) -> None:
@@ -512,6 +585,66 @@ def test_candidate_wave_runs_only_route_filtered_hard_case_configs(tmp_path: Pat
     assert result["summary"]["max_job_count"] == 1
     assert any(row["reason_skipped"] == "route_not_selected" for row in plan_rows)
     assert any(row["reason_skipped"] == "max_candidates_limit" for row in plan_rows)
+
+
+def test_candidate_wave_route_filter_accepts_exact_route_id(tmp_path: Path, monkeypatch) -> None:
+    input_audio = write_wav(tmp_path / "input" / "song.wav", sine(220, 1.0))
+    target = shared_job_config("unit-both-a", target_mode="both", family="balanced_pair_default", group_id="shared-a", produces_vocal=True, produces_minus=True, materialized_modes=("vocal", "minus", "both"))
+    skipped = shared_job_config("unit-both-b", target_mode="both", family="balanced_pair_default", group_id="shared-b", produces_vocal=True, produces_minus=True, materialized_modes=("vocal", "minus", "both"))
+    configs = [
+        CandidateJobConfig(**{**target.to_manifest(), "route_id": "local_registered__htdemucs_6s__both__shared", "hard_case_routes": []}),
+        CandidateJobConfig(**{**skipped.to_manifest(), "route_id": "local_registered__htdemucs_ft__both__shared", "hard_case_routes": []}),
+    ]
+    calls: list[str] = []
+
+    def fake_registry(profile: str | None = None):
+        return configs
+
+    def fake_job(**kwargs):
+        calls.append(kwargs["candidate_config_id"])
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        vocal_path = write_wav(output_dir / "vocals.wav", sine(440, 1.0))
+        minus_path = write_wav(output_dir / "minus.wav", sine(120, 1.0))
+        manifest = {
+            "candidate_config_id": kwargs["candidate_config_id"],
+            "route_id": "local_registered__htdemucs_6s__both__shared",
+            "route_family": "htdemucs_6s",
+            "candidate_family": "balanced_pair_default",
+            "target_mode": "both",
+            "source_model_id": "htdemucs_6s",
+            "source_tool": "unit-tool",
+            "source_config_hash": configs[0].source_config_hash,
+            "generation_status": "generated",
+            "skip_reason": "",
+            "output_paths": {"vocal_path": vocal_path, "minus_path": minus_path},
+            "job_manifest_path": str(kwargs["job_manifest_json"]),
+            "job_progress_path": str(kwargs["job_progress_jsonl"]),
+            "audio_rendered": True,
+            "release_ready": False,
+        }
+        kwargs["job_manifest_json"].write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+        kwargs["job_progress_jsonl"].write_text(json.dumps({"phase": "complete"}) + "\n", encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(wave, "build_candidate_job_registry", fake_registry)
+    monkeypatch.setattr(wave, "run_local_separator_candidate_job", fake_job)
+
+    result = run_candidate_wave(
+        input_audio=Path(input_audio),
+        output_dir=tmp_path / "wave",
+        candidate_pool_jsonl=tmp_path / "wave" / "candidate_pool.jsonl",
+        profile="balanced",
+        execution_mode="run_jobs",
+        max_candidates=4,
+        max_runtime_sec=60,
+        candidate_diversity_profile="balanced",
+        candidate_route_filter="local_registered__htdemucs_6s__both__shared",
+    )
+
+    assert calls == ["unit-both-a"]
+    assert result["summary"]["jobs_attempted"] == 1
+    assert result["summary"]["candidate_route_filter"] == "local_registered__htdemucs_6s__both__shared"
 
 
 def test_candidate_wave_auto_falls_back_to_run_jobs_when_no_existing_outputs(tmp_path: Path, monkeypatch) -> None:

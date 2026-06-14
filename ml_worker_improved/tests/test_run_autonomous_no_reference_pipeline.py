@@ -910,3 +910,170 @@ def test_controller_runs_minus_hard_case_route_when_enabled(tmp_path: Path, monk
     assert manifest["minus_hard_case_extra_jobs_attempted"] == 2
     assert manifest["selected_minus_candidate"] == "pair-hard"
     assert manifest["release_ready"] is False
+
+
+def test_controller_does_not_run_conditional_hard_case_route_unless_enabled(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "run"
+    model_dir = tmp_path / "models"
+    create_shadow_model_dir(model_dir)
+    mix_path = write_wav(tmp_path / "audio" / "song.wav", sine(220, 2.0))
+    vocal_path = write_wav(tmp_path / "audio" / "vocal.wav", sine(440, 2.0))
+    minus_path = write_wav(tmp_path / "audio" / "minus.wav", sine(120, 2.0))
+
+    def fake_wave(**kwargs):
+        row = {
+            "track_id": "song",
+            "candidate_id": "pair-a",
+            "mix_path": mix_path,
+            "input_audio_path": mix_path,
+            "vocal_path": vocal_path,
+            "instrumental_path": minus_path,
+            "minus_path": minus_path,
+            "is_complete_pair": True,
+            "release_ready": False,
+        }
+        write_jsonl(kwargs["candidate_pool_jsonl"], [row])
+        return {"run_id": "wave", "rows": [row], "failures": [], "jobs": [], "summary": {"complete_pairs": 1, "jobs_attempted": 1, "jobs_generated": 1, "release_ready_count": 0}}
+
+    def fake_judge(rows, **kwargs):
+        return {"rows": [{"track_id": "song", "candidate_id": "pair-a", "score_mode": kwargs["score_mode"], "minus_blockers": ["severe_vocal_bleed_in_minus"] if kwargs["score_mode"] == "minus" else []}], "summary": {}}
+
+    def fake_shadow(**kwargs):
+        return {
+            "rows": [
+                {"track_id": "song", "candidate_id": "pair-a", "score_mode": "vocal", "script_decision": "accept_candidate", "final_guarded_decision": "accept_candidate", "script_blockers": [], "hybrid_score": 0.9, "script_score": 0.9, "vocal_path": vocal_path, "minus_path": minus_path, "instrumental_path": minus_path, "release_ready": False},
+                {"track_id": "song", "candidate_id": "pair-a", "score_mode": "minus", "script_decision": "blocked_hard_case", "final_guarded_decision": "blocked_hard_case", "script_blockers": ["severe_vocal_bleed_in_minus"], "hybrid_score": 0.1, "script_score": 0.1, "vocal_path": vocal_path, "minus_path": minus_path, "instrumental_path": minus_path, "release_ready": False},
+            ],
+            "disagreements": [],
+        }
+
+    monkeypatch.setattr(controller, "run_candidate_wave", fake_wave)
+    monkeypatch.setattr(controller, "judge_candidate_rows_windowed", fake_judge)
+    monkeypatch.setattr(controller, "optimize_tracks_mode_specific", lambda *args, **kwargs: {"rows": []})
+    monkeypatch.setattr(controller, "build_shadow_rerank", fake_shadow)
+    monkeypatch.setattr(controller, "run_hard_case_route_policy", lambda **kwargs: (_ for _ in ()).throw(AssertionError("conditional policy should not run")))
+
+    exit_code = main([
+        "--input-audio", mix_path,
+        "--output-dir", str(output_dir),
+        "--model-dir", str(model_dir),
+        "--profile", "balanced",
+        "--generate-candidates", "true",
+        "--candidate-profile", "balanced",
+        "--candidate-execution-mode", "auto",
+        "--candidate-diversity-profile", "balanced",
+        "--window-seconds", "0.5",
+        "--max-windows-per-candidate", "1",
+    ])
+
+    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert manifest["output_status"] == "needs_more_candidates"
+    assert manifest["conditional_hard_case_routes_enabled"] is False
+    assert manifest["conditional_route_executed"] is False
+    assert manifest["default_profile_changed"] is False
+    assert manifest["release_ready"] is False
+
+
+def test_controller_runs_conditional_hard_case_route_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "run"
+    model_dir = tmp_path / "models"
+    create_shadow_model_dir(model_dir)
+    mix_path = write_wav(tmp_path / "audio" / "song.wav", sine(220, 2.0))
+    vocal_path = write_wav(tmp_path / "audio" / "vocal.wav", sine(440, 2.0))
+    minus_path = write_wav(tmp_path / "audio" / "minus.wav", sine(120, 2.0))
+    hard_minus_path = write_wav(tmp_path / "audio" / "minus-hard.wav", sine(180, 2.0))
+    wave_calls: list[dict] = []
+    shadow_calls = {"count": 0}
+
+    def row(candidate_id: str, minus: str) -> dict:
+        return {
+            "track_id": "song",
+            "candidate_id": candidate_id,
+            "mix_path": mix_path,
+            "input_audio_path": mix_path,
+            "vocal_path": vocal_path,
+            "instrumental_path": minus,
+            "minus_path": minus,
+            "is_complete_pair": True,
+            "release_ready": False,
+        }
+
+    def fake_wave(**kwargs):
+        wave_calls.append(dict(kwargs))
+        rows = [row("pair-a", minus_path)]
+        if len(wave_calls) > 1:
+            rows.append(row("pair-hard", hard_minus_path))
+        write_jsonl(kwargs["candidate_pool_jsonl"], rows)
+        return {"run_id": f"wave-{len(wave_calls)}", "rows": rows, "failures": [], "jobs": [], "summary": {"complete_pairs": len(rows), "jobs_attempted": len(wave_calls), "jobs_generated": len(rows), "candidates_generated": len(rows), "candidate_route_filter": kwargs.get("candidate_route_filter", ""), "release_ready_count": 0}}
+
+    def fake_judge(rows, **kwargs):
+        judged = []
+        for source in rows:
+            judged.append({"track_id": "song", "candidate_id": source["candidate_id"], "score_mode": kwargs["score_mode"], "minus_blockers": ["severe_phase_collapse"] if kwargs["score_mode"] == "minus" and source["candidate_id"] == "pair-a" else []})
+        return {"rows": judged, "summary": {}}
+
+    def fake_shadow(**kwargs):
+        shadow_calls["count"] += 1
+        minus_accept = shadow_calls["count"] > 1
+        return {
+            "rows": [
+                {"track_id": "song", "candidate_id": "pair-a", "score_mode": "vocal", "script_decision": "accept_candidate", "final_guarded_decision": "accept_candidate", "script_blockers": [], "hybrid_score": 0.9, "script_score": 0.9, "vocal_path": vocal_path, "minus_path": minus_path, "instrumental_path": minus_path, "release_ready": False},
+                {"track_id": "song", "candidate_id": "pair-hard", "score_mode": "minus", "script_decision": "accept_candidate" if minus_accept else "blocked_hard_case", "final_guarded_decision": "accept_candidate" if minus_accept else "blocked_hard_case", "script_blockers": [] if minus_accept else ["severe_phase_collapse"], "hybrid_score": 0.8, "script_score": 0.8, "vocal_path": vocal_path, "minus_path": hard_minus_path, "instrumental_path": hard_minus_path, "release_ready": False},
+            ],
+            "disagreements": [],
+        }
+
+    def fake_policy(**kwargs):
+        policy = {
+            "run_id": "run-a",
+            "track_id": "song",
+            "hard_case_detected": True,
+            "trigger_reasons": ["severe_phase_collapse"],
+            "selected_conditional_route_ids": ["local_registered__htdemucs_6s__both__shared"],
+            "route_scope": "hard_case_only",
+            "route_reason": "stem2_quality_improved_route_for_hard_case",
+            "route_allowed": True,
+            "route_block_reason": "",
+            "default_profile_changed": False,
+            "release_ready": False,
+        }
+        controller.write_json(kwargs["output_json"], policy)
+        kwargs["summary_md"].write_text("- route_allowed: true\n- release_ready: false\n", encoding="utf-8")
+        return policy
+
+    monkeypatch.setattr(controller, "run_candidate_wave", fake_wave)
+    monkeypatch.setattr(controller, "judge_candidate_rows_windowed", fake_judge)
+    monkeypatch.setattr(controller, "optimize_tracks_mode_specific", lambda *args, **kwargs: {"rows": []})
+    monkeypatch.setattr(controller, "build_shadow_rerank", fake_shadow)
+    monkeypatch.setattr(controller, "run_hard_case_route_policy", fake_policy)
+
+    exit_code = main([
+        "--input-audio", mix_path,
+        "--output-dir", str(output_dir),
+        "--model-dir", str(model_dir),
+        "--profile", "balanced",
+        "--generate-candidates", "true",
+        "--candidate-profile", "balanced",
+        "--candidate-execution-mode", "auto",
+        "--candidate-diversity-profile", "balanced",
+        "--enable-conditional-hard-case-routes", "true",
+        "--conditional-route-policy", "hard_case_only",
+        "--max-conditional-route-jobs", "2",
+        "--conditional-route-runtime-sec", "60",
+        "--window-seconds", "0.5",
+        "--max-windows-per-candidate", "1",
+    ])
+
+    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    policy = json.loads((output_dir / "hard_case_route_policy.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert len(wave_calls) == 2
+    assert wave_calls[1]["candidate_route_filter"] == "local_registered__htdemucs_6s__both__shared"
+    assert wave_calls[1]["max_job_count"] == 2
+    assert manifest["conditional_route_executed"] is True
+    assert manifest["selected_conditional_route_ids"] == ["local_registered__htdemucs_6s__both__shared"]
+    assert manifest["default_profile_changed"] is False
+    assert manifest["selected_minus_candidate"] == "pair-hard"
+    assert policy["route_scope"] == "hard_case_only"
+    assert manifest["release_ready"] is False

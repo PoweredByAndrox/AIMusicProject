@@ -65,9 +65,77 @@ def test_scheduler_prioritizes_shared_both_job_and_dedupes_group(tmp_path: Path)
 
     assert [row["candidate_config_id"] for row in runnable] == ["unit-both"]
     assert runnable[0]["shared_execution_group_id"] == "shared-a"
+    assert runnable[0]["route_id"] == "unit-both"
+    assert "route_family" in runnable[0]
+    assert runnable[0]["can_run_without_download"] is True
+    assert runnable[0]["can_run_without_registry_edit"] is True
+    assert runnable[0]["forbidden_reason"] == ""
     assert runnable[0]["target_modes_produced"] == ["vocal", "minus", "both"]
     assert runnable[0]["candidate_families_materialized"] == ["balanced_pair_default"]
     assert {row["reason_skipped"] for row in skipped} == {"duplicate_shared_execution_group"}
+
+
+def test_scheduler_route_filter_accepts_route_id_for_conditional_hard_case(tmp_path: Path) -> None:
+    configs = [
+        CandidateJobConfig(
+            candidate_config_id="unit-both",
+            route_id="local_registered__htdemucs_6s__both__shared",
+            candidate_family="balanced_pair_default",
+            target_mode="both",
+            source_model_id="htdemucs_6s",
+            source_tool="tools/run_registered_model_candidate.py",
+            entrypoint_type="python_script",
+            command_template=("python", "tool.py"),
+            expected_outputs={},
+            gpu_required=True,
+            timeout_sec=10,
+            max_retries=0,
+            profile_allowed=("balanced",),
+            safety_notes=(),
+            supported_parameters=(),
+            shared_execution_group_id="shared-a",
+            produces_vocal=True,
+            produces_minus=True,
+            materialized_candidate_modes=("vocal", "minus", "both"),
+            hard_case_routes=(),
+        ),
+        CandidateJobConfig(
+            candidate_config_id="unit-ft",
+            route_id="local_registered__htdemucs_ft__both__shared",
+            candidate_family="balanced_pair_default",
+            target_mode="both",
+            source_model_id="htdemucs_ft",
+            source_tool="tools/run_registered_model_candidate.py",
+            entrypoint_type="python_script",
+            command_template=("python", "tool.py"),
+            expected_outputs={},
+            gpu_required=True,
+            timeout_sec=10,
+            max_retries=0,
+            profile_allowed=("balanced",),
+            safety_notes=(),
+            supported_parameters=(),
+            shared_execution_group_id="shared-b",
+            produces_vocal=True,
+            produces_minus=True,
+            materialized_candidate_modes=("vocal", "minus", "both"),
+            hard_case_routes=(),
+        ),
+    ]
+
+    plan = build_candidate_job_plan(
+        input_audio_path=tmp_path / "song.wav",
+        registry_configs=configs,
+        candidate_profile="balanced",
+        candidate_diversity_profile="balanced",
+        max_candidates=4,
+        max_runtime_sec=60,
+        candidate_route_filter="local_registered__htdemucs_6s__both__shared",
+    )
+
+    runnable = [row for row in plan if row["can_run"]]
+    assert [row["candidate_config_id"] for row in runnable] == ["unit-both"]
+    assert runnable[0]["route_id"] == "local_registered__htdemucs_6s__both__shared"
 
 
 def test_scheduler_writes_plan_and_skips_lower_priority_when_budget_is_low(tmp_path: Path) -> None:

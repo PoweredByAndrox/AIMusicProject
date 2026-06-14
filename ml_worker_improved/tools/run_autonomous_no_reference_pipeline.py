@@ -24,6 +24,7 @@ from tools.prepare_no_reference_segment_blend_dry_run import build_dry_run_contr
 from tools.render_no_reference_segment_blend_preview import build_preview_result  # noqa: E402
 from tools.run_no_reference_candidate_wave import run_candidate_wave  # noqa: E402
 from tools.no_reference_minus_hard_case_router import run_minus_hard_case_router  # noqa: E402
+from tools.no_reference_hard_case_route_policy import run_hard_case_route_policy  # noqa: E402
 from tools.render_no_reference_audio_preview import render_audio_preview_contract  # noqa: E402
 from tools.build_music_intelligence_input_manifest import (  # noqa: E402
     music_intelligence_run_section,
@@ -59,6 +60,8 @@ REQUIRED_OUTPUTS = {
     "post_render_judge": "post_render_judge.jsonl",
     "learning_outcome": "learning_outcome.jsonl",
     "music_intelligence_input_manifest": "music_intelligence_input_manifest.json",
+    "hard_case_route_policy": "hard_case_route_policy.json",
+    "hard_case_route_policy_summary": "hard_case_route_policy_summary.md",
 }
 
 SAFETY_FLAGS = {
@@ -154,6 +157,27 @@ def load_candidate_rows(output_dir: Path, candidate_pool_jsonl: Path | None) -> 
     if not source.exists():
         return [], source
     return list(iter_jsonl(source)), source
+
+
+def merge_candidate_rows(existing_rows: Iterable[dict[str, Any]], new_rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in list(existing_rows) + list(new_rows):
+        key = (
+            str(row.get("track_id") or ""),
+            str(row.get("candidate_id") or ""),
+            str(row.get("vocal_path") or ""),
+            str(row.get("minus_path") or row.get("instrumental_path") or ""),
+        )
+        merged_by_key[key] = {**row, "release_ready": False}
+    return sorted(
+        merged_by_key.values(),
+        key=lambda item: (
+            str(item.get("track_id") or ""),
+            str(item.get("candidate_id") or ""),
+            str(item.get("vocal_path") or ""),
+            str(item.get("minus_path") or item.get("instrumental_path") or ""),
+        ),
+    )
 
 
 def validate_candidate_pool_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -422,6 +446,13 @@ def write_runtime_summary(path: Path, manifest: dict[str, Any]) -> None:
         f"- escalation_executed: {str(manifest.get('escalation_executed') is True).lower()}",
         f"- escalated_profile: {manifest.get('escalated_profile') or ''}",
         f"- escalation_reason: {manifest.get('escalation_reason') or ''}",
+        f"- conditional_hard_case_routes_enabled: {str(manifest.get('conditional_hard_case_routes_enabled') is True).lower()}",
+        f"- conditional_route_executed: {str(manifest.get('conditional_route_executed') is True).lower()}",
+        f"- selected_conditional_route_ids: {', '.join(manifest.get('selected_conditional_route_ids') or [])}",
+        f"- conditional_route_scope: {manifest.get('conditional_route_scope') or ''}",
+        f"- conditional_route_reason: {manifest.get('conditional_route_reason') or ''}",
+        f"- conditional_route_block_reason: {manifest.get('conditional_route_block_reason') or ''}",
+        f"- default_profile_changed: {str(manifest.get('default_profile_changed') is True).lower()}",
         f"- candidate_pool_jsonl: {manifest.get('candidate_pool_jsonl') or ''}",
         f"- release_ready: false",
         f"- preview_status: {preview.get('preview_status') or ''}",
@@ -595,6 +626,10 @@ def run_pipeline(
     candidate_diversity_profile: str = "safe",
     auto_escalate_profile: bool = False,
     enable_minus_hard_case_routing: bool = False,
+    enable_conditional_hard_case_routes: bool = False,
+    conditional_route_policy: str = "disabled",
+    max_conditional_route_jobs: int = 2,
+    conditional_route_runtime_sec: int = 1800,
     max_hard_case_extra_jobs: int = 4,
     hard_case_runtime_sec: int = 1800,
     window_seconds: float = 12.0,
@@ -631,6 +666,21 @@ def run_pipeline(
         "minus_hard_case_extra_candidates_generated": 0,
         "minus_hard_case_initial_blockers": [],
         "minus_hard_case_final_blockers": [],
+        "conditional_hard_case_routes_enabled": bool(enable_conditional_hard_case_routes),
+        "conditional_route_policy": conditional_route_policy,
+        "conditional_route_executed": False,
+        "conditional_route_jobs_attempted": 0,
+        "conditional_route_jobs_generated": 0,
+        "conditional_route_candidates_generated": 0,
+        "conditional_route_initial_blockers": [],
+        "conditional_route_final_blockers": [],
+        "selected_conditional_route_ids": [],
+        "conditional_route_scope": "disabled",
+        "conditional_route_reason": "",
+        "conditional_route_block_reason": "",
+        "hard_case_route_policy_json": str(output_dir / REQUIRED_OUTPUTS["hard_case_route_policy"]),
+        "hard_case_route_policy_summary": str(output_dir / REQUIRED_OUTPUTS["hard_case_route_policy_summary"]),
+        "default_profile_changed": False,
     }
 
     validation = validate_input_audio(input_audio)
@@ -650,7 +700,7 @@ def run_pipeline(
             profile=profile,
             allow_shape_normalization=allow_shape_normalization,
             candidate_diversity_profile=candidate_diversity_profile,
-            escalation=escalation,
+            escalation={**escalation, **minus_hard_case},
         )
 
     if generate_candidates:
@@ -746,7 +796,7 @@ def run_pipeline(
             profile=profile,
             allow_shape_normalization=allow_shape_normalization,
             candidate_diversity_profile=candidate_diversity_profile,
-            escalation=escalation,
+            escalation={**escalation, **minus_hard_case},
         )
 
     vocal_judge = judge_candidate_rows_windowed(
@@ -792,6 +842,129 @@ def run_pipeline(
     if selected_vocal is None or selected_minus is None:
         initial_minus_blockers = minus_hard_case_blockers(minus_judge["rows"])
         minus_hard_case["minus_hard_case_initial_blockers"] = initial_minus_blockers
+        minus_hard_case["conditional_route_initial_blockers"] = initial_minus_blockers
+        if enable_conditional_hard_case_routes and selected_minus is None:
+            policy = run_hard_case_route_policy(
+                run_dir=output_dir,
+                output_json=output_dir / REQUIRED_OUTPUTS["hard_case_route_policy"],
+                summary_md=output_dir / REQUIRED_OUTPUTS["hard_case_route_policy_summary"],
+                conditional_route_policy=conditional_route_policy,
+            )
+            selected_route_ids = [str(route_id) for route_id in policy.get("selected_conditional_route_ids") or []]
+            minus_hard_case.update(
+                {
+                    "conditional_route_policy": conditional_route_policy,
+                    "selected_conditional_route_ids": selected_route_ids,
+                    "conditional_route_scope": str(policy.get("route_scope") or "disabled"),
+                    "conditional_route_reason": str(policy.get("route_reason") or ""),
+                    "conditional_route_block_reason": str(policy.get("route_block_reason") or ""),
+                    "conditional_hard_case_detected": policy.get("hard_case_detected") is True,
+                    "conditional_route_trigger_reasons": list(policy.get("trigger_reasons") or []),
+                    "default_profile_changed": policy.get("default_profile_changed") is True,
+                }
+            )
+            stages.append(
+                stage(
+                    "hard_case_route_policy",
+                    "completed",
+                    route_allowed=policy.get("route_allowed") is True,
+                    selected_conditional_route_ids=selected_route_ids,
+                    route_scope=str(policy.get("route_scope") or "disabled"),
+                    route_block_reason=str(policy.get("route_block_reason") or ""),
+                )
+            )
+            if policy.get("route_allowed") is True and selected_route_ids:
+                conditional_pool = output_dir / "conditional_hard_case_candidate_pool.jsonl"
+                conditional_wave = run_candidate_wave(
+                    input_audio=input_audio,
+                    output_dir=output_dir / "candidates_conditional_hard_case",
+                    candidate_pool_jsonl=conditional_pool,
+                    profile="balanced",
+                    source_jsonl=None,
+                    max_candidates=max_candidates,
+                    max_job_count=int(max_conditional_route_jobs),
+                    execution_mode="auto",
+                    max_runtime_sec=int(conditional_route_runtime_sec),
+                    continue_on_failure=continue_on_candidate_failure,
+                    allow_shape_normalization=allow_shape_normalization,
+                    candidate_diversity_profile="balanced",
+                    candidate_route_filter=selected_route_ids[0],
+                )
+                candidate_wave_summary = conditional_wave["summary"]
+                conditional_rows = list(iter_jsonl(conditional_pool)) if conditional_pool.exists() else []
+                merged_rows = merge_candidate_rows(candidate_rows, conditional_rows)
+                write_jsonl(candidate_source, merged_rows)
+                minus_hard_case.update(
+                    {
+                        "conditional_route_executed": True,
+                        "conditional_route_jobs_attempted": int(candidate_wave_summary.get("jobs_attempted") or 0),
+                        "conditional_route_jobs_generated": int(candidate_wave_summary.get("jobs_generated") or 0),
+                        "conditional_route_candidates_generated": int(candidate_wave_summary.get("candidates_generated") or 0),
+                        "minus_hard_case_extra_jobs_attempted": int(candidate_wave_summary.get("jobs_attempted") or 0),
+                        "minus_hard_case_extra_jobs_generated": int(candidate_wave_summary.get("jobs_generated") or 0),
+                        "minus_hard_case_extra_candidates_generated": int(candidate_wave_summary.get("candidates_generated") or 0),
+                    }
+                )
+                stages.append(stage("run_conditional_hard_case_candidate_wave", "completed", candidate_pool_jsonl=str(candidate_source), conditional_candidate_pool_jsonl=str(conditional_pool), **candidate_wave_summary))
+                candidate_rows, candidate_source = load_candidate_rows(output_dir, candidate_source)
+                usable_candidate_rows, invalid_candidate_rows = validate_candidate_pool_rows(candidate_rows)
+                write_jsonl(output_dir / "candidate_pool_invalid_rows.jsonl", invalid_candidate_rows)
+                candidate_rows = usable_candidate_rows
+                vocal_judge = judge_candidate_rows_windowed(
+                    candidate_rows,
+                    cache_jsonl=output_dir / "vocal_windowed_metric_cache.jsonl",
+                    window_seconds=float(window_seconds),
+                    max_windows_per_candidate=int(max_windows_per_candidate),
+                    window_step_seconds=float(window_step_seconds),
+                    score_mode="vocal",
+                )
+                write_windowed_result(vocal_judge, output_jsonl=output_dir / "vocal_windowed_judge.jsonl", summary_json=output_dir / "vocal_windowed_judge_summary.json")
+                minus_judge = judge_candidate_rows_windowed(
+                    candidate_rows,
+                    cache_jsonl=output_dir / "minus_windowed_metric_cache.jsonl",
+                    window_seconds=float(window_seconds),
+                    max_windows_per_candidate=int(max_windows_per_candidate),
+                    window_step_seconds=float(window_step_seconds),
+                    score_mode="minus",
+                )
+                write_windowed_result(minus_judge, output_jsonl=output_dir / "minus_windowed_judge.jsonl", summary_json=output_dir / "minus_windowed_judge_summary.json")
+                minus_hard_case["conditional_route_final_blockers"] = minus_hard_case_blockers(minus_judge["rows"])
+                minus_hard_case["minus_hard_case_final_blockers"] = minus_hard_case["conditional_route_final_blockers"]
+                optimizer_result = optimize_tracks_mode_specific(vocal_judge["rows"], minus_judge["rows"])
+                write_jsonl(output_dir / "optimizer_mode_specific_result.jsonl", optimizer_result["rows"])
+                shadow_result = build_shadow_rerank(
+                    candidate_pool_rows=candidate_rows,
+                    windowed_judge_rows=vocal_judge["rows"] + minus_judge["rows"],
+                    optimizer_result_rows=optimizer_result["rows"],
+                    bundles=load_model_dir(model_dir),
+                )
+                write_jsonl(output_dir / REQUIRED_OUTPUTS["learned_critic_scores"], shadow_result["rows"])
+                write_jsonl(output_dir / "learned_critic_disagreements.jsonl", shadow_result["disagreements"])
+                selected_vocal = select_best_candidate(shadow_result["rows"], "vocal")
+                selected_minus = select_best_candidate(shadow_result["rows"], "minus")
+                stages.append(stage("rerun_conditional_hard_case_vocal_selection", "completed" if selected_vocal else "failed", candidate_id=str((selected_vocal or {}).get("candidate_id") or "")))
+                stages.append(stage("rerun_conditional_hard_case_minus_selection", "completed" if selected_minus else "failed", candidate_id=str((selected_minus or {}).get("candidate_id") or "")))
+                if selected_vocal is not None and selected_minus is not None:
+                    pass
+                else:
+                    return build_failure_manifest(
+                        output_dir=output_dir,
+                        input_audio=input_audio,
+                        output_status="needs_more_candidates",
+                        reason="conditional_hard_case_route_exhausted",
+                        stages=stages,
+                        model_info=model_info,
+                        candidate_wave_executed=candidate_wave_executed,
+                        candidate_wave_summary=candidate_wave_summary,
+                        candidate_pool_jsonl=candidate_source,
+                        candidate_execution_mode=candidate_execution_mode,
+                        profile=profile,
+                        allow_shape_normalization=allow_shape_normalization,
+                        candidate_diversity_profile=candidate_diversity_profile,
+                        escalation={**escalation, **minus_hard_case},
+                    )
+            else:
+                stages.append(stage("run_conditional_hard_case_candidate_wave", "skipped_policy_blocked", route_block_reason=str(policy.get("route_block_reason") or "")))
         if (
             enable_minus_hard_case_routing
             and selected_minus is None
@@ -1124,6 +1297,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--candidate-diversity-profile", choices=("safe", "balanced", "exploration"), default="safe")
     parser.add_argument("--auto-escalate-profile", type=parse_bool, default=False)
     parser.add_argument("--enable-minus-hard-case-routing", type=parse_bool, default=False)
+    parser.add_argument("--enable-conditional-hard-case-routes", type=parse_bool, default=False)
+    parser.add_argument("--conditional-route-policy", choices=("hard_case_only", "disabled"), default="disabled")
+    parser.add_argument("--max-conditional-route-jobs", type=int, default=2)
+    parser.add_argument("--conditional-route-runtime-sec", type=int, default=1800)
     parser.add_argument("--max-hard-case-extra-jobs", type=int, default=4)
     parser.add_argument("--hard-case-runtime-sec", type=int, default=1800)
     parser.add_argument("--window-seconds", type=float, default=12.0)
@@ -1152,6 +1329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidate_diversity_profile=args.candidate_diversity_profile,
         auto_escalate_profile=args.auto_escalate_profile,
         enable_minus_hard_case_routing=args.enable_minus_hard_case_routing,
+        enable_conditional_hard_case_routes=args.enable_conditional_hard_case_routes,
+        conditional_route_policy=args.conditional_route_policy,
+        max_conditional_route_jobs=args.max_conditional_route_jobs,
+        conditional_route_runtime_sec=args.conditional_route_runtime_sec,
         max_hard_case_extra_jobs=args.max_hard_case_extra_jobs,
         hard_case_runtime_sec=args.hard_case_runtime_sec,
         window_seconds=args.window_seconds,

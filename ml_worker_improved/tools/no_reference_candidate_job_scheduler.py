@@ -74,6 +74,17 @@ def plan_id(input_audio_path: Path, config: CandidateJobConfig) -> str:
     )[:16]
 
 
+def route_filter_matches(config: CandidateJobConfig, candidate_route_filter: str) -> bool:
+    if not candidate_route_filter:
+        return True
+    accepted_route_tokens = {
+        str(config.route_id),
+        str(config.candidate_config_id),
+        *[str(route) for route in config.hard_case_routes],
+    }
+    return candidate_route_filter in accepted_route_tokens
+
+
 def build_candidate_job_plan(
     *,
     input_audio_path: Path,
@@ -97,7 +108,7 @@ def build_candidate_job_plan(
         can_run = True
         reason_selected = "selected"
         reason_skipped = ""
-        if candidate_route_filter and candidate_route_filter not in set(config.hard_case_routes):
+        if not route_filter_matches(config, candidate_route_filter):
             can_run = False
             reason_selected = ""
             reason_skipped = "route_not_selected"
@@ -129,6 +140,8 @@ def build_candidate_job_plan(
             {
                 "job_plan_id": plan_id(input_audio_path, config),
                 "candidate_config_id": config.candidate_config_id,
+                "route_id": config.route_id,
+                "route_family": config.route_family,
                 "shared_execution_group_id": group_id,
                 "priority": index,
                 "expected_runtime_sec": expected_runtime_sec,
@@ -142,6 +155,9 @@ def build_candidate_job_plan(
                 "candidate_diversity_profile": candidate_diversity_profile,
                 "candidate_route_filter": candidate_route_filter,
                 "source_config_hash": config.source_config_hash,
+                "can_run_without_download": bool(config.can_run_without_download),
+                "can_run_without_registry_edit": bool(config.can_run_without_registry_edit),
+                "forbidden_reason": config.forbidden_reason,
                 "created_at": DETERMINISTIC_CREATED_AT,
             }
         )

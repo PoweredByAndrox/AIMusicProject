@@ -225,6 +225,9 @@ Output:
 harness_candidate_eval.jsonl
 harness_pareto_frontier.jsonl
 harness_rejected_candidates.jsonl
+efficiency_only_candidates.jsonl
+no_op_candidates.jsonl
+promotion_gate_summary.md
 failure_reflections/failure_reflections.jsonl
 failure_reflections/failure_reflections_summary.md
 harness_optimizer_summary.json
@@ -238,6 +241,8 @@ signals are informational and do not count as preview success. It considers:
 - maximize `rendered_preview_audio_count`
 - maximize `accepted_minus_count` / `minus_accepted_count`
 - maximize `pair_compatible_count`
+- maximize `analysis_ready_stems_count`
+- minimize `blocked_stems_count`
 - minimize `preview_render_failed_count`
 - minimize `preview_validation_failed_count`
 - minimize `preview_contract_missing_count`
@@ -247,8 +252,23 @@ signals are informational and do not count as preview success. It considers:
 - minimize estimated runtime
 - minimize complexity
 
+Promotion is gated by quality first:
+
+- `candidate_quality_improved` is the only global-promotion decision class.
+- `best_global_candidate` is empty unless at least one quality metric improves.
+- lower `estimated_runtime_sec` without a quality gain is
+  `candidate_efficiency_only`, written to `efficiency_only_candidates.jsonl`.
+- identical quality and non-improved runtime is `candidate_no_op`, written to
+  `no_op_candidates.jsonl`.
+- runtime/estimated-runtime improvements are tie-breaks and diagnostics, not
+  baseline-promotion evidence by themselves.
+- `manifest_preview_ready_count` is informational and never creates quality
+  improvement without rendered `audio_preview_ready` evidence.
+- any safety regression, `release_ready_count > 0`, or `release_ready=true`
+  blocks promotion.
+
 A candidate that improves one track but hurts another is recorded as
-`candidate_specialist_route_only` instead of replacing the baseline globally.
+`candidate_specialist_only` instead of replacing the baseline globally.
 More complete pairs without validated `audio_preview_ready` evidence remains
 inconclusive. Candidates with preview render failures are not promoted by the
 runtime validation layer. A candidate with `preview_contract_missing_count > 0`

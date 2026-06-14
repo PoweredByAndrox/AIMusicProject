@@ -37,6 +37,23 @@ ALLOWED_FAMILIES = (
 ALLOWED_ENTRYPOINT_TYPES = ("python_module", "python_script", "existing_cli", "unavailable")
 
 
+def route_family_for_model(model_id: str) -> str:
+    normalized = str(model_id or "").strip().lower()
+    if normalized == "htdemucs_ft":
+        return "htdemucs_ft"
+    if normalized == "htdemucs_6s":
+        return "htdemucs_6s"
+    if "mdx" in normalized:
+        return "mdx_like_existing"
+    if "uvr" in normalized:
+        return "uvr_like_existing"
+    if "spleeter" in normalized:
+        return "spleeter_like_existing"
+    if "roformer" in normalized or "scnet" in normalized:
+        return "other_existing"
+    return "unknown_existing"
+
+
 @dataclass(frozen=True)
 class CandidateJobConfig:
     candidate_config_id: str
@@ -64,6 +81,11 @@ class CandidateJobConfig:
     available: bool = True
     unavailable_reason: str = ""
     source_config_hash: str = ""
+    route_id: str = ""
+    route_family: str = ""
+    can_run_without_download: bool = True
+    can_run_without_registry_edit: bool = True
+    forbidden_reason: str = ""
 
     def __post_init__(self) -> None:
         if self.target_mode not in ALLOWED_TARGET_MODES:
@@ -72,6 +94,10 @@ class CandidateJobConfig:
             raise ValueError(f"Unsupported candidate_family: {self.candidate_family}")
         if self.entrypoint_type not in ALLOWED_ENTRYPOINT_TYPES:
             raise ValueError(f"Unsupported entrypoint_type: {self.entrypoint_type}")
+        if not self.route_id:
+            object.__setattr__(self, "route_id", self.candidate_config_id)
+        if not self.route_family:
+            object.__setattr__(self, "route_family", route_family_for_model(self.source_model_id))
         if not self.shared_execution_group_id:
             object.__setattr__(self, "shared_execution_group_id", self.candidate_config_id)
         if not self.materialized_candidate_modes:
@@ -87,10 +113,12 @@ class CandidateJobConfig:
     def to_manifest(self, *, include_hash: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "candidate_config_id": self.candidate_config_id,
+            "route_id": self.route_id,
             "candidate_family": self.candidate_family,
             "target_mode": self.target_mode,
             "source_model_id": self.source_model_id,
             "source_tool": self.source_tool,
+            "route_family": self.route_family,
             "entrypoint_type": self.entrypoint_type,
             "command_template": list(self.command_template),
             "expected_outputs": dict(self.expected_outputs),
@@ -110,6 +138,9 @@ class CandidateJobConfig:
             "hard_case_routes": list(self.hard_case_routes),
             "available": bool(self.available),
             "unavailable_reason": self.unavailable_reason,
+            "can_run_without_download": bool(self.can_run_without_download),
+            "can_run_without_registry_edit": bool(self.can_run_without_registry_edit),
+            "forbidden_reason": self.forbidden_reason,
         }
         if include_hash:
             payload["source_config_hash"] = self.source_config_hash
@@ -362,6 +393,11 @@ def build_candidate_job_registry(
         unavailable_notes.extend(model_notes)
         unsupported_parameters = tuple(str(value) for value in spec.get("unsupported_parameters", ()))
         unavailable_notes.extend(f"unsupported_parameter:{value}" for value in unsupported_parameters)
+        forbidden_reason = (
+            "unsupported_cli_parameter:" + ",".join(unsupported_parameters)
+            if unsupported_parameters
+            else ""
+        )
         model_id = str(spec["model_id"])
         target_mode = str(spec["target_mode"])
         variant_suffix = str(spec.get("variant_suffix") or "").strip()
@@ -376,10 +412,12 @@ def build_candidate_job_registry(
         configs.append(
             CandidateJobConfig(
                 candidate_config_id=config_id,
+                route_id=str(spec.get("route_id") or config_id),
                 candidate_family=str(spec["family"]),
                 target_mode=target_mode,
                 source_model_id=model_id,
                 source_tool=REGISTERED_MODEL_ENTRYPOINT,
+                route_family=route_family_for_model(model_id),
                 entrypoint_type="python_script" if can_run else "unavailable",
                 command_template=registered_model_command_template(),
                 expected_outputs={"vocal_path": "", "minus_path": ""},
@@ -407,6 +445,9 @@ def build_candidate_job_registry(
                 hard_case_routes=tuple(str(value) for value in spec.get("hard_case_routes", ())),
                 available=bool(can_run),
                 unavailable_reason=unavailable_reason,
+                can_run_without_download=bool(can_run),
+                can_run_without_registry_edit=True,
+                forbidden_reason=forbidden_reason,
             )
         )
     return sorted(configs, key=lambda config: config.candidate_config_id)
