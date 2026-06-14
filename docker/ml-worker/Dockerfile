@@ -61,15 +61,19 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # than torch==2.5.1 provides. BS-Mamba2 only imports Mamba/Mamba2/Block/MLP, so patch the top-level
 # __init__.py to avoid the unused Mamba3 import while preserving the modules required by the vendor model.
 ARG MAMBA_SSM_VERSION=2.3.2.post1
+ARG CAUSAL_CONV1D_VERSION=1.5.3.post1
 ARG MAMBA_TORCH_CUDA_ARCH_LIST=8.9
 ARG MAMBA_BUILD_MAX_JOBS=4
 RUN pip install --no-cache-dir ninja \
     && TORCH_CUDA_ARCH_LIST="${MAMBA_TORCH_CUDA_ARCH_LIST}" \
        MAX_JOBS="${MAMBA_BUILD_MAX_JOBS}" \
+       pip install --no-cache-dir --no-build-isolation "causal-conv1d==${CAUSAL_CONV1D_VERSION}" \
+    && TORCH_CUDA_ARCH_LIST="${MAMBA_TORCH_CUDA_ARCH_LIST}" \
+       MAX_JOBS="${MAMBA_BUILD_MAX_JOBS}" \
        MAMBA_FORCE_BUILD=TRUE \
        pip install --no-cache-dir --no-deps --no-build-isolation "mamba-ssm==${MAMBA_SSM_VERSION}" \
     && python /app/patch_mamba_ssm_compat.py \
-    && python -c "import importlib.util; assert importlib.util.find_spec('mamba_ssm') is not None; print('mamba_ssm package available')"
+    && python -c "import importlib.util; assert importlib.util.find_spec('mamba_ssm') is not None; assert importlib.util.find_spec('causal_conv1d') is not None; print('mamba_ssm and causal_conv1d packages available')"
 
 # TEMPORARY third-party workaround:
 # basic-pitch metadata hard-pins tensorflow<2.15.1, but the worker image requires
@@ -84,8 +88,9 @@ RUN pip install --no-cache-dir --no-deps basic-pitch==0.4.0 \
 # keeps numpy<2 for TensorFlow/Essentia and legacy MSST routes. Keep it isolated.
 RUN python -m venv /opt/audio-separator-venv \
     && /opt/audio-separator-venv/bin/python -m pip install --upgrade pip \
-    && /opt/audio-separator-venv/bin/pip install --no-cache-dir audio-separator==0.44.2 onnxruntime \
-    && /opt/audio-separator-venv/bin/python -c "from audio_separator.separator import Separator; print(Separator.__name__)"
+    && /opt/audio-separator-venv/bin/pip install --no-cache-dir audio-separator==0.44.2 onnxruntime-gpu \
+    && /opt/audio-separator-venv/bin/python -c "from audio_separator.separator import Separator; print(Separator.__name__)" \
+    && /opt/audio-separator-venv/bin/python -c "import onnxruntime as ort; providers = ort.get_available_providers(); assert 'CUDAExecutionProvider' in providers, f'Audio Separator GPU runtime must expose CUDAExecutionProvider, got {providers}'"
 ENV AUDIO_SEPARATOR_PYTHON=/opt/audio-separator-venv/bin/python
 
 # Patch allin1/models/dinat.py to use natten>=0.15 compat shims
