@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.build_no_reference_replay_bundle import build_replay_bundle
+from tools.build_no_reference_replay_bundle import build_replay_bundle, main
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -16,7 +16,78 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
 
-def make_complete_run(tmp_path: Path, name: str = "run-a") -> Path:
+def write_preview_contract_artifacts(
+    run_dir: Path,
+    tmp_path: Path,
+    *,
+    audio_ready: bool = True,
+    manifest_preview_ready: bool = True,
+    preview_status: str = "audio_preview_ready",
+    rendered_count: int = 2,
+    validation_status: str = "validated",
+    accepted_pair_ready: bool = True,
+    render_failed: bool = False,
+    validation_failed: bool = False,
+) -> None:
+    preview_dir = tmp_path / "audio_previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for index in range(rendered_count):
+        preview_path = preview_dir / f"{run_dir.name}_{index}.wav"
+        preview_path.write_bytes(b"fake-preview-audio")
+        rows.append(
+            {
+                "candidate_id": "pair-a",
+                "render_status": "rendered",
+                "validation_status": validation_status,
+                "rendered_preview_audio_path": str(preview_path),
+                "release_ready": False,
+            }
+        )
+    write_jsonl(run_dir / "rendered_preview_audio.jsonl", rows)
+    write_json(
+        run_dir / "preview_render_contract.json",
+        {
+            "accepted_pair_ready": accepted_pair_ready,
+            "manifest_preview_ready": manifest_preview_ready,
+            "audio_preview_ready": audio_ready,
+            "rendered_preview_audio_count": rendered_count,
+            "preview_render_attempted": True,
+            "preview_render_skipped": False,
+            "preview_render_failed": render_failed,
+            "preview_validation_failed": validation_failed,
+            "preview_status": preview_status,
+            "validation_status": validation_status,
+            "preview_failure_reason": "render_failed" if render_failed else "",
+            "preview_skip_reason": "",
+            "can_publish_as_result": False,
+            "can_mark_release_ready": False,
+            "release_ready": False,
+        },
+    )
+    write_json(
+        run_dir / "preview_manifest.json",
+        {
+            "accepted_pair_ready": accepted_pair_ready,
+            "manifest_preview_ready": manifest_preview_ready,
+            "audio_preview_ready": audio_ready,
+            "rendered_preview_audio_count": rendered_count,
+            "preview_render_attempted": True,
+            "preview_render_skipped": False,
+            "preview_render_failed": render_failed,
+            "preview_validation_failed": validation_failed,
+            "preview_status": preview_status,
+            "validation_status": validation_status,
+            "runtime_status": "preview_ready" if manifest_preview_ready else "needs_more_candidates",
+            "can_publish_as_result": False,
+            "can_mark_release_ready": False,
+            "release_ready": False,
+        },
+    )
+    (run_dir / "preview_render_summary.md").write_text("# preview render\n", encoding="utf-8")
+
+
+def make_complete_run(tmp_path: Path, name: str = "run-a", *, preview_contract: bool = True) -> Path:
     run_dir = tmp_path / name
     audio_path = tmp_path / "audio" / "minus.wav"
     audio_path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +134,8 @@ def make_complete_run(tmp_path: Path, name: str = "run-a") -> Path:
     write_jsonl(run_dir / "pair_compatibility.jsonl", [])
     write_jsonl(run_dir / "minus_hard_case_router.jsonl", [{"recommended_route": "generate_phase_safe_variants", "release_ready": False}])
     write_json(run_dir / "preview_manifest.json", {"runtime_status": "needs_more_candidates", "release_ready": False, "can_publish_as_result": False})
+    if preview_contract:
+        write_preview_contract_artifacts(run_dir, tmp_path)
     write_jsonl(run_dir / "post_render_judge.jsonl", [])
     write_jsonl(run_dir / "learning_outcome.jsonl", [{"runtime_status": "needs_more_candidates"}])
     return run_dir
@@ -120,3 +193,141 @@ def test_replay_bundle_counts_source_release_ready_without_republishing(tmp_path
     assert manifest["release_ready_count"] == 1
     assert candidate_pool_events[0]["payload"]["source_release_ready"] is True
     assert candidate_pool_events[0]["payload"]["release_ready"] is False
+
+
+def test_replay_bundle_extracts_audio_preview_ready_from_preview_contract(tmp_path: Path) -> None:
+    run_dir = make_complete_run(tmp_path)
+
+    build_replay_bundle(run_roots=[run_dir], output_dir=tmp_path / "bundle")
+
+    manifest = json.loads((tmp_path / "bundle" / "replay_bundle_manifest.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (tmp_path / "bundle" / "replay_bundle_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    artifacts = [json.loads(line) for line in (tmp_path / "bundle" / "replay_bundle_artifacts_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    summary = next(row for row in events if row["event_type"] == "run_summary")
+
+    assert summary["accepted_pair_ready"] is True
+    assert summary["manifest_preview_ready"] is True
+    assert summary["audio_preview_ready"] is True
+    assert summary["accepted_pair_ready_count"] == 1
+    assert summary["manifest_preview_ready_count"] == 1
+    assert summary["audio_preview_ready_count"] == 1
+    assert summary["rendered_preview_audio_count"] == 2
+    assert summary["preview_render_attempted"] is True
+    assert summary["preview_render_failed"] is False
+    assert summary["preview_validation_failed"] is False
+    assert summary["preview_contract_missing"] is False
+    assert summary["preview_ready_count"] == 1
+    assert summary["can_publish_as_result"] is False
+    assert summary["can_mark_release_ready"] is False
+    assert summary["release_ready"] is False
+    assert summary["melody_transcription_ran"] is False
+    assert summary["recommendation_index_updated"] is False
+    assert manifest["audio_preview_ready_count"] == 1
+    assert manifest["manifest_preview_ready_count"] == 1
+    assert manifest["rendered_preview_audio_count"] == 2
+    assert manifest["preview_contract_missing_count"] == 0
+    assert any(row["artifact_role"] == "rendered_preview_audio" and row["exists"] is True for row in artifacts)
+    assert any(row["artifact_role"] == "preview_render_contract" and row["exists"] is True for row in artifacts)
+    assert any(row["source_event"] == "rendered_preview_audio.jsonl" for row in artifacts if row["artifact_role"] == "audio_reference")
+
+
+def test_manifest_preview_ready_without_contract_is_not_audio_preview_success(tmp_path: Path) -> None:
+    run_dir = make_complete_run(tmp_path, preview_contract=False)
+    write_json(
+        run_dir / "preview_manifest.json",
+        {
+            "accepted_pair_ready": True,
+            "manifest_preview_ready": True,
+            "audio_preview_ready": True,
+            "rendered_preview_audio_count": 2,
+            "preview_status": "audio_preview_ready",
+            "validation_status": "validated",
+            "runtime_status": "preview_ready",
+            "can_publish_as_result": False,
+            "can_mark_release_ready": False,
+            "release_ready": False,
+        },
+    )
+
+    build_replay_bundle(run_roots=[run_dir], output_dir=tmp_path / "bundle")
+
+    manifest = json.loads((tmp_path / "bundle" / "replay_bundle_manifest.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (tmp_path / "bundle" / "replay_bundle_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    summary = next(row for row in events if row["event_type"] == "run_summary")
+
+    assert summary["accepted_pair_ready"] is True
+    assert summary["manifest_preview_ready"] is True
+    assert summary["audio_preview_ready"] is False
+    assert summary["preview_contract_missing"] is True
+    assert summary["preview_ready_count"] == 0
+    assert summary["preview_contract_missing_count"] == 1
+    assert manifest["preview_contract_missing_count"] == 1
+    assert manifest["audio_preview_ready_count"] == 0
+    assert manifest["manifest_preview_ready_count"] == 1
+    assert manifest["release_ready"] is False
+
+
+def test_audio_preview_ready_requires_rendered_audio_count(tmp_path: Path) -> None:
+    run_dir = make_complete_run(tmp_path)
+    write_preview_contract_artifacts(run_dir, tmp_path, audio_ready=True, preview_status="audio_preview_ready", rendered_count=0)
+
+    build_replay_bundle(run_roots=[run_dir], output_dir=tmp_path / "bundle")
+
+    events = [json.loads(line) for line in (tmp_path / "bundle" / "replay_bundle_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    summary = next(row for row in events if row["event_type"] == "run_summary")
+
+    assert summary["manifest_preview_ready"] is True
+    assert summary["audio_preview_ready"] is False
+    assert summary["audio_preview_ready_count"] == 0
+    assert summary["rendered_preview_audio_count"] == 0
+    assert summary["preview_validation_failed"] is True
+
+
+def test_selected_non_pair_candidate_does_not_imply_accepted_pair_ready(tmp_path: Path) -> None:
+    run_dir = make_complete_run(tmp_path)
+    write_preview_contract_artifacts(
+        run_dir,
+        tmp_path,
+        audio_ready=False,
+        manifest_preview_ready=False,
+        preview_status="needs_more_candidates",
+        rendered_count=0,
+        accepted_pair_ready=False,
+    )
+    write_jsonl(run_dir / "selected_candidates.jsonl", [{"candidate_id": "vocal-a", "score_mode": "vocal"}])
+
+    build_replay_bundle(run_roots=[run_dir], output_dir=tmp_path / "bundle")
+
+    events = [json.loads(line) for line in (tmp_path / "bundle" / "replay_bundle_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    summary = next(row for row in events if row["event_type"] == "run_summary")
+
+    assert summary["accepted_pair_ready"] is False
+    assert summary["accepted_pair_ready_count"] == 0
+
+
+def test_replay_bundle_expands_harness_validation_roots(tmp_path: Path) -> None:
+    nested_run = make_complete_run(tmp_path / "validation" / "runs" / "candidate-a", name="track-a")
+
+    build_replay_bundle(run_roots=[tmp_path / "validation"], output_dir=tmp_path / "bundle")
+
+    manifest = json.loads((tmp_path / "bundle" / "replay_bundle_manifest.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (tmp_path / "bundle" / "replay_bundle_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    summaries = [row for row in events if row["event_type"] == "run_summary"]
+
+    assert manifest["run_count"] == 1
+    assert manifest["expanded_run_roots"] == [str(nested_run)]
+    assert summaries[0]["run_root"] == str(nested_run)
+
+
+def test_replay_bundle_cli_loads_run_roots_from_jsonl(tmp_path: Path) -> None:
+    run_dir = make_complete_run(tmp_path)
+    roots_jsonl = tmp_path / "preview_contract_complete_runs.jsonl"
+    write_jsonl(roots_jsonl, [{"run_root": str(run_dir), "preview_contract_complete": True}])
+    output_dir = tmp_path / "bundle"
+
+    exit_code = main(["--run-roots-from-jsonl", str(roots_jsonl), "--output-dir", str(output_dir)])
+
+    manifest = json.loads((output_dir / "replay_bundle_manifest.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert manifest["run_roots"] == [str(run_dir)]
+    assert manifest["preview_contract_missing_count"] == 0

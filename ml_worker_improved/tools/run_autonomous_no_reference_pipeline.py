@@ -24,6 +24,7 @@ from tools.prepare_no_reference_segment_blend_dry_run import build_dry_run_contr
 from tools.render_no_reference_segment_blend_preview import build_preview_result  # noqa: E402
 from tools.run_no_reference_candidate_wave import run_candidate_wave  # noqa: E402
 from tools.no_reference_minus_hard_case_router import run_minus_hard_case_router  # noqa: E402
+from tools.render_no_reference_audio_preview import render_audio_preview_contract  # noqa: E402
 from tools.build_music_intelligence_input_manifest import (  # noqa: E402
     music_intelligence_run_section,
     write_music_intelligence_input_manifest,
@@ -31,7 +32,12 @@ from tools.build_music_intelligence_input_manifest import (  # noqa: E402
 
 
 ALLOWED_RUNTIME_STATUSES = {
-    "preview_ready",
+    "accepted_pair_ready",
+    "manifest_preview_ready",
+    "audio_preview_ready",
+    "preview_render_skipped",
+    "preview_render_failed",
+    "preview_blocked_safety_contract",
     "accepted_for_listen_pack",
     "blocked_hard_case",
     "needs_more_candidates",
@@ -47,6 +53,9 @@ REQUIRED_OUTPUTS = {
     "learned_critic_scores": "learned_critic_scores.jsonl",
     "pair_compatibility": "pair_compatibility.jsonl",
     "preview_manifest": "preview_manifest.json",
+    "rendered_preview_audio": "rendered_preview_audio.jsonl",
+    "preview_render_contract": "preview_render_contract.json",
+    "preview_render_summary": "preview_render_summary.md",
     "post_render_judge": "post_render_judge.jsonl",
     "learning_outcome": "learning_outcome.jsonl",
     "music_intelligence_input_manifest": "music_intelligence_input_manifest.json",
@@ -235,7 +244,7 @@ def evaluate_pair_compatibility(vocal_row: dict[str, Any], minus_row: dict[str, 
         "selected_vocal_candidate_id": str(vocal_row.get("candidate_id") or ""),
         "selected_minus_candidate_id": str(minus_row.get("candidate_id") or ""),
         **pair,
-        "runtime_status": "preview_ready" if compatible else "needs_pair_reconciliation",
+        "runtime_status": "accepted_pair_ready" if compatible else "needs_pair_reconciliation",
         "can_publish_as_result": False,
         "can_mark_release_ready": False,
         "release_ready": False,
@@ -258,13 +267,46 @@ def model_version(model_dir: Path) -> dict[str, Any]:
 
 
 def preview_manifest_for(status: str, selected_rows: list[dict[str, Any]], pair_row: dict[str, Any] | None) -> dict[str, Any]:
+    pair_row = pair_row or {}
+    selected = selected_rows[0] if selected_rows else {}
+    accepted_pair_ready = pair_row.get("pair_decision") == "pair_compatible"
+    preview_status = status if status in {
+        "accepted_pair_ready",
+        "manifest_preview_ready",
+        "audio_preview_ready",
+        "preview_render_skipped",
+        "preview_render_failed",
+        "preview_blocked_safety_contract",
+    } else ("preview_blocked_safety_contract" if status in {"failed_safety_contract", "needs_more_candidates", "blocked_hard_case"} else status)
     return {
+        "run_id": "",
+        "track_id": str(selected.get("track_id") or pair_row.get("track_id") or ""),
+        "preview_status": preview_status,
         "runtime_status": status,
-        "presentation_status": "accepted_for_listen_pack" if status == "preview_ready" else status,
+        "accepted_pair_ready": accepted_pair_ready,
+        "manifest_preview_ready": bool(selected_rows and accepted_pair_ready),
+        "audio_preview_ready": False,
+        "preview_render_attempted": False,
+        "preview_render_skipped": False,
+        "preview_render_failed": preview_status == "preview_blocked_safety_contract",
+        "presentation_status": "accepted_for_listen_pack" if status in {"preview_ready", "audio_preview_ready"} else status,
         "release_status": "listen_preview_only",
         "delivery_allowed": False,
+        "selected_vocal_candidate_id": str(selected.get("selected_vocal_candidate_id") or pair_row.get("selected_vocal_candidate_id") or ""),
+        "selected_minus_candidate_id": str(selected.get("selected_minus_candidate_id") or pair_row.get("selected_minus_candidate_id") or ""),
+        "selected_vocal_path": str(selected.get("selected_vocal_path") or ""),
+        "selected_minus_path": str(selected.get("selected_minus_path") or ""),
+        "rendered_vocal_preview_path": "",
+        "rendered_minus_preview_path": "",
+        "rendered_pair_preview_path": "",
+        "duration_sec": 0.0,
+        "sample_rate": 0,
+        "channels": 0,
+        "validation_status": "blocked" if preview_status == "preview_blocked_safety_contract" else "pending",
+        "failure_reason": "",
+        "skip_reason": "",
         "selected_candidates": selected_rows,
-        "pair_compatibility": pair_row or {},
+        "pair_compatibility": pair_row,
         "can_publish_as_result": False,
         "can_mark_release_ready": False,
         "release_ready": False,
@@ -278,11 +320,34 @@ def preview_manifest_for(status: str, selected_rows: list[dict[str, Any]], pair_
 def rendered_preview_paths(rows: list[dict[str, Any]]) -> list[str]:
     paths: list[str] = []
     for row in rows:
-        for key in ("rendered_vocal_preview_path", "rendered_minus_preview_path"):
+        for key in ("rendered_vocal_preview_path", "rendered_minus_preview_path", "rendered_pair_preview_path", "rendered_path"):
             value = str(row.get(key) or "")
             if value:
                 paths.append(value)
     return stable_unique(paths)
+
+
+def preview_run_section(preview_manifest: dict[str, Any]) -> dict[str, Any]:
+    rendered = preview_manifest.get("rendered_preview_audio")
+    rendered_count = len(rendered) if isinstance(rendered, list) else int(preview_manifest.get("rendered_preview_audio_count") or 0)
+    return {
+        "preview_status": str(preview_manifest.get("preview_status") or ""),
+        "accepted_pair_ready": preview_manifest.get("accepted_pair_ready") is True,
+        "manifest_preview_ready": preview_manifest.get("manifest_preview_ready") is True,
+        "audio_preview_ready": preview_manifest.get("audio_preview_ready") is True,
+        "preview_render_attempted": preview_manifest.get("preview_render_attempted") is True,
+        "preview_render_skipped": preview_manifest.get("preview_render_skipped") is True,
+        "preview_render_failed": preview_manifest.get("preview_render_failed") is True,
+        "rendered_preview_audio_count": int(rendered_count),
+        "rendered_vocal_preview_path": str(preview_manifest.get("rendered_vocal_preview_path") or ""),
+        "rendered_minus_preview_path": str(preview_manifest.get("rendered_minus_preview_path") or ""),
+        "validation_status": str(preview_manifest.get("validation_status") or ""),
+        "failure_reason": str(preview_manifest.get("failure_reason") or ""),
+        "skip_reason": str(preview_manifest.get("skip_reason") or ""),
+        "can_publish_as_result": False,
+        "can_mark_release_ready": False,
+        "release_ready": False,
+    }
 
 
 def learning_outcome_row(
@@ -294,8 +359,10 @@ def learning_outcome_row(
     model_info: dict[str, Any],
     blockers: list[str],
     music_intelligence: dict[str, Any] | None = None,
+    preview: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     music_intelligence = music_intelligence or {}
+    preview = preview or {}
     return {
         "track_id": Path(input_audio).stem,
         "input_audio": str(input_audio),
@@ -309,6 +376,14 @@ def learning_outcome_row(
         "can_train_from_row": False,
         "release_ready": False,
         "can_publish_as_result": False,
+        "preview_status": str(preview.get("preview_status") or ""),
+        "accepted_pair_ready": preview.get("accepted_pair_ready") is True,
+        "manifest_preview_ready": preview.get("manifest_preview_ready") is True,
+        "audio_preview_ready": preview.get("audio_preview_ready") is True,
+        "preview_render_attempted": preview.get("preview_render_attempted") is True,
+        "preview_render_skipped": preview.get("preview_render_skipped") is True,
+        "preview_render_failed": preview.get("preview_render_failed") is True,
+        "rendered_preview_audio_count": int(preview.get("rendered_preview_audio_count") or 0),
         "music_intelligence_manifest_written": music_intelligence.get("manifest_written") is True,
         "music_intelligence_analysis_ready_stems_count": int(music_intelligence.get("analysis_ready_stems_count") or 0),
         "music_intelligence_blocked_stems_count": int(music_intelligence.get("blocked_stems_count") or 0),
@@ -330,6 +405,7 @@ def write_music_intelligence_contract(output_dir: Path, manifest: dict[str, Any]
 
 def write_runtime_summary(path: Path, manifest: dict[str, Any]) -> None:
     music = manifest.get("music_intelligence") if isinstance(manifest.get("music_intelligence"), dict) else {}
+    preview = manifest.get("preview") if isinstance(manifest.get("preview"), dict) else {}
     lines = [
         "# Autonomous No-Reference Runtime Summary",
         "",
@@ -348,6 +424,19 @@ def write_runtime_summary(path: Path, manifest: dict[str, Any]) -> None:
         f"- escalation_reason: {manifest.get('escalation_reason') or ''}",
         f"- candidate_pool_jsonl: {manifest.get('candidate_pool_jsonl') or ''}",
         f"- release_ready: false",
+        f"- preview_status: {preview.get('preview_status') or ''}",
+        f"- accepted_pair_ready: {str(preview.get('accepted_pair_ready') is True).lower()}",
+        f"- manifest_preview_ready: {str(preview.get('manifest_preview_ready') is True).lower()}",
+        f"- audio_preview_ready: {str(preview.get('audio_preview_ready') is True).lower()}",
+        f"- preview_render_attempted: {str(preview.get('preview_render_attempted') is True).lower()}",
+        f"- preview_render_skipped: {str(preview.get('preview_render_skipped') is True).lower()}",
+        f"- preview_render_failed: {str(preview.get('preview_render_failed') is True).lower()}",
+        f"- rendered_preview_audio_count: {int(preview.get('rendered_preview_audio_count') or 0)}",
+        f"- rendered_vocal_preview_path: {preview.get('rendered_vocal_preview_path') or ''}",
+        f"- rendered_minus_preview_path: {preview.get('rendered_minus_preview_path') or ''}",
+        f"- preview_validation_status: {preview.get('validation_status') or ''}",
+        f"- preview_failure_reason: {preview.get('failure_reason') or ''}",
+        f"- preview_skip_reason: {preview.get('skip_reason') or ''}",
         f"- music_intelligence_manifest_written: {str(music.get('manifest_written') is True).lower()}",
         f"- music_intelligence_analysis_ready_stems_count: {int(music.get('analysis_ready_stems_count') or 0)}",
         f"- music_intelligence_blocked_stems_count: {int(music.get('blocked_stems_count') or 0)}",
@@ -412,8 +501,38 @@ def build_failure_manifest(
     write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["selected_candidates"])
     write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["learned_critic_scores"])
     write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["pair_compatibility"])
-    write_json(output_dir / REQUIRED_OUTPUTS["preview_manifest"], preview_manifest_for(output_status, [], None))
+    preview_payload = preview_manifest_for(output_status, [], None)
+    preview_payload["failure_reason"] = reason
+    write_json(output_dir / REQUIRED_OUTPUTS["preview_manifest"], preview_payload)
+    write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["rendered_preview_audio"])
+    write_json(
+        output_dir / REQUIRED_OUTPUTS["preview_render_contract"],
+        {
+            "contract_version": "no_reference_audio_preview_render_v1",
+            "preview_status": preview_payload["preview_status"],
+            "rendered_preview_audio_count": 0,
+            "failure_reason": reason,
+            **SAFETY_FLAGS,
+        },
+    )
+    (output_dir / REQUIRED_OUTPUTS["preview_render_summary"]).write_text(
+        "\n".join(
+            [
+                "# No-Reference Audio Preview Render Contract",
+                "",
+                f"- preview_status: {preview_payload['preview_status']}",
+                "- audio_preview_ready: false",
+                "- rendered_preview_audio_count: 0",
+                f"- failure_reason: {reason}",
+                "- can_publish_as_result: false",
+                "- release_ready: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     write_empty_jsonl_if_missing(output_dir / REQUIRED_OUTPUTS["post_render_judge"])
+    preview_section = preview_run_section(preview_payload)
     manifest = {
         "input_audio": str(input_audio),
         "output_dir": str(output_dir),
@@ -431,6 +550,7 @@ def build_failure_manifest(
         "allow_shape_normalization": bool(allow_shape_normalization),
         "candidate_diversity_profile": candidate_diversity_profile,
         "candidate_pool_jsonl": str(candidate_pool_jsonl or output_dir / "candidate_pool.jsonl"),
+        "preview": preview_section,
         **(escalation or {}),
         **SAFETY_FLAGS,
     }
@@ -448,6 +568,7 @@ def build_failure_manifest(
                 model_info=model_info,
                 blockers=blockers,
                 music_intelligence=manifest["music_intelligence"],
+                preview=manifest["preview"],
             )
         ],
     )
@@ -479,6 +600,11 @@ def run_pipeline(
     window_seconds: float = 12.0,
     max_windows_per_candidate: int = 5,
     window_step_seconds: float = 0.0,
+    enable_audio_preview_render: bool = True,
+    preview_duration_sec: float = 30.0,
+    preview_start_sec: float | None = None,
+    preview_render_mode: str = "bounded",
+    require_preview_audio_for_preview_ready: bool = True,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     ensure_output_files(output_dir)
@@ -832,17 +958,39 @@ def run_pipeline(
     extra_blockers: list[str] = []
 
     if pair_row["pair_decision"] == "pair_compatible":
-        output_status = "preview_ready"
-        stages.append(stage("create_preview_listen_candidate", "completed", rendered_audio=False))
+        output_status = "accepted_pair_ready"
+        stages.append(stage("create_preview_listen_candidate", "completed", accepted_pair_ready=True))
         stages.append(stage("segment_blend_planner", "skipped_pair_compatible"))
         stages.append(stage("dry_run_render_contract", "skipped_pair_compatible"))
-        stages.append(stage("render_bounded_preview", "skipped_no_segment_render_needed"))
         write_json(output_dir / REQUIRED_OUTPUTS["preview_manifest"], preview_manifest_for(output_status, selected_rows, pair_row))
+        preview_payload = render_audio_preview_contract(
+            run_dir=output_dir,
+            preview_duration_sec=float(preview_duration_sec),
+            preview_start_sec=preview_start_sec,
+            preview_render_mode=preview_render_mode,
+            enable_audio_preview_render=bool(enable_audio_preview_render),
+            require_preview_audio_for_preview_ready=bool(require_preview_audio_for_preview_ready),
+        )
+        output_status = str(preview_payload.get("preview_status") or "manifest_preview_ready")
+        if output_status in {"preview_render_failed", "preview_blocked_safety_contract"}:
+            extra_blockers.append(str(preview_payload.get("failure_reason") or output_status))
+        stages.append(
+            stage(
+                "render_audio_preview_contract",
+                "completed" if preview_payload.get("audio_preview_ready") is True else str(preview_payload.get("preview_status") or "completed"),
+                preview_status=output_status,
+                rendered_preview_audio_count=int(preview_payload.get("rendered_preview_audio_count") or 0),
+            )
+        )
         post_render_rows = [
             {
                 "track_id": selected_rows[0]["track_id"],
-                "post_render_status": "preview_manifest_only_no_render",
-                "requires_post_render_judge": False,
+                "post_render_status": output_status,
+                "requires_post_render_judge": preview_payload.get("audio_preview_ready") is True,
+                "rendered_preview_audio_count": int(preview_payload.get("rendered_preview_audio_count") or 0),
+                "validation_status": str(preview_payload.get("validation_status") or ""),
+                "failure_reason": str(preview_payload.get("failure_reason") or ""),
+                "skip_reason": str(preview_payload.get("skip_reason") or ""),
                 "can_publish_as_result": False,
                 "can_mark_release_ready": False,
                 "release_ready": False,
@@ -908,6 +1056,8 @@ def run_pipeline(
                 stages.append(stage("targeted_post_render_judge", "skipped_no_preview_render"))
 
     blockers = stable_unique(list(pair_row.get("pair_blockers") or []) + extra_blockers)
+    preview_payload = read_json(output_dir / REQUIRED_OUTPUTS["preview_manifest"])
+    preview_section = preview_run_section(preview_payload)
     manifest = {
         "input_audio": str(input_audio),
         "output_dir": str(output_dir),
@@ -925,6 +1075,7 @@ def run_pipeline(
         "candidate_diversity_profile": candidate_diversity_profile,
         "candidate_pool_jsonl": str(candidate_source),
         "artifacts": {name: str(output_dir / filename) for name, filename in REQUIRED_OUTPUTS.items()},
+        "preview": preview_section,
         **escalation,
         **minus_hard_case,
         **SAFETY_FLAGS,
@@ -945,6 +1096,7 @@ def run_pipeline(
                 model_info=model_info,
                 blockers=manifest["safety_blockers"],
                 music_intelligence=manifest["music_intelligence"],
+                preview=manifest["preview"],
             )
         ],
     )
@@ -977,6 +1129,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--window-seconds", type=float, default=12.0)
     parser.add_argument("--max-windows-per-candidate", type=int, default=5)
     parser.add_argument("--window-step-seconds", type=float, default=0.0)
+    parser.add_argument("--enable-audio-preview-render", type=parse_bool, default=True)
+    parser.add_argument("--preview-duration-sec", type=float, default=30.0)
+    parser.add_argument("--preview-start-sec", type=float)
+    parser.add_argument("--preview-render-mode", choices=("bounded", "full"), default="bounded")
+    parser.add_argument("--require-preview-audio-for-preview-ready", type=parse_bool, default=True)
     args = parser.parse_args(argv)
     manifest = run_pipeline(
         input_audio=args.input_audio,
@@ -1000,6 +1157,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         window_seconds=args.window_seconds,
         max_windows_per_candidate=args.max_windows_per_candidate,
         window_step_seconds=args.window_step_seconds,
+        enable_audio_preview_render=args.enable_audio_preview_render,
+        preview_duration_sec=args.preview_duration_sec,
+        preview_start_sec=args.preview_start_sec,
+        preview_render_mode=args.preview_render_mode,
+        require_preview_audio_for_preview_ready=args.require_preview_audio_for_preview_ready,
     )
     print(json.dumps({"output_status": manifest["output_status"], "output_dir": str(args.output_dir), "release_ready": False}, ensure_ascii=False, sort_keys=True))
     return 0

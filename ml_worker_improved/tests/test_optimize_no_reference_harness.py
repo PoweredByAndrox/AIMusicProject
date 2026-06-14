@@ -28,6 +28,14 @@ def make_bundle(tmp_path: Path) -> Path:
                 "track_id": "track-a",
                 "replay_complete": True,
                 "preview_ready_count": 1,
+                "accepted_pair_ready_count": 1,
+                "manifest_preview_ready_count": 1,
+                "audio_preview_ready_count": 1,
+                "rendered_preview_audio_count": 2,
+                "preview_render_failed_count": 0,
+                "preview_render_skipped_count": 0,
+                "preview_validation_failed_count": 0,
+                "preview_contract_missing_count": 0,
                 "minus_accepted_count": 1,
                 "pair_compatible_count": 1,
                 "severe_vocal_bleed_in_minus_count": 0,
@@ -47,6 +55,14 @@ def make_bundle(tmp_path: Path) -> Path:
                 "track_id": "track-b",
                 "replay_complete": True,
                 "preview_ready_count": 0,
+                "accepted_pair_ready_count": 0,
+                "manifest_preview_ready_count": 0,
+                "audio_preview_ready_count": 0,
+                "rendered_preview_audio_count": 0,
+                "preview_render_failed_count": 0,
+                "preview_render_skipped_count": 0,
+                "preview_validation_failed_count": 0,
+                "preview_contract_missing_count": 0,
                 "minus_accepted_count": 0,
                 "pair_compatible_count": 0,
                 "severe_vocal_bleed_in_minus_count": 2,
@@ -67,11 +83,30 @@ def make_bundle(tmp_path: Path) -> Path:
     return bundle_dir
 
 
-def candidate_eval(candidate_id: str, *, complexity: int, per_track_scores: dict[str, float]) -> dict:
+def candidate_eval(
+    candidate_id: str,
+    *,
+    complexity: int,
+    per_track_scores: dict[str, float],
+    manifest_preview_ready_count: int = 1,
+    audio_preview_ready_count: int = 1,
+    rendered_preview_audio_count: int = 2,
+    preview_render_failed_count: int = 0,
+    preview_validation_failed_count: int = 0,
+    preview_contract_missing_count: int = 0,
+) -> dict:
     return {
         "harness_candidate_id": candidate_id,
         "safety_valid": True,
         "preview_ready_count": 1,
+        "accepted_pair_ready_count": 1,
+        "manifest_preview_ready_count": manifest_preview_ready_count,
+        "audio_preview_ready_count": audio_preview_ready_count,
+        "rendered_preview_audio_count": rendered_preview_audio_count,
+        "preview_render_failed_count": preview_render_failed_count,
+        "preview_render_skipped_count": 0,
+        "preview_validation_failed_count": preview_validation_failed_count,
+        "preview_contract_missing_count": preview_contract_missing_count,
         "minus_accepted_count": 1,
         "pair_compatible_count": 1,
         "severe_vocal_bleed_in_minus_count": 0,
@@ -107,6 +142,79 @@ def test_candidate_good_on_one_track_bad_on_another_becomes_specialist() -> None
     assert specialist_rows
     assert specialist_rows[0]["selection_decision"] == "candidate_specialist_route_only"
     assert all(row["harness_candidate_id"] != "specialist" for row in selected["frontier_rows"])
+
+
+def test_pareto_prioritizes_audio_preview_over_manifest_only_preview() -> None:
+    manifest_only = candidate_eval(
+        "manifest-only",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        manifest_preview_ready_count=3,
+        audio_preview_ready_count=0,
+        rendered_preview_audio_count=0,
+    )
+    audio_ready = candidate_eval(
+        "audio-ready",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        manifest_preview_ready_count=1,
+        audio_preview_ready_count=1,
+        rendered_preview_audio_count=2,
+    )
+
+    selected = select_pareto_frontier([manifest_only, audio_ready])
+
+    assert [row["harness_candidate_id"] for row in selected["frontier_rows"]] == ["audio-ready"]
+    rejected = {row["harness_candidate_id"]: row["selection_decision"] for row in selected["rejected_rows"]}
+    assert rejected["manifest-only"] == "candidate_rejected_pareto_dominated"
+
+
+def test_preview_render_failed_is_negative_pareto_metric() -> None:
+    failed = candidate_eval(
+        "render-failed",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        preview_render_failed_count=1,
+    )
+    clean = candidate_eval("clean", complexity=1, per_track_scores={"a": 1.0})
+
+    selected = select_pareto_frontier([failed, clean])
+
+    assert [row["harness_candidate_id"] for row in selected["frontier_rows"]] == ["clean"]
+    rejected = {row["harness_candidate_id"]: row["selection_decision"] for row in selected["rejected_rows"]}
+    assert rejected["render-failed"] == "candidate_rejected_pareto_dominated"
+
+
+def test_preview_contract_missing_is_negative_pareto_metric() -> None:
+    missing_contract = candidate_eval(
+        "contract-missing",
+        complexity=1,
+        per_track_scores={"a": 1.0},
+        preview_contract_missing_count=1,
+    )
+    clean = candidate_eval("clean", complexity=1, per_track_scores={"a": 1.0})
+
+    selected = select_pareto_frontier([missing_contract, clean])
+
+    assert [row["harness_candidate_id"] for row in selected["frontier_rows"]] == ["clean"]
+    rejected = {row["harness_candidate_id"]: row["selection_decision"] for row in selected["rejected_rows"]}
+    assert rejected["contract-missing"] == "candidate_rejected_preview_contract_missing"
+
+
+def test_preview_contract_missing_candidate_cannot_be_promoted_globally() -> None:
+    selected = select_pareto_frontier(
+        [
+            candidate_eval(
+                "only-missing-contract",
+                complexity=1,
+                per_track_scores={"a": 1.0},
+                preview_contract_missing_count=1,
+            )
+        ]
+    )
+
+    assert selected["frontier_rows"] == []
+    assert selected["rejected_rows"][0]["selection_decision"] == "candidate_rejected_preview_contract_missing"
 
 
 def test_deterministic_optimizer_works_without_llm(tmp_path: Path) -> None:

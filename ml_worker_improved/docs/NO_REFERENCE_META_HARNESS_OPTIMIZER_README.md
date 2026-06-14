@@ -14,6 +14,64 @@ model downloads, threshold relaxation, cleanup/debleed/denoise chains, or
 
 ## Replay Bundle
 
+### Preview-contract-complete replay set
+
+For optimizer runs that must exclude ambiguous legacy preview artifacts, first
+filter runtime folders to PREVIEW-1 contract-complete runs:
+
+```bash
+docker compose run --rm ml-worker python tools/filter_no_reference_replay_runs.py \
+  --run-roots \
+    /app/lab_artifacts/autonomous_runs/runtime_6_track_002_minus_hard_case_v3 \
+    /app/lab_artifacts/autonomous_runs/runtime_5_real_track_002_review_fix \
+  --output-dir /app/lab_artifacts/no_reference_meta_harness
+```
+
+Output:
+
+```text
+preview_contract_complete_runs.jsonl
+preview_contract_incomplete_runs.jsonl
+preview_contract_filter_summary.json
+preview_contract_filter_summary.md
+```
+
+A run is complete only when it has `run_manifest.json`,
+`preview_manifest.json`, `preview_render_contract.json`, and either validated
+`rendered_preview_audio.jsonl` rows or an explicit
+`preview_render_skipped`/`preview_render_failed`/`preview_blocked_safety_contract`
+status with a reason. Legacy `preview_ready` without PREVIEW-1 fields is
+incomplete. Any `release_ready=true`, `can_mark_release_ready=true`, or
+`can_publish_as_result=true` anywhere under the run disqualifies it.
+
+Legacy runs can be backfilled from already selected stems only:
+
+```bash
+docker compose run --rm ml-worker python tools/backfill_no_reference_preview_contract.py \
+  --run-dir /app/lab_artifacts/autonomous_runs/<LEGACY_RUN_DIR> \
+  --preview-duration-sec 30 \
+  --preview-render-mode bounded
+```
+
+Backfill writes `preview_manifest.json`, `rendered_preview_audio.jsonl`,
+`preview_render_contract.json`, and `preview_render_summary.md`. It does not
+rerun separator jobs, does not modify `selected_candidates.jsonl`, does not
+overwrite source stems, and keeps `can_publish_as_result=false`,
+`can_mark_release_ready=false`, `melody_transcription_ran=false`,
+`recommendation_index_updated=false`, and `release_ready=false`.
+
+Build the clean replay bundle from the filtered JSONL:
+
+```bash
+docker compose run --rm ml-worker python tools/build_no_reference_replay_bundle.py \
+  --run-roots-from-jsonl /app/lab_artifacts/no_reference_meta_harness/preview_contract_complete_runs.jsonl \
+  --output-dir /app/lab_artifacts/no_reference_meta_harness/replay_bundle_audio_preview_complete_001
+```
+
+The clean bundle is expected to have `preview_contract_missing_count=0`.
+Optimizer candidates should no longer be rejected only because the replay set
+contains missing preview contracts.
+
 Build a bundle from existing autonomous run folders:
 
 ```bash
@@ -26,6 +84,11 @@ docker compose run --rm ml-worker python tools/build_no_reference_replay_bundle.
     /app/lab_artifacts/autonomous_runs/real_track_batch_003 \
   --output-dir /app/lab_artifacts/no_reference_meta_harness/replay_bundle_001
 ```
+
+`--run-roots` may point either to autonomous runtime run folders or to a
+harness validation output root containing `runs/<candidate>/<track>/`.
+The bundle expands those nested runtime folders and records the resolved list in
+`expanded_run_roots`.
 
 Output:
 
@@ -52,6 +115,8 @@ Required replay artifacts:
 - `selected_candidates.jsonl`
 - `pair_compatibility.jsonl`
 - `preview_manifest.json`
+- `rendered_preview_audio.jsonl`
+- `preview_render_contract.json`
 - `post_render_judge.jsonl`
 - `learning_outcome.jsonl`
 
@@ -62,6 +127,7 @@ Optional replay artifacts:
 - `minus_hard_case_router.jsonl`
 - `learned_critic_disagreements.jsonl`
 - `optimizer_mode_specific_result.jsonl`
+- `preview_render_summary.md`
 - per-job `job_manifest.json`
 - per-job `job_progress.jsonl`
 
@@ -70,6 +136,23 @@ Some files may be present but empty, especially `selected_candidates.jsonl`,
 mean a usable result exists.
 
 If required artifacts are missing, the run is marked `replay_incomplete`.
+
+Preview replay fields use PREVIEW-1 semantics:
+
+- `accepted_pair_ready` means a pair was selected/compatible, not listenable
+  audio.
+- `manifest_preview_ready` is informational and never counts as preview
+  success by itself.
+- `audio_preview_ready` requires `preview_render_contract.json`, validated
+  `rendered_preview_audio.jsonl`, and `rendered_preview_audio_count > 0`.
+- legacy runs without `preview_render_contract.json` are marked
+  `preview_contract_missing=true`.
+- `preview_render_failed`, `preview_validation_failed`, and
+  `preview_contract_missing` are negative replay metrics.
+
+Replay events and the bundle manifest keep `can_publish_as_result=false`,
+`can_mark_release_ready=false`, `melody_transcription_ran=false`,
+`recommendation_index_updated=false`, and `release_ready=false`.
 
 ## Harness Candidate
 
@@ -148,18 +231,29 @@ harness_optimizer_summary.json
 harness_optimizer_summary.md
 ```
 
-Pareto selection does not choose by mean score alone. It considers:
+Pareto selection does not choose by mean score alone. Manifest-only preview
+signals are informational and do not count as preview success. It considers:
 
-- maximize `preview_ready_count`
-- maximize `minus_accepted_count`
+- maximize `audio_preview_ready_count`
+- maximize `rendered_preview_audio_count`
+- maximize `accepted_minus_count` / `minus_accepted_count`
 - maximize `pair_compatible_count`
-- minimize severe blockers
+- minimize `preview_render_failed_count`
+- minimize `preview_validation_failed_count`
+- minimize `preview_contract_missing_count`
+- minimize severe blockers (`severe_phase_collapse`,
+  `severe_vocal_bleed_in_minus`)
 - minimize failed runs
 - minimize estimated runtime
 - minimize complexity
 
 A candidate that improves one track but hurts another is recorded as
 `candidate_specialist_route_only` instead of replacing the baseline globally.
+More complete pairs without validated `audio_preview_ready` evidence remains
+inconclusive. Candidates with preview render failures are not promoted by the
+runtime validation layer. A candidate with `preview_contract_missing_count > 0`
+is rejected from global Pareto promotion as
+`candidate_rejected_preview_contract_missing`.
 
 `--use-llm-proposer` is disabled by default. The current implementation is
 deterministic and does not require LLM access.

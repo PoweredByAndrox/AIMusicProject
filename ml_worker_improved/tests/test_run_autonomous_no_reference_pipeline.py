@@ -121,6 +121,9 @@ def test_autonomous_controller_runs_full_mocked_pipeline_from_one_command(tmp_pa
         "learned_critic_scores.jsonl",
         "pair_compatibility.jsonl",
         "preview_manifest.json",
+        "rendered_preview_audio.jsonl",
+        "preview_render_contract.json",
+        "preview_render_summary.md",
         "post_render_judge.jsonl",
         "learning_outcome.jsonl",
         "music_intelligence_input_manifest.json",
@@ -129,6 +132,7 @@ def test_autonomous_controller_runs_full_mocked_pipeline_from_one_command(tmp_pa
         assert (output_dir / name).exists(), name
     manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
     preview = json.loads((output_dir / "preview_manifest.json").read_text(encoding="utf-8"))
+    pair_rows = [json.loads(line) for line in (output_dir / "pair_compatibility.jsonl").read_text(encoding="utf-8").splitlines()]
     music_manifest = json.loads((output_dir / "music_intelligence_input_manifest.json").read_text(encoding="utf-8"))
     runtime_summary = (output_dir / "runtime_summary.md").read_text(encoding="utf-8")
     learning_rows = [json.loads(line) for line in (output_dir / "learning_outcome.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -136,14 +140,25 @@ def test_autonomous_controller_runs_full_mocked_pipeline_from_one_command(tmp_pa
     assert manifest["codex_required_at_runtime"] is False
     assert manifest["manual_phase_execution_required"] is False
     assert manifest["output_status"] in ALLOWED_RUNTIME_STATUSES
-    assert manifest["output_status"] == "preview_ready"
+    assert manifest["output_status"] == "audio_preview_ready"
     assert manifest["release_ready"] is False
     assert manifest["learned_model"]["model_version"] == "unit-test-shadow"
     assert manifest["selected_vocal_candidate"] == "candidate-a"
     assert manifest["selected_minus_candidate"] == "candidate-a"
+    assert pair_rows[0]["runtime_status"] == "accepted_pair_ready"
+    assert manifest["preview"]["audio_preview_ready"] is True
+    assert manifest["preview"]["rendered_preview_audio_count"] == 2
+    assert preview["preview_status"] == "audio_preview_ready"
+    assert preview["accepted_pair_ready"] is True
+    assert preview["manifest_preview_ready"] is True
+    assert preview["audio_preview_ready"] is True
+    assert len(preview["rendered_preview_audio"]) == 2
+    assert all(Path(path).exists() for path in preview["rendered_preview_audio"])
     assert preview["release_ready"] is False
     assert preview["can_mark_release_ready"] is False
     assert preview["can_publish_as_result"] is False
+    assert learning_rows[0]["audio_preview_ready"] is True
+    assert learning_rows[0]["rendered_preview_audio_count"] == 2
     assert learning_rows and learning_rows[0]["verified_outcome"] is False
     assert learning_rows[0]["raw_prediction_only"] is True
     assert manifest["candidate_wave_executed"] is False
@@ -374,9 +389,72 @@ def test_controller_runs_candidate_wave_when_no_pool_is_provided(tmp_path: Path)
 
     assert manifest["candidate_wave_executed"] is True
     assert manifest["candidate_wave_summary"]["complete_pairs"] == 1
-    assert manifest["output_status"] == "preview_ready"
+    assert manifest["output_status"] == "audio_preview_ready"
     assert manifest["release_ready"] is False
     assert pool_rows and pool_rows[0]["target_mode"] == "both"
+
+
+def test_render_disabled_prevents_fake_preview_ready(tmp_path: Path) -> None:
+    output_dir = tmp_path / "run"
+    model_dir = tmp_path / "models"
+    create_shadow_model_dir(model_dir)
+    vocal = sine(440, 2.0)
+    minus = sine(120, 2.0)
+    mix_path = write_wav(tmp_path / "audio" / "song.wav", vocal + minus)
+    vocal_path = write_wav(tmp_path / "audio" / "cand" / "vocal.wav", vocal)
+    minus_path = write_wav(tmp_path / "audio" / "cand" / "minus.wav", minus)
+    write_jsonl(
+        output_dir / "candidate_pool.jsonl",
+        [
+            {
+                "track_id": "song-001",
+                "candidate_id": "candidate-a",
+                "mix_path": mix_path,
+                "vocal_path": vocal_path,
+                "instrumental_path": minus_path,
+                "minus_path": minus_path,
+                "is_complete_pair": True,
+            }
+        ],
+    )
+
+    exit_code = main(
+        [
+            "--input-audio",
+            mix_path,
+            "--output-dir",
+            str(output_dir),
+            "--model-dir",
+            str(model_dir),
+            "--profile",
+            "safe",
+            "--generate-candidates",
+            "false",
+            "--enable-audio-preview-render",
+            "false",
+            "--require-preview-audio-for-preview-ready",
+            "true",
+            "--window-seconds",
+            "0.5",
+            "--max-windows-per-candidate",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    preview = json.loads((output_dir / "preview_manifest.json").read_text(encoding="utf-8"))
+    learning_rows = [json.loads(line) for line in (output_dir / "learning_outcome.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert manifest["output_status"] == "preview_render_skipped"
+    assert manifest["preview"]["preview_render_skipped"] is True
+    assert manifest["preview"]["audio_preview_ready"] is False
+    assert preview["preview_status"] == "preview_render_skipped"
+    assert preview["skip_reason"] == "audio_preview_render_disabled"
+    assert preview["rendered_preview_audio"] == []
+    assert learning_rows[0]["audio_preview_ready"] is False
+    assert learning_rows[0]["preview_status"] == "preview_render_skipped"
+    assert manifest["release_ready"] is False
 
 
 def test_controller_uses_provided_pool_when_generation_is_disabled(tmp_path: Path) -> None:

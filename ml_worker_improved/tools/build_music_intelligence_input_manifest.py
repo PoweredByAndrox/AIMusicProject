@@ -21,7 +21,7 @@ ALLOWED_STEM_TYPES = {
     "unknown",
 }
 
-ANALYSIS_READY_RUNTIME_STATUSES = {"preview_ready", "accepted_for_listen_pack"}
+ANALYSIS_READY_RUNTIME_STATUSES = {"preview_ready", "audio_preview_ready", "accepted_for_listen_pack"}
 
 STEM_PATH_FIELDS: tuple[tuple[str, str, str, str], ...] = (
     ("vocal", "vocal_path", "normalized_vocal_path", "vocal"),

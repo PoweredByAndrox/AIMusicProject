@@ -50,6 +50,7 @@ def make_replay_bundle(tmp_path: Path) -> Path:
                 "severe_vocal_bleed_in_minus_count": 2,
                 "severe_phase_collapse_count": 1,
                 "failed_safety_contract_count": 0,
+                "preview_contract_missing_count": 0,
                 "release_ready_count": 0,
                 "estimated_gpu_jobs": 2,
                 "estimated_runtime_sec": 120,
@@ -186,3 +187,110 @@ def test_valid_harness_candidate_replays_existing_bundle_without_release_ready(t
     assert result["failed_safety_contract_count"] == 0
     assert result["estimated_gpu_jobs"] == 2
     assert (tmp_path / "eval.jsonl").exists()
+
+
+def test_manifest_preview_ready_is_informational_in_replay_score(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    write_json(
+        bundle_dir / "replay_bundle_manifest.json",
+        {"bundle_id": "bundle-a", "run_count": 2, "replay_complete_runs": 2, "replay_incomplete_runs": 0, "release_ready_count": 0},
+    )
+    write_jsonl(
+        bundle_dir / "replay_bundle_events.jsonl",
+        [
+            {
+                "event_type": "run_summary",
+                "track_id": "manifest-only",
+                "replay_complete": True,
+                "accepted_pair_ready_count": 1,
+                "manifest_preview_ready_count": 1,
+                "audio_preview_ready_count": 0,
+                "rendered_preview_audio_count": 0,
+                "preview_render_failed_count": 0,
+                "preview_render_skipped_count": 0,
+                "preview_validation_failed_count": 0,
+                "preview_contract_missing_count": 1,
+                "preview_ready_count": 0,
+                "minus_accepted_count": 1,
+                "pair_compatible_count": 1,
+                "vocal_accepted_count": 1,
+                "severe_vocal_bleed_in_minus_count": 0,
+                "severe_phase_collapse_count": 0,
+                "failed_safety_contract_count": 0,
+                "release_ready_count": 0,
+            },
+            {
+                "event_type": "run_summary",
+                "track_id": "audio-ready",
+                "replay_complete": True,
+                "accepted_pair_ready_count": 1,
+                "manifest_preview_ready_count": 1,
+                "audio_preview_ready_count": 1,
+                "rendered_preview_audio_count": 2,
+                "preview_render_failed_count": 0,
+                "preview_render_skipped_count": 0,
+                "preview_validation_failed_count": 0,
+                "preview_contract_missing_count": 0,
+                "preview_ready_count": 1,
+                "minus_accepted_count": 1,
+                "pair_compatible_count": 1,
+                "vocal_accepted_count": 1,
+                "severe_vocal_bleed_in_minus_count": 0,
+                "severe_phase_collapse_count": 0,
+                "failed_safety_contract_count": 0,
+                "release_ready_count": 0,
+            },
+        ],
+    )
+    write_jsonl(bundle_dir / "replay_bundle_artifacts_index.jsonl", [])
+
+    result = replay_harness_candidate(candidate=default_harness_candidate(), replay_bundle_dir=bundle_dir)
+
+    assert result["accepted_pair_ready_count"] == 2
+    assert result["manifest_preview_ready_count"] == 2
+    assert result["audio_preview_ready_count"] == 1
+    assert result["rendered_preview_audio_count"] == 2
+    assert result["preview_render_failed_count"] == 0
+    assert result["preview_validation_failed_count"] == 0
+    assert result["preview_contract_missing_count"] == 1
+    assert result["preview_ready_count"] == 1
+    assert result["per_track_scores"]["audio-ready"] > result["per_track_scores"]["manifest-only"]
+
+
+def test_preview_contract_missing_penalizes_replay_score(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    write_json(
+        bundle_dir / "replay_bundle_manifest.json",
+        {"bundle_id": "bundle-a", "run_count": 2, "replay_complete_runs": 2, "replay_incomplete_runs": 0, "release_ready_count": 0},
+    )
+    base_row = {
+        "event_type": "run_summary",
+        "replay_complete": True,
+        "accepted_pair_ready_count": 1,
+        "manifest_preview_ready_count": 1,
+        "audio_preview_ready_count": 0,
+        "rendered_preview_audio_count": 0,
+        "preview_render_failed_count": 0,
+        "preview_render_skipped_count": 0,
+        "preview_validation_failed_count": 0,
+        "minus_accepted_count": 1,
+        "pair_compatible_count": 1,
+        "vocal_accepted_count": 1,
+        "severe_vocal_bleed_in_minus_count": 0,
+        "severe_phase_collapse_count": 0,
+        "failed_safety_contract_count": 0,
+        "release_ready_count": 0,
+    }
+    write_jsonl(
+        bundle_dir / "replay_bundle_events.jsonl",
+        [
+            {**base_row, "track_id": "contract-present", "preview_contract_missing_count": 0},
+            {**base_row, "track_id": "contract-missing", "preview_contract_missing_count": 1},
+        ],
+    )
+    write_jsonl(bundle_dir / "replay_bundle_artifacts_index.jsonl", [])
+
+    result = replay_harness_candidate(candidate=default_harness_candidate(), replay_bundle_dir=bundle_dir)
+
+    assert result["preview_contract_missing_count"] == 1
+    assert result["per_track_scores"]["contract-present"] > result["per_track_scores"]["contract-missing"]

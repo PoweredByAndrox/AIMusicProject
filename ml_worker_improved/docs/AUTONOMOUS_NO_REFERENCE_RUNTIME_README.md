@@ -17,6 +17,10 @@ docker compose run --rm ml-worker python tools/run_autonomous_no_reference_pipel
   --candidate-execution-mode auto \
   --allow-shape-normalization true \
   --candidate-diversity-profile safe \
+  --enable-audio-preview-render true \
+  --preview-duration-sec 30 \
+  --preview-render-mode bounded \
+  --require-preview-audio-for-preview-ready true \
   --auto-escalate-profile false \
   --max-candidates 6 \
   --max-candidate-runtime-sec 600 \
@@ -64,6 +68,10 @@ docker compose run --rm ml-worker python tools/run_autonomous_no_reference_pipel
   --candidate-execution-mode auto \
   --allow-shape-normalization true \
   --candidate-diversity-profile balanced \
+  --enable-audio-preview-render true \
+  --preview-duration-sec 30 \
+  --preview-render-mode bounded \
+  --require-preview-audio-for-preview-ready true \
   --auto-escalate-profile false \
   --max-candidates 8 \
   --max-candidate-runtime-sec 1800 \
@@ -134,6 +142,12 @@ still writes the required artifacts.
 - Script blockers are hard overrides.
 - `release_ready` is always false.
 - Original input/candidate files are never overwritten.
+- `preview_ready` is not used as proof that listenable audio exists. Compatible
+  selected pairs first become `accepted_pair_ready`; the controller then writes
+  a strict audio preview render contract. Only validated rendered preview files
+  can set `output_status=audio_preview_ready`.
+- Audio previews are bounded listening/evaluation artifacts only. They are not
+  release-ready and cannot be published as final results.
 - Model manifest/version metadata is recorded in `run_manifest.json`.
 - Local separator jobs use only existing project entrypoints and
   `worker/model_registry.py` entries. Unavailable configs are skipped, not
@@ -149,19 +163,26 @@ still writes the required artifacts.
 6. select best vocal candidate
 7. select best minus candidate
 8. run pair compatibility
-9. if compatible, write preview/listen manifest for the selected existing stems
-10. if incompatible, run segment blend planner
-11. run dry-run render contract for segment plans
-12. render bounded segment-blend preview only when a safe `render_ready`
+9. if compatible, mark selected pair as `accepted_pair_ready`
+10. render bounded vocal/minus audio preview when enabled and safe
+11. write preview render contract artifacts
+12. if incompatible, run segment blend planner
+13. run dry-run render contract for segment plans
+14. render bounded segment-blend preview only when a safe `render_ready`
     contract exists
-13. run targeted post-render judge when preview render exists
-14. write music intelligence input manifest for future analysis hooks
-15. write learning outcome row
-16. write final runtime report
+15. run targeted post-render judge when preview render exists
+16. write music intelligence input manifest for future analysis hooks
+17. write learning outcome row
+18. write final runtime report
 
 Allowed final statuses:
 
-- `preview_ready`
+- `accepted_pair_ready`
+- `manifest_preview_ready`
+- `audio_preview_ready`
+- `preview_render_skipped`
+- `preview_render_failed`
+- `preview_blocked_safety_contract`
 - `accepted_for_listen_pack`
 - `blocked_hard_case`
 - `needs_more_candidates`
@@ -178,6 +199,9 @@ selected_candidates.jsonl
 learned_critic_scores.jsonl
 pair_compatibility.jsonl
 preview_manifest.json
+rendered_preview_audio.jsonl
+preview_render_contract.json
+preview_render_summary.md
 post_render_judge.jsonl
 learning_outcome.jsonl
 music_intelligence_input_manifest.json
@@ -188,6 +212,19 @@ artifacts are written as empty/blocked diagnostics rather than silently omitted.
 The music-intelligence manifest includes accepted and blocked stem provenance,
 but only safe accepted stems can set `analysis_allowed=true`; melody
 transcription and recommendation indexing remain disabled.
+
+Preview render artifacts distinguish selected-pair readiness from actual audio:
+
+- `accepted_pair_ready`: pair compatibility accepted, before audio render.
+- `manifest_preview_ready`: machine-readable preview manifest exists, but no
+  validated audio preview exists.
+- `audio_preview_ready`: bounded vocal/minus preview files were rendered and
+  validated inside the current run directory.
+- `preview_render_skipped`: render was explicitly disabled and the skip reason
+  is recorded.
+- `preview_render_failed`: render was attempted and failed with an exact reason.
+- `preview_blocked_safety_contract`: selected pair or safety contract blocked
+  preview rendering.
 
 Candidate-wave diagnostics are written next to the runtime artifacts:
 

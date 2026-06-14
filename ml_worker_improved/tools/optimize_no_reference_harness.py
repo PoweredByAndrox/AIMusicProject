@@ -21,15 +21,18 @@ from tools.replay_no_reference_harness_candidate import (  # noqa: E402
 
 
 POSITIVE_OBJECTIVES = (
-    "preview_ready_count",
+    "audio_preview_ready_count",
+    "rendered_preview_audio_count",
+    "accepted_minus_count",
     "minus_accepted_count",
     "pair_compatible_count",
-    "vocal_accepted_count",
-    "per_track_floor_score",
 )
 NEGATIVE_OBJECTIVES = (
-    "severe_vocal_bleed_in_minus_count",
+    "preview_render_failed_count",
+    "preview_validation_failed_count",
+    "preview_contract_missing_count",
     "severe_phase_collapse_count",
+    "severe_vocal_bleed_in_minus_count",
     "failed_run_count",
     "timeout_count",
     "incomplete_replay_count",
@@ -114,6 +117,8 @@ def select_pareto_frontier(rows: list[dict[str, Any]], baseline_eval: dict[str, 
         base = {**row}
         if is_safety_rejected(base):
             rejected_rows.append({**base, "selection_decision": "candidate_rejected_safety"})
+        elif metric(base, "preview_contract_missing_count") > 0:
+            rejected_rows.append({**base, "selection_decision": "candidate_rejected_preview_contract_missing"})
         elif is_specialist(base, baseline_eval):
             specialist_rows.append({**base, "selection_decision": "candidate_specialist_route_only"})
         else:
@@ -185,11 +190,17 @@ def write_summary(path: Path, summary: dict[str, Any]) -> None:
         f"- pareto_candidates_selected: {summary.get('pareto_candidates_selected')}",
         f"- rejected_safety_candidates: {summary.get('rejected_safety_candidates')}",
         f"- rejected_complexity_candidates: {summary.get('rejected_complexity_candidates')}",
+        f"- rejected_preview_contract_missing_candidates: {summary.get('rejected_preview_contract_missing_candidates')}",
         f"- specialist_routes_discovered: {summary.get('specialist_routes_discovered')}",
+        f"- best_global_candidate: {summary.get('best_global_candidate') or 'none'}",
         f"- best_baseline_candidate: {summary.get('best_baseline_candidate') or 'none'}",
         f"- best_conditional_specialist_candidate: {summary.get('best_conditional_specialist_candidate') or 'none'}",
-        f"- estimated_preview_ready_gain: {summary.get('estimated_preview_ready_gain')}",
+        f"- estimated_audio_preview_ready_gain: {summary.get('estimated_audio_preview_ready_gain')}",
+        f"- estimated_rendered_preview_audio_gain: {summary.get('estimated_rendered_preview_audio_gain')}",
         f"- estimated_minus_accepted_gain: {summary.get('estimated_minus_accepted_gain')}",
+        f"- preview_render_failed_count: {summary.get('preview_render_failed_count')}",
+        f"- preview_validation_failed_count: {summary.get('preview_validation_failed_count')}",
+        f"- preview_contract_missing_count: {summary.get('preview_contract_missing_count')}",
         f"- severe_blocker_change: {summary.get('severe_blocker_change')}",
         f"- estimated_runtime_change: {summary.get('estimated_runtime_change')}",
         f"- failure_reflections_generated: {summary.get('failure_reflections_generated')}",
@@ -233,7 +244,8 @@ def optimize_harness(
     best_baseline = next((row for row in selection["frontier_rows"] if row.get("mutation_type") == "baseline_keep"), None)
     best_specialist = selection["specialist_rows"][0] if selection["specialist_rows"] else None
     baseline_candidate_id = str((baseline_eval or {}).get("harness_candidate_id") or "")
-    base_preview = int((baseline_eval or {}).get("preview_ready_count") or 0)
+    base_audio_preview = int((baseline_eval or {}).get("audio_preview_ready_count") or 0)
+    base_rendered_preview = int((baseline_eval or {}).get("rendered_preview_audio_count") or 0)
     base_minus = int((baseline_eval or {}).get("minus_accepted_count") or 0)
     best_frontier = selection["frontier_rows"][0] if selection["frontier_rows"] else (baseline_eval or {})
     severe_base = int((baseline_eval or {}).get("severe_vocal_bleed_in_minus_count") or 0) + int((baseline_eval or {}).get("severe_phase_collapse_count") or 0)
@@ -248,12 +260,21 @@ def optimize_harness(
         "pareto_candidates_selected": len(selection["frontier_rows"]),
         "rejected_safety_candidates": sum(1 for row in selection["rejected_rows"] if row.get("selection_decision") == "candidate_rejected_safety"),
         "rejected_complexity_candidates": sum(1 for row in selection["rejected_rows"] if row.get("selection_decision") == "candidate_rejected_complexity"),
+        "rejected_preview_contract_missing_candidates": sum(
+            1 for row in selection["rejected_rows"] if row.get("selection_decision") == "candidate_rejected_preview_contract_missing"
+        ),
         "specialist_routes_discovered": len(selection["specialist_rows"]),
         "best_baseline_candidate": str(best_baseline.get("harness_candidate_id")) if best_baseline else baseline_candidate_id,
+        "best_global_candidate": str(selection["frontier_rows"][0].get("harness_candidate_id")) if selection["frontier_rows"] else "",
         "baseline_selection_decision": "baseline_keep" if best_baseline else "baseline_pareto_dominated",
         "best_conditional_specialist_candidate": str(best_specialist.get("harness_candidate_id")) if best_specialist else "",
-        "estimated_preview_ready_gain": int(best_frontier.get("preview_ready_count") or 0) - base_preview,
+        "estimated_audio_preview_ready_gain": int(best_frontier.get("audio_preview_ready_count") or 0) - base_audio_preview,
+        "estimated_preview_ready_gain": int(best_frontier.get("audio_preview_ready_count") or 0) - base_audio_preview,
+        "estimated_rendered_preview_audio_gain": int(best_frontier.get("rendered_preview_audio_count") or 0) - base_rendered_preview,
         "estimated_minus_accepted_gain": int(best_frontier.get("minus_accepted_count") or 0) - base_minus,
+        "preview_render_failed_count": sum(int(row.get("preview_render_failed_count") or 0) for row in eval_rows),
+        "preview_validation_failed_count": sum(int(row.get("preview_validation_failed_count") or 0) for row in eval_rows),
+        "preview_contract_missing_count": sum(int(row.get("preview_contract_missing_count") or 0) for row in eval_rows),
         "severe_blocker_change": severe_best - severe_base,
         "estimated_runtime_change": int(best_frontier.get("estimated_runtime_sec") or 0) - int((baseline_eval or {}).get("estimated_runtime_sec") or 0),
         "release_ready_count": sum(int(row.get("release_ready_count") or 0) for row in eval_rows),
@@ -270,6 +291,8 @@ def optimize_harness(
         "model_registry_edited": False,
         "thresholds_relaxed": False,
         "cleanup_routes_added": False,
+        "melody_transcription_ran": False,
+        "recommendation_index_updated": False,
         "release_ready": False,
     }
     if use_llm_proposer:

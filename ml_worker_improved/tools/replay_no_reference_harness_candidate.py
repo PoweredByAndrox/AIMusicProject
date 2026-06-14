@@ -389,10 +389,16 @@ def numeric(row: dict[str, Any], key: str) -> float:
 
 def track_score(row: dict[str, Any]) -> float:
     return (
-        numeric(row, "preview_ready_count") * 4.0
+        numeric(row, "audio_preview_ready_count") * 6.0
+        + numeric(row, "rendered_preview_audio_count") * 1.5
+        + numeric(row, "accepted_pair_ready_count") * 0.5
         + numeric(row, "minus_accepted_count") * 3.0
         + numeric(row, "pair_compatible_count") * 3.0
         + numeric(row, "vocal_accepted_count")
+        - numeric(row, "preview_render_failed_count") * 6.0
+        - numeric(row, "preview_validation_failed_count") * 5.0
+        - numeric(row, "preview_contract_missing_count") * 4.0
+        - numeric(row, "preview_render_skipped_count") * 1.0
         - numeric(row, "severe_vocal_bleed_in_minus_count") * 2.0
         - numeric(row, "severe_phase_collapse_count") * 2.0
         - numeric(row, "failed_safety_contract_count") * 5.0
@@ -419,6 +425,18 @@ def replay_harness_candidate(*, candidate: dict[str, Any], replay_bundle_dir: Pa
     validation = validate_harness_candidate(candidate)
     run_rows = run_summary_events(replay_bundle_dir)
     per_track_scores = {str(row.get("track_id") or row.get("run_root") or index): track_score(row) for index, row in enumerate(run_rows)}
+    accepted_pair_ready_count = int(
+        sum(numeric(row, "accepted_pair_ready_count") if "accepted_pair_ready_count" in row else numeric(row, "accepted_pair_count") for row in run_rows)
+    )
+    manifest_preview_ready_count = int(
+        sum(numeric(row, "manifest_preview_ready_count") if "manifest_preview_ready_count" in row else numeric(row, "preview_ready_count") for row in run_rows)
+    )
+    audio_preview_ready_count = int(sum(numeric(row, "audio_preview_ready_count") for row in run_rows))
+    rendered_preview_audio_count = int(sum(numeric(row, "rendered_preview_audio_count") for row in run_rows))
+    preview_render_failed_count = int(sum(numeric(row, "preview_render_failed_count") for row in run_rows))
+    preview_render_skipped_count = int(sum(numeric(row, "preview_render_skipped_count") for row in run_rows))
+    preview_validation_failed_count = int(sum(numeric(row, "preview_validation_failed_count") for row in run_rows))
+    preview_contract_missing_count = int(sum(numeric(row, "preview_contract_missing_count") for row in run_rows))
     aggregate = {
         "schema_version": 1,
         "harness_candidate_id": str(candidate.get("harness_candidate_id") or ""),
@@ -428,7 +446,15 @@ def replay_harness_candidate(*, candidate: dict[str, Any], replay_bundle_dir: Pa
         "validation_rejection_reasons": validation["rejection_reasons"],
         "run_count": len(run_rows),
         "accepted_pair_count": int(sum(numeric(row, "accepted_pair_count") for row in run_rows)),
-        "preview_ready_count": int(sum(numeric(row, "preview_ready_count") for row in run_rows)),
+        "accepted_pair_ready_count": accepted_pair_ready_count,
+        "manifest_preview_ready_count": manifest_preview_ready_count,
+        "audio_preview_ready_count": audio_preview_ready_count,
+        "rendered_preview_audio_count": rendered_preview_audio_count,
+        "preview_render_failed_count": preview_render_failed_count,
+        "preview_render_skipped_count": preview_render_skipped_count,
+        "preview_validation_failed_count": preview_validation_failed_count,
+        "preview_contract_missing_count": preview_contract_missing_count,
+        "preview_ready_count": audio_preview_ready_count,
         "final_safe_candidate_count": int(sum(numeric(row, "final_safe_candidate_count") for row in run_rows)),
         "pair_compatible_count": int(sum(numeric(row, "pair_compatible_count") for row in run_rows)),
         "minus_accepted_count": int(sum(numeric(row, "minus_accepted_count") for row in run_rows)),
