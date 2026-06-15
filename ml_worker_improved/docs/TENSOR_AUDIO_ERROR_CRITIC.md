@@ -164,6 +164,63 @@ critic, change runtime gates, or mark anything `release_ready`.
 The builder fails closed if shadow analysis safety flags are violated or if
 input rows do not match the expected hard-negative/false-reject provenance.
 
+## Compare Shadow Variants on Locked Eval
+
+R1F compares tensor critic variants only on the EVAL-1 locked split and its
+locked hard-case holdout. The comparator is decision/report only: it does not
+train, promote a model, change runtime gates, train separator weights, train a
+repair adapter, or mark `release_ready`.
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/compare_tensor_audio_error_critic_variants.py \
+  --locked-eval-dir /app/lab_artifacts/audio_error_grounding/leak_safe_eval_001 \
+  --baseline-model-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_001 \
+  --baseline-scores-dir /app/lab_artifacts/audio_error_critic/tensor_r1_shadow_scores_001 \
+  --baseline-analysis-dir /app/lab_artifacts/audio_error_critic/tensor_r1_shadow_analysis_001 \
+  --candidate-model-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_002_mining_weighted \
+  --candidate-scores-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_002_mining_weighted_scores \
+  --candidate-analysis-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_002_mining_weighted_analysis \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_variant_decision_001
+```
+
+Outputs:
+
+- `tensor_audio_error_critic_variant_comparison.json`
+- `tensor_audio_error_critic_variant_comparison.jsonl`
+- `tensor_audio_error_critic_decision_manifest.json`
+- `tensor_audio_error_critic_decision_summary.md`
+
+The comparison records AUROC, accuracy, hard-negative count, false-reject
+count, false-accept rate, false-reject rate, accept coverage, hard-case holdout
+metrics, per-stem metrics, per-route metrics, per-track metrics, calibration
+status, mining rows used, and locked-split contamination status.
+Decision metrics are computed from locked eval rows only (`dev`/`test`);
+`train` score rows and full shadow-analysis counts are retained as audit
+metadata and are not allowed to drive the variant decision.
+
+Decision values are intentionally limited to:
+
+- `keep_as_specialist_shadow_model`
+- `mine_next_dataset_slice`
+- `candidate_rejected_runtime`
+
+`promote` is not a valid R1F decision. A variant with hard-negative or
+false-reject improvements but no hard-case holdout improvement remains shadow
+evidence and should feed the next locked mining slice instead of changing
+runtime gates.
+
+Validate the decision artifact:
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_error_critic_decision.py \
+  --decision-dir /app/lab_artifacts/audio_error_critic/tensor_r1_variant_decision_001
+```
+
+The validator fails if `release_ready=true`, runtime gates changed, separator
+or repair-adapter training started, a non-locked split was used, dev/test
+mining rows were used for training, the decision attempts promotion, or
+hard-case holdout metrics are missing.
+
 ## Contract
 
 `tensor_maps_required=true` and `scalar_fallback_used=false` are hard contract fields.
