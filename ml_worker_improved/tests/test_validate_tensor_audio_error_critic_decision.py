@@ -108,6 +108,36 @@ def test_validator_rejects_promote_and_release_ready(tmp_path: Path) -> None:
     assert "release_ready_true" in result["errors"]
 
 
+def test_hard_negative_decision_never_promotes(tmp_path: Path) -> None:
+    from tools.validate_tensor_audio_error_critic_decision import validate_tensor_audio_error_critic_decision
+
+    decision_dir = write_decision_dir(
+        tmp_path,
+        decision=safe_decision_payload(decision="promote", promotion_allowed=True),
+    )
+
+    result = validate_tensor_audio_error_critic_decision(decision_dir)
+
+    assert result["ok"] is False
+    assert "promotion_decision_not_allowed" in result["errors"]
+
+
+def test_hard_negative_decision_requires_hardcase_metrics(tmp_path: Path) -> None:
+    from tools.validate_tensor_audio_error_critic_decision import validate_tensor_audio_error_critic_decision
+
+    decision_dir = write_decision_dir(
+        tmp_path,
+        decision=safe_decision_payload(hardcase_holdout={}),
+        comparison=safe_comparison_payload(delta={}),
+    )
+
+    result = validate_tensor_audio_error_critic_decision(decision_dir)
+
+    assert result["ok"] is False
+    assert "missing_decision_hardcase_holdout_metrics" in result["errors"]
+    assert "missing_comparison_hardcase_holdout_metrics" in result["errors"]
+
+
 def test_validator_rejects_non_locked_split_and_missing_hardcase(tmp_path: Path) -> None:
     from tools.validate_tensor_audio_error_critic_decision import validate_tensor_audio_error_critic_decision
 

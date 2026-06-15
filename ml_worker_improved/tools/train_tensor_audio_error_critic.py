@@ -47,6 +47,7 @@ MINING_TRAINING_CANDIDATES_FILE = "tensor_audio_error_training_candidates.jsonl"
 TRAIN_ONLY_MINING_BUNDLE_MANIFEST_FILE = "tensor_audio_error_train_only_mining_bundle_manifest.json"
 TRAIN_ONLY_MINING_TRAINING_CANDIDATES_FILE = "tensor_audio_error_train_only_training_candidates.jsonl"
 LOCKED_MINING_SLICE_MANIFEST_FILE = "tensor_audio_error_locked_mining_slice_manifest.json"
+HARD_NEGATIVE_HARVEST_MANIFEST_FILE = "tensor_audio_error_train_hard_negative_harvest_manifest.json"
 FORBIDDEN_MINING_TRUE_FLAGS = {
     "release_ready",
     "can_publish_as_result",
@@ -260,6 +261,8 @@ def validate_train_only_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dic
 def validate_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if (mining_bundle_dir / LOCKED_MINING_SLICE_MANIFEST_FILE).exists():
         raise ValueError("unsafe_mining_bundle:locked_eval_mining_slice_not_training_bundle")
+    if (mining_bundle_dir / HARD_NEGATIVE_HARVEST_MANIFEST_FILE).exists():
+        raise ValueError("unsafe_mining_bundle:hard_negative_harvest_not_training_bundle")
     if (mining_bundle_dir / TRAIN_ONLY_MINING_BUNDLE_MANIFEST_FILE).exists():
         return validate_train_only_mining_bundle(mining_bundle_dir)
     if (mining_bundle_dir / MINING_BUNDLE_MANIFEST_FILE).exists():

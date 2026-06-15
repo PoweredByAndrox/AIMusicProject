@@ -361,6 +361,119 @@ The resulting model manifest must record
 `hardcase_rows_used_for_training=false`, `shadow_only=true`, and
 `release_ready=false`.
 
+## Audit Train Negative Gap
+
+R1L audits the fail-closed case where R1I produced train-safe positive analogs
+but no usable train-safe negatives. It is artifact-only and never trains a
+critic, updates runtime gates, or marks `release_ready`.
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/audit_tensor_audio_error_train_negative_gap.py \
+  --tensor-dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --split-dir /app/lab_artifacts/audio_error_grounding/leak_safe_eval_001 \
+  --request-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1h_train_safe_request \
+  --bundle-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1i_train_only_mining_bundle \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1l_negative_gap_audit
+```
+
+Outputs:
+
+- `tensor_audio_error_train_negative_gap_audit.json`
+- `tensor_audio_error_train_negative_gap_rows.jsonl`
+- `tensor_audio_error_train_negative_gap_summary.md`
+
+The audit distinguishes absent negatives, missing tensor maps, leakage
+exclusions, one-class train labels, and a filter/request mismatch. In the
+R1H/R1I flow, R1I can block because train-safe negatives are missing from the
+request outcome even when the tensor dataset still contains some train negative
+rows.
+
+## Harvest Train-Safe Hard Negatives
+
+R1M may only emit hard-negative candidate rows from the `train` split. The
+harvest artifact is not a training bundle and the trainer rejects it directly.
+Source A uses existing train split tensor rows with label `0`, `train_allowed`
+true, tensor maps present, no hard-case holdout flag, and no locked-eval flag.
+Source B train-only generation remains blocked unless a safe train-only
+generation route exists.
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/harvest_tensor_audio_error_train_hard_negatives.py \
+  --negative-gap-audit-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1l_negative_gap_audit \
+  --tensor-dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --split-dir /app/lab_artifacts/audio_error_grounding/leak_safe_eval_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1m_train_hard_negative_harvest
+```
+
+Validate:
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_error_train_hard_negative_harvest.py \
+  --harvest-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1m_train_hard_negative_harvest
+```
+
+The validator fails if any row is not `split=train`, if a row is locked eval or
+hard-case holdout, if `true_label` is not `0`, if tensor maps are missing, or
+if any release/runtime/training safety flag is true.
+
+## Build Balanced Train-Only Bundle
+
+R1N merges the existing R1I positive analog bundle with the R1M hard-negative
+harvest into the same train-only bundle schema accepted by the trainer. It must
+contain both positive and negative train rows before R1O can run.
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/build_tensor_audio_error_balanced_train_only_bundle.py \
+  --request-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1h_train_safe_request \
+  --positive-bundle-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1i_train_only_mining_bundle \
+  --hard-negative-harvest-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1m_train_hard_negative_harvest \
+  --tensor-dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --split-dir /app/lab_artifacts/audio_error_grounding/leak_safe_eval_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1n_train_only_balanced_bundle
+```
+
+Proceed to R1O only when:
+
+- `bundle_status=train_only_candidate_only`
+- `candidate_rows_total >= 40`
+- `positive_rows >= 10`
+- `negative_rows >= 10`
+- `hard_negative_rows >= 10`
+- validation `ok=true`
+
+Otherwise the flow writes a blocked report and no model artifacts should be
+created.
+
+## Train Hard-Negative Weighted Tensor Critic
+
+R1O may train only from a usable R1N train-only bundle. It must not consume the
+R1M harvest directory directly, the R1G locked mining slice, dev/test rows, or
+hard-case holdout rows as fitting data.
+
+```bash
+docker compose run --rm ml-worker python tools/train_tensor_audio_error_critic.py \
+  --dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1o_model_004_hard_negative_weighted \
+  --mining-bundle-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1n_train_only_balanced_bundle \
+  --mining-weight-multiplier 3.0
+```
+
+If R1N is blocked, R1O must not run.
+
+## Evaluate Hard-Negative Variant
+
+R1P is locked-eval only and never promotes. It can compare a trained R1O shadow
+candidate against baseline and previous mining-weighted variants, but allowed
+decisions remain limited to:
+
+- `candidate_rejected_runtime`
+- `keep_as_specialist_shadow_model`
+- `mine_next_dataset_slice`
+- `blocked_no_train_safe_hard_negatives`
+
+It must not change runtime gates, edit the model registry, train separator
+weights, train a repair adapter, publish audio, or mark `release_ready`.
+
 ## Evaluate Train-Safe Weighted Variant
 
 R1K evaluates any R1J model only on the EVAL-1 locked split and hard-case

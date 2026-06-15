@@ -177,6 +177,24 @@ def write_train_only_mining_bundle(tmp_path: Path, rows: list[dict], *, manifest
     return bundle_dir
 
 
+def write_hard_negative_harvest_dir(tmp_path: Path) -> Path:
+    harvest_dir = tmp_path / "hard_negative_harvest"
+    write_json(
+        harvest_dir / "tensor_audio_error_train_hard_negative_harvest_manifest.json",
+        {
+            "schema": "tensor_audio_error_train_hard_negative_harvest.v1",
+            "harvest_status": "harvest_ready",
+            "candidate_rows_total": 1,
+            "negative_rows": 1,
+            "hard_negative_rows": 1,
+            "training_started": False,
+            "release_ready": False,
+        },
+    )
+    write_jsonl(harvest_dir / "tensor_audio_error_train_hard_negative_candidates.jsonl", [])
+    return harvest_dir
+
+
 def test_train_tensor_critic_uses_npz_maps_and_writes_localization(tmp_path: Path) -> None:
     from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
 
@@ -334,6 +352,65 @@ def test_trainer_accepts_train_only_mining_bundle_schema(tmp_path: Path) -> None
     assert manifest["locked_eval_rows_used_for_training"] is False
     assert manifest["hardcase_rows_used_for_training"] is False
     assert manifest["release_ready"] is False
+
+
+def test_trainer_accepts_balanced_train_only_bundle(tmp_path: Path) -> None:
+    from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
+
+    rows = [
+        row(tmp_path, 0, split="train", label=0),
+        row(tmp_path, 1, split="train", label=1),
+        row(tmp_path, 2, split="train", label=0, stem="vocal"),
+        row(tmp_path, 3, split="train", label=1, stem="vocal"),
+        row(tmp_path, 4, split="test", label=0),
+        row(tmp_path, 5, split="test", label=1),
+    ]
+    dataset_dir = write_tensor_dataset(tmp_path, rows)
+    mining_bundle_dir = write_train_only_mining_bundle(
+        tmp_path,
+        [rows[0], rows[1]],
+        manifest_overrides={
+            "source_hard_negative_harvest_dir": str(tmp_path / "harvest"),
+            "hard_negative_rows": 1,
+        },
+    )
+
+    manifest = train_tensor_audio_error_critic(
+        dataset_dir=dataset_dir,
+        output_dir=tmp_path / "model",
+        min_train_rows=4,
+        mining_bundle_dir=mining_bundle_dir,
+        mining_weight_multiplier=3.0,
+    )
+
+    assert manifest["training_completed"] is True
+    assert manifest["mining_bundle_schema"] == "tensor_audio_error_train_only_mining_bundle.v1"
+    assert manifest["mining_non_train_rows_ignored"] == 0
+    assert manifest["release_ready"] is False
+
+
+def test_trainer_rejects_harvest_dir_directly(tmp_path: Path) -> None:
+    from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
+
+    rows = [
+        row(tmp_path, 0, split="train", label=0),
+        row(tmp_path, 1, split="train", label=1),
+        row(tmp_path, 2, split="train", label=0, stem="vocal"),
+        row(tmp_path, 3, split="train", label=1, stem="vocal"),
+    ]
+    dataset_dir = write_tensor_dataset(tmp_path, rows)
+
+    try:
+        train_tensor_audio_error_critic(
+            dataset_dir=dataset_dir,
+            output_dir=tmp_path / "model",
+            min_train_rows=4,
+            mining_bundle_dir=write_hard_negative_harvest_dir(tmp_path),
+        )
+    except ValueError as exc:
+        assert "hard_negative_harvest_not_training_bundle" in str(exc)
+    else:
+        raise AssertionError("hard-negative harvest dir was not rejected for training")
 
 
 def test_trainer_rejects_locked_eval_mining_bundle_for_training(tmp_path: Path) -> None:
