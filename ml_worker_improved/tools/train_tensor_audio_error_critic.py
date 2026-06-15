@@ -204,8 +204,8 @@ def validate_train_only_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dic
         errors.append("dev_test_mining_rows_used_for_training")
     if manifest.get("locked_eval_rows_used_for_training") is True:
         errors.append("locked_eval_rows_used_for_training")
-    if manifest.get("hardcase_rows_used_for_training") is True:
-        errors.append("hardcase_rows_used_for_training")
+    if manifest.get("hardcase_holdout_rows_used_for_training") is True:
+        errors.append("hardcase_holdout_rows_used_for_training")
     if has_forbidden_true(manifest):
         errors.append("train_only_mining_bundle_forbidden_true_flag")
     if int(manifest.get("candidate_rows_total") or 0) != len(rows):
@@ -227,8 +227,8 @@ def validate_train_only_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dic
             errors.append(f"train_only_mining_row_split_not_train:{index}")
         if row.get("train_allowed") is not True:
             errors.append(f"train_only_mining_row_train_allowed_not_true:{index}")
-        if row.get("hardcase_holdout") is True or row.get("hardcase") is True:
-            errors.append(f"train_only_mining_row_hardcase_true:{index}")
+        if row.get("hardcase_holdout") is True:
+            errors.append(f"train_only_mining_row_hardcase_holdout_true:{index}")
         if row.get("locked_eval_row") is True:
             errors.append(f"train_only_mining_row_locked_eval_true:{index}")
         if row.get("scalar_features_used") is True:
@@ -255,6 +255,8 @@ def validate_train_only_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dic
         "dev_test_mining_rows_used_for_training": False,
         "locked_eval_rows_used_for_training": False,
         "hardcase_rows_used_for_training": False,
+        "hardcase_train_rows_used_for_training": any(row.get("hardcase") is True for row in rows),
+        "hardcase_holdout_rows_used_for_training": False,
     }
 
 

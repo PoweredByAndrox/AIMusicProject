@@ -301,8 +301,10 @@ docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_e
 ## Build Train-Only Mining Bundle
 
 R1I mines only train-safe analog rows from the locked tensor dataset. It rejects
-`dev`, `test`, hard-case, locked-eval, release-ready, scalar-fallback, missing
-tensor-map, and leakage-key-overlap rows. Leakage overlap includes
+`dev`, `test`, hard-case holdout, locked-eval, release-ready, scalar-fallback,
+missing tensor-map, and leakage-key-overlap rows. Non-holdout hard negatives
+from the locked train split may remain trainable when `train_allowed=true`.
+Leakage overlap includes
 `row_uid`, `canonical_row_key`, `candidate_id`, `track_id`, and available audio
 hash/fingerprint keys. If the corpus cannot satisfy the minimum two-class train
 contract, it writes
@@ -327,7 +329,7 @@ Default proceed thresholds are 40 total train rows, 10 positive rows, and
 10 negative rows. Usable bundles keep
 `dev_test_mining_rows_used_for_training=false`,
 `locked_eval_rows_used_for_training=false`,
-`hardcase_rows_used_for_training=false`, `runtime_gates_changed=false`, and
+`hardcase_holdout_rows_used_for_training=false`, `runtime_gates_changed=false`, and
 `release_ready=false`.
 
 Validate:
@@ -358,7 +360,7 @@ The resulting model manifest must record
 `mining_non_train_rows_ignored=0`,
 `dev_test_mining_rows_used_for_training=false`,
 `locked_eval_rows_used_for_training=false`,
-`hardcase_rows_used_for_training=false`, `shadow_only=true`, and
+`hardcase_holdout_rows_used_for_training=false`, `shadow_only=true`, and
 `release_ready=false`.
 
 ## Audit Train Negative Gap
@@ -394,6 +396,9 @@ R1M may only emit hard-negative candidate rows from the `train` split. The
 harvest artifact is not a training bundle and the trainer rejects it directly.
 Source A uses existing train split tensor rows with label `0`, `train_allowed`
 true, tensor maps present, no hard-case holdout flag, and no locked-eval flag.
+Rows with `hardcase=true` are allowed only when they are not holdout rows; the
+harvest records this with `hardcase_train_rows_used=true` and keeps
+`hardcase_holdout_rows_used=false`.
 Source B train-only generation remains blocked unless a safe train-only
 generation route exists.
 
@@ -414,7 +419,9 @@ docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_e
 
 The validator fails if any row is not `split=train`, if a row is locked eval or
 hard-case holdout, if `true_label` is not `0`, if tensor maps are missing, or
-if any release/runtime/training safety flag is true.
+if any release/runtime/training safety flag is true. It does not reject
+non-holdout hardcase train rows because EVAL-1 keeps only the locked hard-case
+holdout unavailable for training.
 
 ## Build Balanced Train-Only Bundle
 
@@ -459,6 +466,22 @@ docker compose run --rm ml-worker python tools/train_tensor_audio_error_critic.p
 ```
 
 If R1N is blocked, R1O must not run.
+
+Latest non-holdout hardcase harvest rerun:
+
+`/app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_002_non_holdout_hardcase`
+
+Result:
+
+- R1L `train_safe_negative_rows_total=75`
+- R1M `hard_negative_rows=75`, `hardcase_train_rows_used=true`
+- R1N `bundle_status=train_only_candidate_only`
+- R1N `candidate_rows_total=552`, `positive_rows=477`, `negative_rows=75`
+- `training_allowed=true`
+- `dev_test_mining_rows_used_for_training=false`
+- `locked_eval_rows_used_for_training=false`
+- `hardcase_holdout_rows_used_for_training=false`
+- `release_ready=false`
 
 ## Evaluate Hard-Negative Variant
 

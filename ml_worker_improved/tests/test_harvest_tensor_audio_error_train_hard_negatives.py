@@ -32,7 +32,15 @@ def write_map(path: Path, value: float) -> None:
     np.savez_compressed(path, **{name: np.full((4, 4), value, dtype=np.float32) for name in MAP_NAMES})
 
 
-def dataset_row(tmp_path: Path, index: int, *, label: int = 0, split: str = "train") -> dict:
+def dataset_row(
+    tmp_path: Path,
+    index: int,
+    *,
+    label: int = 0,
+    split: str = "train",
+    hardcase: bool = False,
+    hardcase_holdout: bool = False,
+) -> dict:
     tensor_path = tmp_path / "maps" / f"row-{index}.npz"
     write_map(tensor_path, 0.2 + index)
     return {
@@ -48,8 +56,8 @@ def dataset_row(tmp_path: Path, index: int, *, label: int = 0, split: str = "tra
         "split": split,
         "label": label,
         "train_allowed": split == "train",
-        "hardcase": False,
-        "hardcase_holdout": False,
+        "hardcase": hardcase,
+        "hardcase_holdout": hardcase_holdout,
         "release_ready": False,
         "scalar_features_used": False,
         "tensor_map_path": str(tensor_path),
@@ -121,3 +129,37 @@ def test_hard_negative_harvest_blocks_without_safe_train_negative_source(tmp_pat
     assert manifest["harvest_status"] == "blocked_no_train_negative_source"
     assert manifest["negative_rows"] == 0
     assert manifest["training_started"] is False
+
+
+def test_hard_negative_harvest_includes_non_holdout_hardcase_train_rows(tmp_path: Path) -> None:
+    from tools.harvest_tensor_audio_error_train_hard_negatives import harvest_tensor_audio_error_train_hard_negatives
+
+    manifest = harvest_tensor_audio_error_train_hard_negatives(
+        negative_gap_audit_dir=write_audit(tmp_path),
+        tensor_dataset_dir=write_dataset(
+            tmp_path,
+            [
+                dataset_row(tmp_path, 0, label=0, hardcase=True, hardcase_holdout=False),
+                dataset_row(tmp_path, 1, label=0, hardcase=True, hardcase_holdout=True),
+                dataset_row(tmp_path, 2, label=1),
+            ],
+        ),
+        split_dir=write_split(tmp_path),
+        output_dir=tmp_path / "harvest",
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "harvest" / "tensor_audio_error_train_hard_negative_candidates.jsonl").read_text().splitlines()
+    ]
+    skipped = [
+        json.loads(line)
+        for line in (tmp_path / "harvest" / "tensor_audio_error_train_hard_negative_skipped.jsonl").read_text().splitlines()
+    ]
+    assert manifest["harvest_status"] == "harvest_ready"
+    assert manifest["negative_rows"] == 1
+    assert manifest["hardcase_train_rows_used"] is True
+    assert manifest["hardcase_holdout_rows_used"] is False
+    assert rows[0]["hardcase"] is True
+    assert rows[0]["hardcase_holdout"] is False
+    assert {row["skip_reason"] for row in skipped} == {"hardcase_holdout_true"}

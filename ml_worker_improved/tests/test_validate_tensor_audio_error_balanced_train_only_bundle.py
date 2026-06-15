@@ -109,3 +109,13 @@ def test_balanced_bundle_validator_rejects_usable_without_negative_threshold(tmp
 
     assert result["ok"] is False
     assert "usable_bundle_negative_rows_below_minimum" in result["errors"]
+
+
+def test_balanced_bundle_validator_allows_non_holdout_hardcase_rows(tmp_path: Path) -> None:
+    from tools.validate_tensor_audio_error_balanced_train_only_bundle import validate_tensor_audio_error_balanced_train_only_bundle
+
+    result = validate_tensor_audio_error_balanced_train_only_bundle(
+        write_bundle(tmp_path, row_overrides={"hardcase": True, "hardcase_holdout": False})
+    )
+
+    assert result["ok"] is True

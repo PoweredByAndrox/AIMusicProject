@@ -222,7 +222,7 @@ def eligible_train_row(row: dict[str, Any], blocked_keys: set[str]) -> tuple[boo
         return False, "split_not_train"
     if row.get("train_allowed") is not True:
         return False, "train_allowed_not_true"
-    if row.get("hardcase_holdout") is True or row.get("hardcase") is True:
+    if row.get("hardcase_holdout") is True:
         return False, "hardcase_holdout_true"
     if row.get("release_ready") is True:
         return False, "release_ready_true"
@@ -267,6 +267,7 @@ def candidate_row(source_row: dict[str, Any], requirement: dict[str, Any], *, re
         "stem_type": str(source_row.get("stem_type") or "unknown"),
         "split": "train",
         "train_allowed": True,
+        "hardcase": source_row.get("hardcase") is True,
         "hardcase_holdout": False,
         "locked_eval_row": False,
         "tensor_map_path": str(source_row.get("tensor_map_path") or ""),
@@ -326,7 +327,8 @@ def write_summary(path: Path, manifest: dict[str, Any]) -> None:
         "- split=train only",
         "- dev_test_mining_rows_used_for_training=false",
         "- locked_eval_rows_used_for_training=false",
-        "- hardcase_rows_used_for_training=false",
+        f"- hardcase_train_rows_used_for_training={str(manifest.get('hardcase_train_rows_used_for_training') is True).lower()}",
+        f"- hardcase_holdout_rows_used_for_training={str(manifest.get('hardcase_holdout_rows_used_for_training') is True).lower()}",
         "- runtime_gates_changed=false",
         "- release_ready=false",
         "- separator_training_started=false",
@@ -417,6 +419,8 @@ def build_tensor_audio_error_train_only_mining_bundle(
         "dev_test_mining_rows_used_for_training": False,
         "locked_eval_rows_used_for_training": False,
         "hardcase_rows_used_for_training": False,
+        "hardcase_train_rows_used_for_training": any(row.get("hardcase") is True for row in candidates),
+        "hardcase_holdout_rows_used_for_training": False,
         "training_started": False,
         "critic_training_started": False,
         "separator_training_started": False,

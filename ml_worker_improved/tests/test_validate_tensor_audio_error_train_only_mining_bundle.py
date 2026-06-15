@@ -106,3 +106,13 @@ def test_validate_train_only_bundle_rejects_missing_tensor_maps(tmp_path: Path) 
 
     assert result["ok"] is False
     assert "row_missing_tensor_map:0" in result["errors"]
+
+
+def test_validate_train_only_bundle_allows_non_holdout_hardcase_rows(tmp_path: Path) -> None:
+    from tools.validate_tensor_audio_error_train_only_mining_bundle import validate_tensor_audio_error_train_only_mining_bundle
+
+    result = validate_tensor_audio_error_train_only_mining_bundle(
+        write_bundle(tmp_path, row_overrides={"hardcase": True, "hardcase_holdout": False})
+    )
+
+    assert result["ok"] is True

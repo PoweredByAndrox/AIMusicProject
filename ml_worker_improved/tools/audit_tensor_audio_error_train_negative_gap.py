@@ -120,7 +120,7 @@ def safe_train_negative_reason(row: dict[str, Any], blocked_keys: set[str]) -> s
         return "split_not_train"
     if row.get("train_allowed") is not True:
         return "train_allowed_not_true"
-    if row.get("hardcase_holdout") is True or row.get("hardcase") is True:
+    if row.get("hardcase_holdout") is True:
         return "hardcase_holdout_true"
     if row_key_set(row) & blocked_keys:
         return "locked_eval_or_hardcase_key_overlap"

@@ -94,8 +94,8 @@ def validate_tensor_audio_error_balanced_train_only_bundle(bundle_dir: Path) -> 
         errors.append("dev_test_mining_rows_used_for_training_true")
     if manifest.get("locked_eval_rows_used_for_training") is True:
         errors.append("locked_eval_rows_used_for_training_true")
-    if manifest.get("hardcase_rows_used_for_training") is True:
-        errors.append("hardcase_rows_used_for_training_true")
+    if manifest.get("hardcase_holdout_rows_used_for_training") is True:
+        errors.append("hardcase_holdout_rows_used_for_training_true")
     for flag in sorted(FORBIDDEN_TRUE_FLAGS):
         if has_true_flag(manifest, flag):
             errors.append(f"{flag}_true")
@@ -116,7 +116,7 @@ def validate_tensor_audio_error_balanced_train_only_bundle(bundle_dir: Path) -> 
             errors.append(f"row_split_not_train:{index}")
         if row.get("train_allowed") is not True:
             errors.append(f"row_train_allowed_not_true:{index}")
-        if row.get("hardcase_holdout") is True or row.get("hardcase") is True:
+        if row.get("hardcase_holdout") is True:
             errors.append(f"row_hardcase_holdout_true:{index}")
         if row.get("locked_eval_row") is True:
             errors.append(f"row_locked_eval_row_true:{index}")
@@ -177,6 +177,9 @@ def validate_tensor_audio_error_balanced_train_only_bundle(bundle_dir: Path) -> 
         "dev_test_mining_rows_used_for_training": False,
         "locked_eval_rows_used_for_training": False,
         "hardcase_rows_used_for_training": False,
+        "hardcase_train_rows_used_for_training": any(row.get("hardcase") is True for row in rows),
+        "hardcase_holdout_rows_used_for_training": manifest.get("hardcase_holdout_rows_used_for_training") is True
+        or any(row.get("hardcase_holdout") is True for row in rows),
         "training_started": False,
         "release_ready": False,
         "runtime_gates_changed": False,

@@ -121,3 +121,24 @@ def test_hard_negative_harvest_requires_tensor_maps(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert "row_missing_tensor_map:0" in result["errors"]
+
+
+def test_hard_negative_harvest_validator_allows_non_holdout_hardcase_train_rows(tmp_path: Path) -> None:
+    from tools.validate_tensor_audio_error_train_hard_negative_harvest import validate_tensor_audio_error_train_hard_negative_harvest
+
+    result = validate_tensor_audio_error_train_hard_negative_harvest(
+        write_harvest(tmp_path, row_overrides={"hardcase": True, "hardcase_holdout": False})
+    )
+
+    assert result["ok"] is True
+
+
+def test_hard_negative_harvest_validator_rejects_hardcase_holdout_rows(tmp_path: Path) -> None:
+    from tools.validate_tensor_audio_error_train_hard_negative_harvest import validate_tensor_audio_error_train_hard_negative_harvest
+
+    result = validate_tensor_audio_error_train_hard_negative_harvest(
+        write_harvest(tmp_path, row_overrides={"hardcase": True, "hardcase_holdout": True})
+    )
+
+    assert result["ok"] is False
+    assert "row_hardcase_holdout_true:0" in result["errors"]

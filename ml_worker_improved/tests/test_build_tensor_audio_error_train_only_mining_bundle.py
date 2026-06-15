@@ -97,7 +97,16 @@ def write_dataset(tmp_path: Path, rows: list[dict]) -> Path:
     return dataset_dir
 
 
-def dataset_row(tmp_path: Path, index: int, *, label: int, split: str = "train", stem: str = "minus") -> dict:
+def dataset_row(
+    tmp_path: Path,
+    index: int,
+    *,
+    label: int,
+    split: str = "train",
+    stem: str = "minus",
+    hardcase: bool = False,
+    hardcase_holdout: bool = False,
+) -> dict:
     tensor_path = tmp_path / "maps" / f"row-{index}.npz"
     tensor_path.parent.mkdir(parents=True, exist_ok=True)
     tensor_path.write_bytes(b"npz-placeholder")
@@ -114,8 +123,8 @@ def dataset_row(tmp_path: Path, index: int, *, label: int, split: str = "train",
         "split": split,
         "label": label,
         "train_allowed": split == "train",
-        "hardcase": False,
-        "hardcase_holdout": False,
+        "hardcase": hardcase,
+        "hardcase_holdout": hardcase_holdout,
         "tensor_map_path": str(tensor_path),
         "tensor_map_names": ["stft_residual_magnitude"],
         "scalar_features_used": False,
@@ -212,3 +221,27 @@ def test_train_only_bundle_fails_closed_when_output_validation_fails(tmp_path: P
             split_dir=write_split(tmp_path),
             output_dir=tmp_path / "bundle",
         )
+
+
+def test_train_only_bundle_uses_non_holdout_hardcase_train_negatives(tmp_path: Path) -> None:
+    from tools.build_tensor_audio_error_train_only_mining_bundle import build_tensor_audio_error_train_only_mining_bundle
+
+    rows = [
+        dataset_row(tmp_path, 0, label=0, hardcase=True, hardcase_holdout=False),
+        dataset_row(tmp_path, 1, label=0, hardcase=True, hardcase_holdout=False),
+        dataset_row(tmp_path, 2, label=0, hardcase=True, hardcase_holdout=True),
+        dataset_row(tmp_path, 3, label=1),
+        dataset_row(tmp_path, 4, label=1),
+    ]
+    manifest = build_tensor_audio_error_train_only_mining_bundle(
+        request_dir=write_request(tmp_path, [0, 1]),
+        tensor_dataset_dir=write_dataset(tmp_path, rows),
+        split_dir=write_split(tmp_path),
+        output_dir=tmp_path / "bundle",
+    )
+
+    candidates = read_jsonl(tmp_path / "bundle" / "tensor_audio_error_train_only_training_candidates.jsonl")
+    assert manifest["negative_rows"] == 2
+    assert manifest["hardcase_train_rows_used_for_training"] is True
+    assert manifest["hardcase_rows_used_for_training"] is False
+    assert {row["hardcase"] for row in candidates if row["recommended_training_label"] == 0} == {True}

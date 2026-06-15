@@ -154,7 +154,7 @@ def safe_existing_train_negative(row: dict[str, Any], blocked_keys: set[str]) ->
         return False, "train_allowed_not_true"
     if int(row.get("label") or 0) != 0:
         return False, "label_not_zero"
-    if row.get("hardcase_holdout") is True or row.get("hardcase") is True:
+    if row.get("hardcase_holdout") is True:
         return False, "hardcase_holdout_true"
     if row.get("locked_eval_row") is True:
         return False, "locked_eval_row_true"
@@ -204,6 +204,7 @@ def candidate_row(source_row: dict[str, Any]) -> dict[str, Any]:
         "stem_type": payload["stem_type"],
         "split": "train",
         "train_allowed": True,
+        "hardcase": source_row.get("hardcase") is True,
         "hardcase_holdout": False,
         "locked_eval_row": False,
         "split_overlap_checked": True,
@@ -244,7 +245,8 @@ def write_summary(path: Path, manifest: dict[str, Any]) -> None:
         "- split=train only",
         "- dev_test_rows_used=false",
         "- locked_eval_rows_used=false",
-        "- hardcase_rows_used=false",
+        f"- hardcase_train_rows_used={str(manifest.get('hardcase_train_rows_used') is True).lower()}",
+        f"- hardcase_holdout_rows_used={str(manifest.get('hardcase_holdout_rows_used') is True).lower()}",
         "- training_started=false",
         "- runtime_gates_changed=false",
         "- release_ready=false",
@@ -307,6 +309,8 @@ def harvest_tensor_audio_error_train_hard_negatives(
         "dev_test_rows_used": False,
         "locked_eval_rows_used": False,
         "hardcase_rows_used": False,
+        "hardcase_train_rows_used": any(row.get("hardcase") is True for row in candidates),
+        "hardcase_holdout_rows_used": False,
         "release_ready": False,
         "runtime_gates_changed": False,
         "training_started": False,

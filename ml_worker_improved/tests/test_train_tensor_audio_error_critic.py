@@ -144,6 +144,7 @@ def write_train_only_mining_bundle(tmp_path: Path, rows: list[dict], *, manifest
         candidate["source_request_dir"] = str(tmp_path / "request")
         candidate["source_requirement_id"] = f"req-{source_row['row_uid']}"
         candidate["train_allowed"] = True
+        candidate["hardcase"] = source_row.get("hardcase") is True
         candidate["hardcase_holdout"] = False
         candidate["locked_eval_row"] = False
         candidate["tensor_map_path"] = source_row["tensor_map_path"]
@@ -164,6 +165,8 @@ def write_train_only_mining_bundle(tmp_path: Path, rows: list[dict], *, manifest
         "dev_test_mining_rows_used_for_training": False,
         "locked_eval_rows_used_for_training": False,
         "hardcase_rows_used_for_training": False,
+        "hardcase_train_rows_used_for_training": any(row_value.get("hardcase") is True for row_value in train_only_rows),
+        "hardcase_holdout_rows_used_for_training": False,
         "training_started": False,
         "critic_training_started": False,
         "separator_training_started": False,
@@ -352,6 +355,69 @@ def test_trainer_accepts_train_only_mining_bundle_schema(tmp_path: Path) -> None
     assert manifest["locked_eval_rows_used_for_training"] is False
     assert manifest["hardcase_rows_used_for_training"] is False
     assert manifest["release_ready"] is False
+
+
+def test_trainer_accepts_non_holdout_hardcase_train_only_rows(tmp_path: Path) -> None:
+    from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
+
+    rows = [
+        row(tmp_path, 0, split="train", label=0),
+        row(tmp_path, 1, split="train", label=1),
+        row(tmp_path, 2, split="train", label=0, stem="vocal"),
+        row(tmp_path, 3, split="train", label=1, stem="vocal"),
+        row(tmp_path, 4, split="test", label=0),
+        row(tmp_path, 5, split="test", label=1),
+    ]
+    rows[0]["hardcase"] = True
+    dataset_dir = write_tensor_dataset(tmp_path, rows)
+    mining_bundle_dir = write_train_only_mining_bundle(tmp_path, [rows[0], rows[1]])
+
+    manifest = train_tensor_audio_error_critic(
+        dataset_dir=dataset_dir,
+        output_dir=tmp_path / "model",
+        min_train_rows=4,
+        mining_bundle_dir=mining_bundle_dir,
+        mining_weight_multiplier=3.0,
+    )
+
+    assert manifest["training_completed"] is True
+    assert manifest["hardcase_train_rows_used_for_training"] is True
+    assert manifest["hardcase_holdout_rows_used_for_training"] is False
+    assert manifest["release_ready"] is False
+
+
+def test_trainer_rejects_hardcase_holdout_train_only_rows(tmp_path: Path) -> None:
+    from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
+
+    rows = [
+        row(tmp_path, 0, split="train", label=0),
+        row(tmp_path, 1, split="train", label=1),
+        row(tmp_path, 2, split="train", label=0, stem="vocal"),
+        row(tmp_path, 3, split="train", label=1, stem="vocal"),
+    ]
+    rows[0]["hardcase"] = True
+    mining_bundle_dir = write_train_only_mining_bundle(
+        tmp_path,
+        [rows[0], rows[1]],
+        manifest_overrides={"hardcase_holdout_rows_used_for_training": True},
+    )
+    bundle_rows_path = mining_bundle_dir / "tensor_audio_error_train_only_training_candidates.jsonl"
+    bundle_rows = read_jsonl(bundle_rows_path)
+    bundle_rows[0]["hardcase_holdout"] = True
+    write_jsonl(bundle_rows_path, bundle_rows)
+
+    try:
+        train_tensor_audio_error_critic(
+            dataset_dir=write_tensor_dataset(tmp_path, rows),
+            output_dir=tmp_path / "model",
+            min_train_rows=4,
+            mining_bundle_dir=mining_bundle_dir,
+            mining_weight_multiplier=3.0,
+        )
+    except ValueError as exc:
+        assert "hardcase_holdout" in str(exc)
+    else:
+        raise AssertionError("hardcase holdout mining row was not rejected")
 
 
 def test_trainer_accepts_balanced_train_only_bundle(tmp_path: Path) -> None:
