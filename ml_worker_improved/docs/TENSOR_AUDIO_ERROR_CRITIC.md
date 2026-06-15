@@ -89,6 +89,26 @@ docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_e
   --require-trained
 ```
 
+## Score Shadow Rows
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/score_tensor_audio_error_critic.py \
+  --dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --model-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_001 \
+  --calibration-dir /app/lab_artifacts/audio_error_critic/tensor_r1_calibration_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_shadow_scores_001
+```
+
+Outputs:
+
+- `tensor_audio_error_shadow_scores.jsonl`
+- `tensor_audio_error_shadow_score_summary.json`
+
+Shadow scores use the calibrated threshold only for diagnostic
+`shadow_decision` fields. They do not update runtime gates and every row keeps
+`runtime_gate_decision_applied=false`, `shadow_only=true`, and
+`release_ready=false`.
+
 ## Contract
 
 `tensor_maps_required=true` and `scalar_fallback_used=false` are hard contract fields.
