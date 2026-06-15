@@ -183,3 +183,37 @@ def test_validator_rejects_hardcase_rows_without_metrics(tmp_path: Path) -> None
 
     assert result["ok"] is False
     assert "missing_decision_hardcase_holdout_metrics" in result["errors"]
+
+
+def test_validator_rejects_locked_eval_errors_and_variant_safety_errors(tmp_path: Path) -> None:
+    from tools.validate_tensor_audio_error_critic_decision import validate_tensor_audio_error_critic_decision
+
+    decision_dir = write_decision_dir(
+        tmp_path,
+        comparison=safe_comparison_payload(
+            locked_eval={
+                "critical_leakage_count": 0,
+                "future_r1_r2_r3_r4_must_use_this_split": True,
+                "errors": ["hardcase_holdout_not_locked"],
+            },
+            baseline={
+                "hardcase_holdout": {"rows": 2, "hard_negative_count": 0, "false_reject_count": 0, "accuracy": 1.0},
+                "release_ready": False,
+                "runtime_gates_changed": False,
+                "safety_errors": ["missing_locked_eval_score_rows"],
+            },
+            candidate={
+                "hardcase_holdout": {"rows": 2, "hard_negative_count": 0, "false_reject_count": 0, "accuracy": 1.0},
+                "release_ready": False,
+                "runtime_gates_changed": False,
+                "safety_errors": ["score_or_analysis_forbidden_true_flag"],
+            },
+        ),
+    )
+
+    result = validate_tensor_audio_error_critic_decision(decision_dir)
+
+    assert result["ok"] is False
+    assert "locked_eval_errors_present" in result["errors"]
+    assert "baseline_safety_errors_present" in result["errors"]
+    assert "candidate_safety_errors_present" in result["errors"]

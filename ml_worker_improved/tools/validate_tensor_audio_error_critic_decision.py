@@ -52,6 +52,11 @@ def has_true_flag(payload: Any, flag: str) -> bool:
     return False
 
 
+def non_empty_list(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    return isinstance(value, list) and len(value) > 0
+
+
 def has_hardcase_metrics(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -111,6 +116,12 @@ def validate_tensor_audio_error_critic_decision(decision_dir: Path) -> dict[str,
         comparison.get("contamination_status") if isinstance(comparison.get("contamination_status"), dict) else {}
     )
     locked_eval = comparison.get("locked_eval") if isinstance(comparison.get("locked_eval"), dict) else {}
+    if non_empty_list(locked_eval, "errors"):
+        errors.append("locked_eval_errors_present")
+    for variant_name in ("baseline", "candidate"):
+        variant = comparison.get(variant_name) if isinstance(comparison.get(variant_name), dict) else {}
+        if non_empty_list(variant, "safety_errors"):
+            errors.append(f"{variant_name}_safety_errors_present")
     if (
         contamination.get("non_locked_split_used") is True
         or comparison_contamination.get("non_locked_split_used") is True

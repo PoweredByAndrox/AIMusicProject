@@ -218,8 +218,48 @@ docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_e
 
 The validator fails if `release_ready=true`, runtime gates changed, separator
 or repair-adapter training started, a non-locked split was used, dev/test
-mining rows were used for training, the decision attempts promotion, or
-hard-case holdout metrics are missing.
+mining rows were used for training, `comparison.locked_eval.errors` is
+non-empty, baseline/candidate `safety_errors` is non-empty, the decision
+attempts promotion, or hard-case holdout metrics are missing.
+
+## Build Locked Mining Slice from Variant Decision
+
+When the R1F decision is `mine_next_dataset_slice`, the next safe artifact is a
+locked-eval-only mining slice. This is not the same as a train mining bundle:
+it preserves `dev`/`test` and hard-case evidence for review, explicitly ignores
+`train` score rows, and sets `training_allowed=false`.
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/build_tensor_audio_error_locked_mining_slice.py \
+  --decision-dir /app/lab_artifacts/audio_error_critic/tensor_r1_variant_decision_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_locked_mining_slice_001
+```
+
+Outputs:
+
+- `tensor_audio_error_locked_mining_slice_manifest.json`
+- `tensor_audio_error_locked_mining_slice.jsonl`
+- `tensor_audio_error_locked_mining_slice_summary.md`
+
+The slice labels locked eval rows as:
+
+- `candidate_regressed_false_reject`
+- `persistent_false_reject`
+- `candidate_regressed_hard_negative`
+- `persistent_hard_negative`
+
+Validate the slice:
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_error_locked_mining_slice.py \
+  --slice-dir /app/lab_artifacts/audio_error_critic/tensor_r1_locked_mining_slice_001
+```
+
+The builder fails before writing a slice if the source decision was
+`candidate_rejected_runtime`, `comparison.locked_eval.errors` is non-empty, or
+baseline/candidate `safety_errors` is non-empty. The validator fails if the
+slice includes train rows, marks training allowed, changes runtime gates,
+starts training, starts separator/repair training, or marks `release_ready`.
 
 ## Contract
 
