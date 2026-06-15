@@ -57,6 +57,14 @@ def validate_tensor_audio_error_critic(
         else:
             calibration = read_json(calibration_path)
             calibration_status = str(calibration.get("calibration_status") or "")
+            if calibration.get("schema") != "tensor_audio_error_critic_calibration.v1":
+                errors.append("invalid_calibration_schema")
+            if calibration.get("tensor_maps_required") is not True:
+                errors.append("calibration_tensor_maps_not_required")
+            if calibration.get("shadow_only") is not True:
+                errors.append("calibration_not_shadow_only")
+            if str(calibration.get("model_dir") or "") != str(model_dir):
+                errors.append("calibration_model_dir_mismatch")
             if calibration.get("release_ready") is True:
                 errors.append("calibration_release_ready_true")
             if calibration.get("scalar_fallback_used") is True:

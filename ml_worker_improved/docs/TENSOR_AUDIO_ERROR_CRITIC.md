@@ -75,6 +75,10 @@ critic. It refuses `release_ready` models and scalar-fallback models, and it
 marks the calibration `not_usable` if no positive eval coverage is possible
 within the false-accept budget.
 
+Validation is fail-closed for calibration artifacts: the calibration schema,
+`tensor_maps_required`, `shadow_only`, and recorded `model_dir` must match the
+validated model artifact.
+
 ## Validate
 
 ```bash

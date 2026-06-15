@@ -157,13 +157,28 @@ def conservative_threshold_metrics(rows: Sequence[dict[str, Any]], probabilities
     threshold = min(1.000001, max(negatives) + 1.0e-6) if negatives else 1.000001
     false_accept = sum(1 for score in negatives if score >= threshold)
     false_reject = sum(1 for score in positives if score < threshold)
+    true_accept = sum(1 for score in positives if score >= threshold)
     return {
         "safe_accept_threshold": float(threshold),
+        "positive_rows": len(positives),
+        "negative_rows": len(negatives),
+        "accepted_rows": int(true_accept + false_accept),
+        "true_accept": int(true_accept),
         "threshold_false_accept": int(false_accept),
         "threshold_false_accept_rate": float(false_accept / len(negatives)) if negatives else None,
         "threshold_false_reject": int(false_reject),
         "threshold_false_reject_rate": float(false_reject / len(positives)) if positives else None,
+        "accept_coverage": float(true_accept / len(positives)) if positives else 0.0,
     }
+
+
+def model_selection_key(candidate: tuple[str, Any, np.ndarray, dict[str, Any], dict[str, Any]]) -> tuple[float, float, float]:
+    _, _, _, eval_metrics, threshold_metrics = candidate
+    return (
+        float((threshold_metrics or {}).get("accept_coverage") or 0.0),
+        float((eval_metrics or {}).get("auroc") or 0.0),
+        float((eval_metrics or {}).get("accuracy") or 0.0),
+    )
 
 
 def localization_payload(row: dict[str, Any], probability: float) -> dict[str, Any]:
@@ -247,14 +262,7 @@ def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_
         candidate_metrics = metrics_for_rows(eval_target_rows, candidate_probabilities)
         candidate_threshold_metrics = conservative_threshold_metrics(eval_target_rows, candidate_probabilities)
         candidates.append((model_kind, model, candidate_probabilities, candidate_metrics, candidate_threshold_metrics))
-    model_kind, model, probabilities, eval_metrics, threshold_metrics = max(
-        candidates,
-        key=lambda item: (
-            float((item[4] or {}).get("accept_coverage") or 0.0),
-            float((item[3] or {}).get("auroc") or 0.0),
-            float((item[3] or {}).get("accuracy") or 0.0),
-        ),
-    )
+    model_kind, model, probabilities, eval_metrics, threshold_metrics = max(candidates, key=model_selection_key)
     eval_payloads = []
     localization_rows = []
     for row, probability in zip(eval_target_rows, probabilities):

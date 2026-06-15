@@ -106,6 +106,24 @@ def test_train_tensor_critic_uses_npz_maps_and_writes_localization(tmp_path: Pat
     assert localizations[0]["top_error_channel"] in MAP_NAMES
 
 
+def test_model_selection_key_prioritizes_zero_false_accept_coverage() -> None:
+    from tools.train_tensor_audio_error_critic import conservative_threshold_metrics, model_selection_key
+
+    rows = [{"label": 0}, {"label": 0}, {"label": 1}, {"label": 1}]
+    lower_coverage_threshold_metrics = conservative_threshold_metrics(rows, [0.1, 0.2, 0.05, 0.9])
+    higher_coverage_threshold_metrics = conservative_threshold_metrics(rows, [0.4, 0.5, 0.6, 0.7])
+    candidates = [
+        ("high_auroc_low_coverage", object(), np.asarray([0.0]), {"auroc": 0.99, "accuracy": 0.99}, lower_coverage_threshold_metrics),
+        ("low_auroc_high_coverage", object(), np.asarray([0.0]), {"auroc": 0.10, "accuracy": 0.10}, higher_coverage_threshold_metrics),
+    ]
+
+    selected = max(candidates, key=model_selection_key)
+
+    assert lower_coverage_threshold_metrics["accept_coverage"] == 0.5
+    assert higher_coverage_threshold_metrics["accept_coverage"] == 1.0
+    assert selected[0] == "low_auroc_high_coverage"
+
+
 def test_train_tensor_critic_skips_without_train_negative_class(tmp_path: Path) -> None:
     from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
 
