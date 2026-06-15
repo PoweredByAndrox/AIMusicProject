@@ -109,6 +109,26 @@ Shadow scores use the calibrated threshold only for diagnostic
 `runtime_gate_decision_applied=false`, `shadow_only=true`, and
 `release_ready=false`.
 
+## Analyze Shadow Scores
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/analyze_tensor_audio_error_shadow_scores.py \
+  --scores-dir /app/lab_artifacts/audio_error_critic/tensor_r1_shadow_scores_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_shadow_analysis_001
+```
+
+Outputs:
+
+- `tensor_audio_error_shadow_analysis_summary.json`
+- `tensor_audio_error_hard_negative_candidates.jsonl`
+- `tensor_audio_error_false_reject_candidates.jsonl`
+- `tensor_audio_error_model_improvement_report.md`
+
+The analyzer is diagnostic only. It identifies hard negatives and false
+rejects for future dataset/model improvement planning, while keeping
+`training_started=false`, `runtime_gates_changed=false`, and
+`release_ready=false`.
+
 ## Contract
 
 `tensor_maps_required=true` and `scalar_fallback_used=false` are hard contract fields.
