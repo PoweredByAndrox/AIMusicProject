@@ -42,6 +42,23 @@ SAFETY_FLAGS = {
     "release_ready": False,
     "can_publish_as_result": False,
 }
+MINING_BUNDLE_MANIFEST_FILE = "tensor_audio_error_mining_bundle_manifest.json"
+MINING_TRAINING_CANDIDATES_FILE = "tensor_audio_error_training_candidates.jsonl"
+FORBIDDEN_MINING_TRUE_FLAGS = {
+    "release_ready",
+    "can_publish_as_result",
+    "runtime_gate_decision_applied",
+    "runtime_gates_changed",
+    "training_started",
+    "critic_training_started",
+    "separator_training_started",
+    "repair_adapter_training_started",
+    "fine_tune_started",
+    "models_changed",
+    "model_registry_edited",
+    "thresholds_relaxed",
+}
+ALLOWED_MINING_SPLITS = {"train", "dev", "test"}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -68,6 +85,143 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def has_forbidden_true(payload: Any) -> bool:
+    if isinstance(payload, dict):
+        return any(payload.get(key) is True for key in FORBIDDEN_MINING_TRUE_FLAGS)
+    if isinstance(payload, list):
+        return any(has_forbidden_true(item) for item in payload)
+    return False
+
+
+def empty_mining_report() -> dict[str, Any]:
+    return {
+        "mining_bundle_used": False,
+        "mining_bundle_dir": "",
+        "mining_bundle_status": "",
+        "mining_candidate_rows_total": 0,
+        "mining_train_rows_available": 0,
+        "mining_non_train_rows_ignored": 0,
+        "mining_train_rows_matched": 0,
+        "mining_train_rows_unmatched": 0,
+        "mining_sample_weight_applied": False,
+        "mining_weight_multiplier": 1.0,
+    }
+
+
+def row_match_keys(row: dict[str, Any]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    row_uid = str(row.get("row_uid") or "").strip()
+    if row_uid:
+        keys.add(("row_uid", row_uid))
+    canonical_row_key = str(row.get("canonical_row_key") or "").strip()
+    if canonical_row_key:
+        keys.add(("canonical_row_key", canonical_row_key))
+    candidate_id = str(row.get("candidate_id") or "").strip()
+    stem_type = str(row.get("stem_type") or "").strip()
+    window_start = str(float(row.get("window_start_sec") or 0.0))
+    window_end = str(float(row.get("window_end_sec") or 0.0))
+    if candidate_id and stem_type:
+        keys.add(("candidate_window", "|".join([candidate_id, stem_type, window_start, window_end])))
+    return keys
+
+
+def validate_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    manifest = read_json(mining_bundle_dir / MINING_BUNDLE_MANIFEST_FILE)
+    rows = list(iter_jsonl(mining_bundle_dir / MINING_TRAINING_CANDIDATES_FILE))
+    errors: list[str] = []
+    if manifest.get("schema") != "tensor_audio_error_mining_bundle.v1":
+        errors.append("invalid_mining_bundle_schema")
+    if manifest.get("bundle_status") != "candidate_only":
+        errors.append("mining_bundle_not_candidate_only")
+    if manifest.get("shadow_only") is not True:
+        errors.append("mining_bundle_not_shadow_only")
+    if has_forbidden_true(manifest):
+        errors.append("mining_bundle_forbidden_true_flag")
+    if int(manifest.get("candidate_rows_total") or 0) != len(rows):
+        errors.append("mining_bundle_row_count_mismatch")
+    for index, row in enumerate(rows):
+        if row.get("bundle_row_schema") != "tensor_audio_error_training_candidate.v1":
+            errors.append(f"invalid_mining_row_schema:{index}")
+        if row.get("training_candidate_status") != "candidate_only":
+            errors.append(f"mining_row_not_candidate_only:{index}")
+        if row.get("shadow_only") is not True:
+            errors.append(f"mining_row_not_shadow_only:{index}")
+        if has_forbidden_true(row):
+            errors.append(f"mining_row_forbidden_true_flag:{index}")
+        if str(row.get("split") or "") not in ALLOWED_MINING_SPLITS:
+            errors.append(f"invalid_mining_split:{index}")
+        mining_label = str(row.get("source_mining_label") or "")
+        recommended_label = int(row.get("recommended_training_label") or 0)
+        if mining_label == "hard_negative_false_accept" and recommended_label != 0:
+            errors.append(f"hard_negative_label_mismatch:{index}")
+        elif mining_label == "false_reject_positive" and recommended_label != 1:
+            errors.append(f"false_reject_label_mismatch:{index}")
+        elif mining_label not in {"hard_negative_false_accept", "false_reject_positive"}:
+            errors.append(f"unknown_mining_label:{index}")
+    if errors:
+        raise ValueError(f"unsafe_mining_bundle:{','.join(errors)}")
+    return rows, {
+        "mining_bundle_used": True,
+        "mining_bundle_dir": str(mining_bundle_dir),
+        "mining_bundle_status": str(manifest.get("bundle_status") or ""),
+        "mining_candidate_rows_total": len(rows),
+    }
+
+
+def mining_sample_weights(
+    train_rows: Sequence[dict[str, Any]],
+    *,
+    mining_bundle_dir: Path | None,
+    mining_weight_multiplier: float,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    report = empty_mining_report()
+    if mining_bundle_dir is None:
+        return None, report
+    if float(mining_weight_multiplier) < 1.0:
+        raise ValueError("mining_weight_multiplier_must_be_at_least_1")
+    mining_rows, bundle_report = validate_mining_bundle(mining_bundle_dir)
+    train_mining_rows = [row for row in mining_rows if str(row.get("split") or "") == "train"]
+    train_key_to_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in train_mining_rows:
+        for key in row_match_keys(row):
+            train_key_to_rows.setdefault(key, []).append(row)
+    weights = np.ones(len(train_rows), dtype=np.float32)
+    matched_train_keys: set[tuple[str, str]] = set()
+    matched_rows = 0
+    label_errors: list[str] = []
+    for index, row in enumerate(train_rows):
+        keys = row_match_keys(row)
+        matched_keys = keys & set(train_key_to_rows)
+        if matched_keys:
+            row_label = int(row.get("label") or 0)
+            for matched_key in matched_keys:
+                for mining_row in train_key_to_rows[matched_key]:
+                    recommended_label = int(mining_row.get("recommended_training_label") or 0)
+                    source_true_label = mining_row.get("source_true_label")
+                    if row_label != recommended_label:
+                        label_errors.append(f"mining_label_mismatch_for_matched_row:{index}")
+                    if source_true_label is not None and row_label != int(source_true_label or 0):
+                        label_errors.append(f"mining_source_true_label_mismatch_for_matched_row:{index}")
+            weights[index] = float(mining_weight_multiplier)
+            matched_train_keys.update(matched_keys)
+            matched_rows += 1
+    if label_errors:
+        raise ValueError(f"unsafe_mining_bundle:{','.join(sorted(set(label_errors)))}")
+    unmatched = sum(1 for row in train_mining_rows if not (row_match_keys(row) & matched_train_keys))
+    report.update(
+        {
+            **bundle_report,
+            "mining_train_rows_available": len(train_mining_rows),
+            "mining_non_train_rows_ignored": len(mining_rows) - len(train_mining_rows),
+            "mining_train_rows_matched": matched_rows,
+            "mining_train_rows_unmatched": unmatched,
+            "mining_sample_weight_applied": matched_rows > 0,
+            "mining_weight_multiplier": float(mining_weight_multiplier),
+        }
+    )
+    return weights if matched_rows else None, report
 
 
 def pooled_grid(array: np.ndarray, bins: int = 8, frames: int = 8) -> np.ndarray:
@@ -198,12 +352,33 @@ def localization_payload(row: dict[str, Any], probability: float) -> dict[str, A
     }
 
 
-def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_train_rows: int = 20) -> dict[str, Any]:
+def fit_model(model_kind: str, model: Any, train_x: np.ndarray, train_y: np.ndarray, sample_weight: np.ndarray | None) -> None:
+    if sample_weight is None:
+        model.fit(train_x, train_y)
+    elif model_kind == "logistic_regression_balanced":
+        model.fit(train_x, train_y, logisticregression__sample_weight=sample_weight)
+    else:
+        model.fit(train_x, train_y, sample_weight=sample_weight)
+
+
+def train_tensor_audio_error_critic(
+    *,
+    dataset_dir: Path,
+    output_dir: Path,
+    min_train_rows: int = 20,
+    mining_bundle_dir: Path | None = None,
+    mining_weight_multiplier: float = 3.0,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     source_manifest = read_json(dataset_dir / "locked_tensor_audio_error_dataset_manifest.json")
     rows, excluded = load_rows(dataset_dir)
     train_rows = [row for row in rows if row.get("split") == "train" and row.get("train_allowed") is True]
     eval_rows = [row for row in rows if row.get("split") in {"dev", "test"}]
+    sample_weight, mining_report = mining_sample_weights(
+        train_rows,
+        mining_bundle_dir=mining_bundle_dir,
+        mining_weight_multiplier=mining_weight_multiplier,
+    )
     train_labels = [int(row.get("label") or 0) for row in train_rows]
     reason = ""
     if source_manifest.get("tensor_maps_required") is not True or source_manifest.get("scalar_fallback_used") is True:
@@ -229,6 +404,7 @@ def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_
             "scalar_fallback_used": False,
             "critic_training_started": False,
             "shadow_only": True,
+            **mining_report,
             **SAFETY_FLAGS,
         }
         write_json(output_dir / "tensor_audio_error_critic_manifest.json", manifest)
@@ -257,7 +433,7 @@ def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_
         ),
     ]
     for model_kind, model in model_specs:
-        model.fit(train_x, train_y)
+        fit_model(model_kind, model, train_x, train_y, sample_weight)
         candidate_probabilities = model.predict_proba(eval_x)[:, 1].astype(float)
         candidate_metrics = metrics_for_rows(eval_target_rows, candidate_probabilities)
         candidate_threshold_metrics = conservative_threshold_metrics(eval_target_rows, candidate_probabilities)
@@ -298,6 +474,7 @@ def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_
         "scalar_fallback_used": False,
         "critic_training_started": True,
         "shadow_only": True,
+        **mining_report,
         "model_kind": model_kind,
         "model_file": "tensor_audio_error_critic.joblib",
         "candidate_model_metrics": {
@@ -325,12 +502,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--min-train-rows", type=int, default=20)
+    parser.add_argument("--mining-bundle-dir", type=Path)
+    parser.add_argument("--mining-weight-multiplier", type=float, default=3.0)
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    train_tensor_audio_error_critic(dataset_dir=args.dataset_dir, output_dir=args.output_dir, min_train_rows=args.min_train_rows)
+    train_tensor_audio_error_critic(
+        dataset_dir=args.dataset_dir,
+        output_dir=args.output_dir,
+        min_train_rows=args.min_train_rows,
+        mining_bundle_dir=args.mining_bundle_dir,
+        mining_weight_multiplier=args.mining_weight_multiplier,
+    )
     return 0
 
 

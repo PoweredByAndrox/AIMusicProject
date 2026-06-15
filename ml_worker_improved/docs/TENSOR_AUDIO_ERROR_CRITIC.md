@@ -56,6 +56,21 @@ AUROC and accuracy. Current candidate kinds are:
 The selected `model_kind` and all `candidate_model_metrics` are recorded in
 `tensor_audio_error_critic_manifest.json`.
 
+Optional mining-bundle weighting can be used for a follow-up shadow training
+run. Only mining rows with `split=train` can affect `sample_weight`; `dev` and
+`test` mining rows are counted as ignored holdout evidence and are never used
+for fitting.
+The trainer rejects mining bundles with unsafe flags, unknown split names, or
+labels that disagree with matched tensor training rows.
+
+```bash
+docker compose run --rm ml-worker python tools/train_tensor_audio_error_critic.py \
+  --dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_002_mining_weighted \
+  --mining-bundle-dir /app/lab_artifacts/audio_error_critic/tensor_r1_mining_bundle_001 \
+  --mining-weight-multiplier 3.0
+```
+
 ## Calibrate Shadow Thresholds
 
 ```bash
