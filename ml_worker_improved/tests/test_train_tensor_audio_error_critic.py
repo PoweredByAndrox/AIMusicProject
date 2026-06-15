@@ -134,6 +134,49 @@ def write_mining_bundle(tmp_path: Path, rows: list[dict], *, manifest_overrides:
     return bundle_dir
 
 
+def write_train_only_mining_bundle(tmp_path: Path, rows: list[dict], *, manifest_overrides: dict | None = None) -> Path:
+    bundle_dir = tmp_path / "train_only_mining_bundle"
+    train_only_rows = []
+    for source_row in rows:
+        candidate = mining_candidate(source_row)
+        candidate["training_candidate_schema"] = "tensor_audio_error_train_only_training_candidate.v1"
+        candidate["bundle_row_schema"] = "tensor_audio_error_train_only_training_candidate.v1"
+        candidate["source_request_dir"] = str(tmp_path / "request")
+        candidate["source_requirement_id"] = f"req-{source_row['row_uid']}"
+        candidate["train_allowed"] = True
+        candidate["hardcase_holdout"] = False
+        candidate["locked_eval_row"] = False
+        candidate["tensor_map_path"] = source_row["tensor_map_path"]
+        candidate["tensor_map_names"] = source_row["tensor_map_names"]
+        candidate["label_source"] = "train_safe_analog_from_locked_eval_request"
+        candidate["source_true_label"] = source_row["label"]
+        train_only_rows.append(candidate)
+    write_jsonl(bundle_dir / "tensor_audio_error_train_only_training_candidates.jsonl", train_only_rows)
+    manifest = {
+        "schema": "tensor_audio_error_train_only_mining_bundle.v1",
+        "bundle_status": "train_only_candidate_only",
+        "candidate_rows_total": len(train_only_rows),
+        "positive_rows": sum(1 for row_value in train_only_rows if row_value["recommended_training_label"] == 1),
+        "negative_rows": sum(1 for row_value in train_only_rows if row_value["recommended_training_label"] == 0),
+        "training_allowed": True,
+        "tensor_maps_required": True,
+        "scalar_features_used": False,
+        "dev_test_mining_rows_used_for_training": False,
+        "locked_eval_rows_used_for_training": False,
+        "hardcase_rows_used_for_training": False,
+        "training_started": False,
+        "critic_training_started": False,
+        "separator_training_started": False,
+        "repair_adapter_training_started": False,
+        "runtime_gates_changed": False,
+        "release_ready": False,
+        "shadow_only": True,
+    }
+    manifest.update(manifest_overrides or {})
+    write_json(bundle_dir / "tensor_audio_error_train_only_mining_bundle_manifest.json", manifest)
+    return bundle_dir
+
+
 def test_train_tensor_critic_uses_npz_maps_and_writes_localization(tmp_path: Path) -> None:
     from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
 
@@ -202,6 +245,25 @@ def test_train_tensor_critic_skips_without_train_negative_class(tmp_path: Path) 
     assert manifest["release_ready"] is False
 
 
+def test_train_tensor_critic_skips_without_locked_eval_rows(tmp_path: Path) -> None:
+    from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
+
+    rows = [
+        row(tmp_path, 0, split="train", label=0),
+        row(tmp_path, 1, split="train", label=1),
+        row(tmp_path, 2, split="train", label=0, stem="vocal"),
+        row(tmp_path, 3, split="train", label=1, stem="vocal"),
+    ]
+    dataset_dir = write_tensor_dataset(tmp_path, rows)
+
+    manifest = train_tensor_audio_error_critic(dataset_dir=dataset_dir, output_dir=tmp_path / "model", min_train_rows=4)
+
+    assert manifest["training_completed"] is False
+    assert manifest["critic_not_usable_reason"] == "missing_locked_eval_rows"
+    assert manifest["critic_training_started"] is False
+    assert manifest["release_ready"] is False
+
+
 def test_train_tensor_critic_applies_train_only_mining_weights(tmp_path: Path) -> None:
     from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
 
@@ -239,6 +301,68 @@ def test_train_tensor_critic_applies_train_only_mining_weights(tmp_path: Path) -
     assert manifest["mining_sample_weight_applied"] is True
     assert manifest["mining_weight_multiplier"] == 4.0
     assert manifest["release_ready"] is False
+
+
+def test_trainer_accepts_train_only_mining_bundle_schema(tmp_path: Path) -> None:
+    from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
+
+    rows = [
+        row(tmp_path, 0, split="train", label=0),
+        row(tmp_path, 1, split="train", label=1),
+        row(tmp_path, 2, split="train", label=0, stem="vocal"),
+        row(tmp_path, 3, split="train", label=1, stem="vocal"),
+        row(tmp_path, 4, split="test", label=0),
+        row(tmp_path, 5, split="test", label=1),
+    ]
+    dataset_dir = write_tensor_dataset(tmp_path, rows)
+    mining_bundle_dir = write_train_only_mining_bundle(tmp_path, [rows[0], rows[1]])
+
+    manifest = train_tensor_audio_error_critic(
+        dataset_dir=dataset_dir,
+        output_dir=tmp_path / "model",
+        min_train_rows=4,
+        mining_bundle_dir=mining_bundle_dir,
+        mining_weight_multiplier=3.0,
+    )
+
+    assert manifest["training_completed"] is True
+    assert manifest["mining_bundle_schema"] == "tensor_audio_error_train_only_mining_bundle.v1"
+    assert manifest["mining_candidate_rows_total"] == 2
+    assert manifest["mining_train_rows_available"] == 2
+    assert manifest["mining_non_train_rows_ignored"] == 0
+    assert manifest["dev_test_mining_rows_used_for_training"] is False
+    assert manifest["locked_eval_rows_used_for_training"] is False
+    assert manifest["hardcase_rows_used_for_training"] is False
+    assert manifest["release_ready"] is False
+
+
+def test_trainer_rejects_locked_eval_mining_bundle_for_training(tmp_path: Path) -> None:
+    from tools.train_tensor_audio_error_critic import train_tensor_audio_error_critic
+
+    rows = [
+        row(tmp_path, 0, split="train", label=0),
+        row(tmp_path, 1, split="train", label=1),
+        row(tmp_path, 2, split="train", label=0, stem="vocal"),
+        row(tmp_path, 3, split="train", label=1, stem="vocal"),
+    ]
+    dataset_dir = write_tensor_dataset(tmp_path, rows)
+    bundle_dir = tmp_path / "locked_slice"
+    write_json(
+        bundle_dir / "tensor_audio_error_locked_mining_slice_manifest.json",
+        {"schema": "tensor_audio_error_locked_mining_slice.v1", "training_allowed": False, "release_ready": False},
+    )
+
+    try:
+        train_tensor_audio_error_critic(
+            dataset_dir=dataset_dir,
+            output_dir=tmp_path / "model",
+            min_train_rows=4,
+            mining_bundle_dir=bundle_dir,
+        )
+    except ValueError as exc:
+        assert "locked_eval_mining_slice_not_training_bundle" in str(exc)
+    else:
+        raise AssertionError("locked eval mining slice was not rejected for training")
 
 
 def test_train_tensor_critic_rejects_unsafe_mining_bundle(tmp_path: Path) -> None:

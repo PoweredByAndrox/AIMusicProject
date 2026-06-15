@@ -261,6 +261,128 @@ baseline/candidate `safety_errors` is non-empty. The validator fails if the
 slice includes train rows, marks training allowed, changes runtime gates,
 starts training, starts separator/repair training, or marks `release_ready`.
 
+## Build Train-Safe Mining Request
+
+R1G locked mining slices are review-only evidence. They are not training data.
+R1H converts the locked `dev`/`test` evidence into train-safe requirements that
+describe what analogous rows should be mined from the `train` split.
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/build_tensor_audio_error_train_safe_mining_request.py \
+  --locked-slice-dir /app/lab_artifacts/audio_error_critic/tensor_r1_locked_mining_slice_001 \
+  --split-dir /app/lab_artifacts/audio_error_grounding/leak_safe_eval_001 \
+  --tensor-dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1h_train_safe_request
+```
+
+Outputs:
+
+- `tensor_audio_error_train_safe_mining_request_manifest.json`
+- `tensor_audio_error_train_safe_mining_requirements.jsonl`
+- `tensor_audio_error_train_safe_mining_request_summary.md`
+- `tensor_audio_error_train_safe_mining_request_validation.json`
+
+The request keeps `locked_eval_only_source=true`, `review_only_source=true`,
+`training_rows_created=false`, `training_allowed=false`, and
+`release_ready=false`. It maps locked slice labels to target labels only:
+
+- `persistent_hard_negative` and `candidate_regressed_hard_negative` request
+  `hard_negative_false_accept` train examples with label `0`
+- `persistent_false_reject` and `candidate_regressed_false_reject` request
+  `false_reject_positive` train examples with label `1`
+
+Validate:
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_error_train_safe_mining_request.py \
+  --request-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1h_train_safe_request
+```
+
+## Build Train-Only Mining Bundle
+
+R1I mines only train-safe analog rows from the locked tensor dataset. It rejects
+`dev`, `test`, hard-case, locked-eval, release-ready, scalar-fallback, missing
+tensor-map, and leakage-key-overlap rows. Leakage overlap includes
+`row_uid`, `canonical_row_key`, `candidate_id`, `track_id`, and available audio
+hash/fingerprint keys. If the corpus cannot satisfy the minimum two-class train
+contract, it writes
+`bundle_status=blocked_insufficient_train_safe_rows` and R1J must not run.
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/build_tensor_audio_error_train_only_mining_bundle.py \
+  --request-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1h_train_safe_request \
+  --tensor-dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --split-dir /app/lab_artifacts/audio_error_grounding/leak_safe_eval_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1i_train_only_mining_bundle
+```
+
+Outputs:
+
+- `tensor_audio_error_train_only_mining_bundle_manifest.json`
+- `tensor_audio_error_train_only_training_candidates.jsonl`
+- `tensor_audio_error_train_only_mining_bundle_summary.md`
+- `tensor_audio_error_train_only_mining_bundle_validation.json`
+
+Default proceed thresholds are 40 total train rows, 10 positive rows, and
+10 negative rows. Usable bundles keep
+`dev_test_mining_rows_used_for_training=false`,
+`locked_eval_rows_used_for_training=false`,
+`hardcase_rows_used_for_training=false`, `runtime_gates_changed=false`, and
+`release_ready=false`.
+
+Validate:
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_error_train_only_mining_bundle.py \
+  --bundle-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1i_train_only_mining_bundle
+```
+
+## Train with Train-Only Mining Bundle
+
+R1J may train a new shadow tensor critic only if R1I produced
+`bundle_status=train_only_candidate_only`. The trainer accepts the R1I schema
+directly and rejects R1G locked mining slice directories as training input.
+It also refuses to train without locked `dev`/`test` eval rows; train rows are
+not used as an eval fallback.
+
+```bash
+docker compose run --rm ml-worker python tools/train_tensor_audio_error_critic.py \
+  --dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1j_model_003_train_safe_weighted \
+  --mining-bundle-dir /app/lab_artifacts/audio_error_critic/tensor_r1_train_safe_loop_001/r1i_train_only_mining_bundle \
+  --mining-weight-multiplier 3.0
+```
+
+The resulting model manifest must record
+`mining_bundle_schema=tensor_audio_error_train_only_mining_bundle.v1`,
+`mining_non_train_rows_ignored=0`,
+`dev_test_mining_rows_used_for_training=false`,
+`locked_eval_rows_used_for_training=false`,
+`hardcase_rows_used_for_training=false`, `shadow_only=true`, and
+`release_ready=false`.
+
+## Evaluate Train-Safe Weighted Variant
+
+R1K evaluates any R1J model only on the EVAL-1 locked split and hard-case
+holdout. Use calibration, validation, scoring, shadow analysis, and locked
+variant comparison as in the R1F flow. If a multi-variant comparison is needed,
+baseline-vs-candidate comparisons may be run separately and summarized without
+promotion.
+
+R1K decisions are limited to:
+
+- `candidate_rejected_runtime`
+- `keep_as_specialist_shadow_model`
+- `mine_next_dataset_slice`
+
+## Decision Contract
+
+No R1 tensor critic phase may promote a model to runtime gates, change runtime
+thresholds, train separator weights, train a repair adapter, publish audio, or
+mark `release_ready`. R1H uses locked evidence only as a request. R1I mines only
+train rows. R1J fits only from train rows. R1K evaluates only locked
+`dev`/`test` and hard-case evidence.
+
 ## Contract
 
 `tensor_maps_required=true` and `scalar_fallback_used=false` are hard contract fields.

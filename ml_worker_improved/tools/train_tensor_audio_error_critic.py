@@ -44,6 +44,9 @@ SAFETY_FLAGS = {
 }
 MINING_BUNDLE_MANIFEST_FILE = "tensor_audio_error_mining_bundle_manifest.json"
 MINING_TRAINING_CANDIDATES_FILE = "tensor_audio_error_training_candidates.jsonl"
+TRAIN_ONLY_MINING_BUNDLE_MANIFEST_FILE = "tensor_audio_error_train_only_mining_bundle_manifest.json"
+TRAIN_ONLY_MINING_TRAINING_CANDIDATES_FILE = "tensor_audio_error_train_only_training_candidates.jsonl"
+LOCKED_MINING_SLICE_MANIFEST_FILE = "tensor_audio_error_locked_mining_slice_manifest.json"
 FORBIDDEN_MINING_TRUE_FLAGS = {
     "release_ready",
     "can_publish_as_result",
@@ -89,7 +92,9 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 
 def has_forbidden_true(payload: Any) -> bool:
     if isinstance(payload, dict):
-        return any(payload.get(key) is True for key in FORBIDDEN_MINING_TRUE_FLAGS)
+        return any(payload.get(key) is True for key in FORBIDDEN_MINING_TRUE_FLAGS) or any(
+            has_forbidden_true(value) for value in payload.values()
+        )
     if isinstance(payload, list):
         return any(has_forbidden_true(item) for item in payload)
     return False
@@ -99,6 +104,7 @@ def empty_mining_report() -> dict[str, Any]:
     return {
         "mining_bundle_used": False,
         "mining_bundle_dir": "",
+        "mining_bundle_schema": "",
         "mining_bundle_status": "",
         "mining_candidate_rows_total": 0,
         "mining_train_rows_available": 0,
@@ -107,6 +113,9 @@ def empty_mining_report() -> dict[str, Any]:
         "mining_train_rows_unmatched": 0,
         "mining_sample_weight_applied": False,
         "mining_weight_multiplier": 1.0,
+        "dev_test_mining_rows_used_for_training": False,
+        "locked_eval_rows_used_for_training": False,
+        "hardcase_rows_used_for_training": False,
     }
 
 
@@ -127,7 +136,7 @@ def row_match_keys(row: dict[str, Any]) -> set[tuple[str, str]]:
     return keys
 
 
-def validate_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def validate_legacy_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     manifest = read_json(mining_bundle_dir / MINING_BUNDLE_MANIFEST_FILE)
     rows = list(iter_jsonl(mining_bundle_dir / MINING_TRAINING_CANDIDATES_FILE))
     errors: list[str] = []
@@ -165,9 +174,97 @@ def validate_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dict[str, Any]
     return rows, {
         "mining_bundle_used": True,
         "mining_bundle_dir": str(mining_bundle_dir),
+        "mining_bundle_schema": str(manifest.get("schema") or ""),
         "mining_bundle_status": str(manifest.get("bundle_status") or ""),
         "mining_candidate_rows_total": len(rows),
+        "dev_test_mining_rows_used_for_training": False,
+        "locked_eval_rows_used_for_training": False,
+        "hardcase_rows_used_for_training": False,
     }
+
+
+def validate_train_only_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    manifest = read_json(mining_bundle_dir / TRAIN_ONLY_MINING_BUNDLE_MANIFEST_FILE)
+    rows = list(iter_jsonl(mining_bundle_dir / TRAIN_ONLY_MINING_TRAINING_CANDIDATES_FILE))
+    errors: list[str] = []
+    if manifest.get("schema") != "tensor_audio_error_train_only_mining_bundle.v1":
+        errors.append("invalid_train_only_mining_bundle_schema")
+    if manifest.get("bundle_status") != "train_only_candidate_only":
+        errors.append("train_only_mining_bundle_not_usable")
+    if manifest.get("training_allowed") is not True:
+        errors.append("train_only_mining_bundle_training_allowed_not_true")
+    if manifest.get("shadow_only") is not True:
+        errors.append("train_only_mining_bundle_not_shadow_only")
+    if manifest.get("tensor_maps_required") is not True:
+        errors.append("train_only_mining_bundle_tensor_maps_required_not_true")
+    if manifest.get("scalar_features_used") is True:
+        errors.append("train_only_mining_bundle_scalar_features_used_true")
+    if manifest.get("dev_test_mining_rows_used_for_training") is True:
+        errors.append("dev_test_mining_rows_used_for_training")
+    if manifest.get("locked_eval_rows_used_for_training") is True:
+        errors.append("locked_eval_rows_used_for_training")
+    if manifest.get("hardcase_rows_used_for_training") is True:
+        errors.append("hardcase_rows_used_for_training")
+    if has_forbidden_true(manifest):
+        errors.append("train_only_mining_bundle_forbidden_true_flag")
+    if int(manifest.get("candidate_rows_total") or 0) != len(rows):
+        errors.append("train_only_mining_bundle_row_count_mismatch")
+    for index, row in enumerate(rows):
+        if row.get("training_candidate_schema") != "tensor_audio_error_train_only_training_candidate.v1":
+            errors.append(f"invalid_train_only_mining_row_schema:{index}")
+        if row.get("bundle_row_schema") != "tensor_audio_error_train_only_training_candidate.v1":
+            errors.append(f"invalid_train_only_mining_bundle_row_schema:{index}")
+        if row.get("training_candidate_status") != "candidate_only":
+            errors.append(f"train_only_mining_row_not_candidate_only:{index}")
+        if row.get("eligible_for_future_training_review") is not True:
+            errors.append(f"train_only_mining_row_not_review_eligible:{index}")
+        if row.get("shadow_only") is not True:
+            errors.append(f"train_only_mining_row_not_shadow_only:{index}")
+        if has_forbidden_true(row):
+            errors.append(f"train_only_mining_row_forbidden_true_flag:{index}")
+        if str(row.get("split") or "") != "train":
+            errors.append(f"train_only_mining_row_split_not_train:{index}")
+        if row.get("train_allowed") is not True:
+            errors.append(f"train_only_mining_row_train_allowed_not_true:{index}")
+        if row.get("hardcase_holdout") is True or row.get("hardcase") is True:
+            errors.append(f"train_only_mining_row_hardcase_true:{index}")
+        if row.get("locked_eval_row") is True:
+            errors.append(f"train_only_mining_row_locked_eval_true:{index}")
+        if row.get("scalar_features_used") is True:
+            errors.append(f"train_only_mining_row_scalar_features_used_true:{index}")
+        tensor_map_path = Path(str(row.get("tensor_map_path") or ""))
+        if not tensor_map_path.exists():
+            errors.append(f"train_only_mining_row_missing_tensor_map:{index}")
+        mining_label = str(row.get("source_mining_label") or "")
+        recommended_label = int(row.get("recommended_training_label") or 0)
+        if mining_label == "hard_negative_false_accept" and recommended_label != 0:
+            errors.append(f"hard_negative_label_mismatch:{index}")
+        elif mining_label == "false_reject_positive" and recommended_label != 1:
+            errors.append(f"false_reject_label_mismatch:{index}")
+        elif mining_label not in {"hard_negative_false_accept", "false_reject_positive"}:
+            errors.append(f"unknown_mining_label:{index}")
+    if errors:
+        raise ValueError(f"unsafe_mining_bundle:{','.join(errors)}")
+    return rows, {
+        "mining_bundle_used": True,
+        "mining_bundle_dir": str(mining_bundle_dir),
+        "mining_bundle_schema": str(manifest.get("schema") or ""),
+        "mining_bundle_status": str(manifest.get("bundle_status") or ""),
+        "mining_candidate_rows_total": len(rows),
+        "dev_test_mining_rows_used_for_training": False,
+        "locked_eval_rows_used_for_training": False,
+        "hardcase_rows_used_for_training": False,
+    }
+
+
+def validate_mining_bundle(mining_bundle_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if (mining_bundle_dir / LOCKED_MINING_SLICE_MANIFEST_FILE).exists():
+        raise ValueError("unsafe_mining_bundle:locked_eval_mining_slice_not_training_bundle")
+    if (mining_bundle_dir / TRAIN_ONLY_MINING_BUNDLE_MANIFEST_FILE).exists():
+        return validate_train_only_mining_bundle(mining_bundle_dir)
+    if (mining_bundle_dir / MINING_BUNDLE_MANIFEST_FILE).exists():
+        return validate_legacy_mining_bundle(mining_bundle_dir)
+    raise ValueError("unsafe_mining_bundle:missing_supported_mining_bundle_manifest")
 
 
 def mining_sample_weights(
@@ -389,6 +486,8 @@ def train_tensor_audio_error_critic(
         reason = "train_rows_below_minimum"
     elif len(set(train_labels)) < 2:
         reason = "missing_train_positive_or_negative_class"
+    elif not eval_rows:
+        reason = "missing_locked_eval_rows"
 
     if reason:
         manifest = {
@@ -413,7 +512,7 @@ def train_tensor_audio_error_critic(
 
     train_x = np.vstack([row["features"] for row in train_rows])
     train_y = np.asarray(train_labels, dtype=np.int32)
-    eval_target_rows = eval_rows if eval_rows else train_rows
+    eval_target_rows = eval_rows
     eval_x = np.vstack([row["features"] for row in eval_target_rows])
     candidates: list[tuple[str, Any, np.ndarray, dict[str, Any], dict[str, Any]]] = []
     model_specs = [
