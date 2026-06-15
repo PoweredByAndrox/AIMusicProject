@@ -399,15 +399,22 @@ true, tensor maps present, no hard-case holdout flag, and no locked-eval flag.
 Rows with `hardcase=true` are allowed only when they are not holdout rows; the
 harvest records this with `hardcase_train_rows_used=true` and keeps
 `hardcase_holdout_rows_used=false`.
-Source B train-only generation remains blocked unless a safe train-only
-generation route exists.
+Source B may consume already grounded runtime rows from
+`audio_error_window_dataset.jsonl` only when each row is
+`safe_for_training=true`, `example_label=negative_hard`, `train_split=train`,
+has an existing tensor `.npz` error map, has exact judge and pair provenance,
+and does not overlap dev/test/locked hard-case keys. Training-view rows remain
+eligible only if they also carry a real tensor `.npz`; scalar-only training
+views are written to the skipped report and never enter the harvest.
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/harvest_tensor_audio_error_train_hard_negatives.py \
   --negative-gap-audit-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1l_negative_gap_audit \
   --tensor-dataset-dir /app/lab_artifacts/audio_error_critic/tensor_r1_dataset_001 \
   --split-dir /app/lab_artifacts/audio_error_grounding/leak_safe_eval_001 \
-  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1m_train_hard_negative_harvest
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_hard_negative_harvest_001/r1m_train_hard_negative_harvest \
+  --source-b-training-views-dir /app/lab_artifacts/audio_error_grounding/dataset_001_training_views \
+  --source-b-grounding-dataset-dir /app/lab_artifacts/audio_error_grounding/source_b_runtime_grounding_batch_001
 ```
 
 Validate:

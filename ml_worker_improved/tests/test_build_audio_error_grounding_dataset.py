@@ -51,6 +51,8 @@ def window_metric(*, start: float, duration: float, decision: str, blockers: lis
         "vocal_blockers": blockers if "vocal" in " ".join(blockers) else [],
         "minus_blockers": blockers if "minus" in " ".join(blockers) or "phase" in " ".join(blockers) else [],
         "reasons": blockers,
+        "pair_decision": "pair_compatible",
+        "pair_compatibility_status": "pair_compatible",
         "mixture_consistency_score": 0.92,
         "phase_consistency_score": 0.83,
         "vocal_leakage_in_minus_score": 0.78 if blockers else 0.04,
@@ -136,6 +138,57 @@ def create_run(root: Path, *, missing_minus: bool = False) -> Path:
     )
     write_json(run_dir / "preview_render_contract.json", {"release_ready": False, "audio_preview_ready": True})
     return run_dir
+
+
+def test_candidate_config_id_is_used_as_explicit_route_provenance(tmp_path: Path) -> None:
+    run_dir = create_run(tmp_path)
+    for name in ("candidate_pool.jsonl", "vocal_windowed_judge.jsonl", "minus_windowed_judge.jsonl"):
+        rows = read_jsonl(run_dir / name)
+        for row in rows:
+            row.pop("route_id", None)
+            row["candidate_config_id"] = "local_registered__htdemucs_ft__both__shared"
+        write_jsonl(run_dir / name, rows)
+    output_dir = tmp_path / "dataset"
+
+    manifest = build_audio_error_grounding_dataset(
+        run_roots=[run_dir],
+        output_dir=output_dir,
+        window_sec=0.5,
+        hop_sec=0.5,
+        map_max_bins=16,
+        map_max_frames=8,
+        max_waveform_samples=64,
+    )
+
+    rows = read_jsonl(output_dir / "audio_error_window_dataset.jsonl")
+    assert rows
+    assert manifest["safe_for_training_count"] == len(rows)
+    assert all(row["route_id"] == "local_registered__htdemucs_ft__both__shared" for row in rows)
+    assert all(row["safe_for_training"] is True for row in rows)
+    assert all(row["error_map_paths"]["npz"].endswith(".npz") for row in rows)
+
+
+def test_window_pair_decision_is_used_as_explicit_pair_provenance(tmp_path: Path) -> None:
+    run_dir = create_run(tmp_path)
+    write_jsonl(run_dir / "pair_compatibility.jsonl", [])
+    output_dir = tmp_path / "dataset"
+
+    manifest = build_audio_error_grounding_dataset(
+        run_roots=[run_dir],
+        output_dir=output_dir,
+        window_sec=0.5,
+        hop_sec=0.5,
+        map_max_bins=16,
+        map_max_frames=8,
+        max_waveform_samples=64,
+    )
+
+    rows = read_jsonl(output_dir / "audio_error_window_dataset.jsonl")
+    assert rows
+    assert manifest["safe_for_training_count"] == len(rows)
+    assert all(row["pair_compatibility_status"] == "pair_compatible" for row in rows)
+    assert all(row["safe_for_training"] is True for row in rows)
+    assert all(row["error_map_paths"]["npz"].endswith(".npz") for row in rows)
 
 
 def test_build_audio_error_grounding_dataset_writes_rows_maps_and_manifest(tmp_path: Path) -> None:

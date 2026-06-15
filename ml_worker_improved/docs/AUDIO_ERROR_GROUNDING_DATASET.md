@@ -26,6 +26,12 @@ from known runtime artifacts. It does not invent candidate ids, route ids,
 window timing, pair status, or judge decisions. If required provenance is
 missing, the row remains visible for accounting but is marked
 `safe_for_training=false` with a concrete `unsafe_reason`.
+Candidate `route_id` may come from the runtime `candidate_config_id` when that
+is the explicit separator configuration id recorded in `candidate_pool.jsonl`.
+Pair status may come from window-level `pair_decision` or
+`pair_compatibility_status` when it is written by the windowed judge for that
+same bounded window. These are provenance aliases, not synthetic fallback
+values.
 
 ## Outputs
 

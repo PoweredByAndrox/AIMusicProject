@@ -378,6 +378,8 @@ def build_window_row(
         or row.get(f"{stem_type}_route_id")
         or candidate.get("route_id")
         or candidate.get(f"{stem_type}_route_id")
+        or row.get("candidate_config_id")
+        or candidate.get("candidate_config_id")
         or candidate.get("model_id")
         or ""
     )
@@ -386,7 +388,16 @@ def build_window_row(
     end_sec = start_sec + max(0.0, duration_sec)
     blockers = blockers_for(stem_type, row, window)
     judge_decision = judge_decision_for(stem_type, row, window)
-    pair_status = pair_status_map.get((track_id, candidate_id), str(row.get("pair_compatibility_status") or ""))
+    pair_status = pair_status_map.get(
+        (track_id, candidate_id),
+        str(
+            row.get("pair_compatibility_status")
+            or row.get("pair_decision")
+            or window.get("pair_compatibility_status")
+            or window.get("pair_decision")
+            or ""
+        ),
+    )
     paths = candidate_paths(row, candidate)
     window_id = "__".join(
         [
