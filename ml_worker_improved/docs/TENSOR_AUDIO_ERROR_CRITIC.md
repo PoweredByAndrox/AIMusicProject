@@ -129,6 +129,26 @@ rejects for future dataset/model improvement planning, while keeping
 `training_started=false`, `runtime_gates_changed=false`, and
 `release_ready=false`.
 
+## Build Mining Bundle
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/build_tensor_audio_error_mining_bundle.py \
+  --analysis-dir /app/lab_artifacts/audio_error_critic/tensor_r1_shadow_analysis_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_mining_bundle_001
+```
+
+Outputs:
+
+- `tensor_audio_error_mining_bundle_manifest.json`
+- `tensor_audio_error_training_candidates.jsonl`
+- `tensor_audio_error_mining_bundle_summary.md`
+
+The mining bundle is `candidate_only`: it preserves hard-negative and
+false-reject provenance for future training review, but it does not train a
+critic, change runtime gates, or mark anything `release_ready`.
+The builder fails closed if shadow analysis safety flags are violated or if
+input rows do not match the expected hard-negative/false-reject provenance.
+
 ## Contract
 
 `tensor_maps_required=true` and `scalar_fallback_used=false` are hard contract fields.

@@ -28,6 +28,7 @@ FORBIDDEN_TRUE_FLAGS = {
     "runtime_gate_decision_applied",
     "runtime_gates_changed",
     "training_started",
+    "critic_training_started",
     "separator_training_started",
     "repair_adapter_training_started",
     "fine_tune_started",
