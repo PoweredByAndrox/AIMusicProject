@@ -174,6 +174,8 @@ def test_builds_locked_split_with_zero_critical_leakage(tmp_path: Path) -> None:
     for row in split_rows:
         split_by_track.setdefault(row["track_id"], set()).add(row["split"])
     assert all(len(splits) == 1 for splits in split_by_track.values())
+    assert any(row["split"] == "train" and row["label"] == 0 and row["train_allowed"] is True for row in split_rows)
+    assert all(row["train_allowed"] is False for row in split_rows if row.get("hardcase_holdout") is True)
 
 
 def test_detect_leakage_reports_candidate_audio_and_window_overlap(tmp_path: Path) -> None:

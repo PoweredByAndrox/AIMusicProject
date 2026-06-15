@@ -355,15 +355,17 @@ def assign_leak_safe_splits(rows: Sequence[dict[str, Any]]) -> list[dict[str, An
         return []
     groups = build_leakage_groups(rows)
     ordered_groups = sorted(groups.values(), key=lambda indexes: stable_hash([rows[i]["row_uid"] for i in indexes]))
-    hardcase_group_keys = {
+    hardcase_group_keys = [
         tuple(indexes)
         for indexes in ordered_groups
         if any(rows[index].get("hardcase") is True for index in indexes)
-    }
+    ]
+    hardcase_holdout_count = max(1, len(hardcase_group_keys) // 3) if hardcase_group_keys else 0
+    hardcase_holdout_group_keys = set(hardcase_group_keys[:hardcase_holdout_count])
     split_by_group: dict[tuple[int, ...], str] = {}
     for indexes in ordered_groups:
         key = tuple(indexes)
-        if key in hardcase_group_keys:
+        if key in hardcase_holdout_group_keys:
             split_by_group[key] = "test"
 
     remaining = [indexes for indexes in ordered_groups if tuple(indexes) not in split_by_group]
@@ -384,16 +386,34 @@ def assign_leak_safe_splits(rows: Sequence[dict[str, Any]]) -> list[dict[str, An
     if remaining_count and all(split != "train" for split in split_by_group.values()):
         last_non_hardcase = next((tuple(indexes) for indexes in reversed(remaining)), tuple(remaining[-1]))
         split_by_group[last_non_hardcase] = "train"
+    train_has_negative = any(
+        split_by_group.get(tuple(indexes)) == "train" and any(int(rows[index].get("label") or 0) == 0 for index in indexes)
+        for indexes in ordered_groups
+    )
+    if not train_has_negative:
+        move_to_train = next(
+            (
+                tuple(indexes)
+                for indexes in reversed(ordered_groups)
+                if tuple(indexes) not in hardcase_holdout_group_keys
+                and any(int(rows[index].get("label") or 0) == 0 for index in indexes)
+            ),
+            None,
+        )
+        if move_to_train is not None:
+            split_by_group[move_to_train] = "train"
 
     enriched: list[dict[str, Any]] = []
     for indexes in ordered_groups:
         split = split_by_group[tuple(indexes)]
         group_id = stable_hash([rows[index]["row_uid"] for index in indexes])[:16]
+        is_holdout_group = tuple(indexes) in hardcase_holdout_group_keys
         for index in indexes:
             row = dict(rows[index])
             row["leakage_group_id"] = group_id
             row["split"] = split
-            row["train_allowed"] = split == "train" and row.get("safe_for_training") is True and row.get("hardcase") is not True
+            row["hardcase_holdout"] = bool(is_holdout_group and row.get("hardcase") is True)
+            row["train_allowed"] = split == "train" and row.get("safe_for_training") is True and row.get("hardcase_holdout") is not True
             row["release_ready"] = False
             row.pop("source_row", None)
             enriched.append(row)
@@ -515,7 +535,7 @@ def build_hardcase_holdout(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "release_ready": False,
         }
         for row in rows
-        if row.get("hardcase") is True
+        if row.get("hardcase_holdout") is True
     ]
     return {
         "schema": "hardcase_holdout_manifest.v1",

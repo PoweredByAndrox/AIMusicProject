@@ -60,13 +60,15 @@ Route/model family overlap is reported as warning by default because current art
 
 ## Hard-Case Holdout
 
-Rows with severe blockers such as `severe_phase_collapse` or `severe_vocal_bleed_in_minus` are locked into eval/holdout use:
+Rows selected into the deterministic hard-case holdout from severe blockers such as `severe_phase_collapse` or `severe_vocal_bleed_in_minus` are locked into eval/holdout use:
 
 - `locked=true`
 - `train_allowed=false`
 - `release_ready=false`
 
 Future R1/R2/R3/R4 work must consume this split instead of rebuilding its own ad hoc train/test partition.
+
+Not every hard negative is forced into holdout. Tensor/audio critics need leak-safe hard negatives in train, so non-holdout hard negatives may remain trainable while the locked holdout remains unavailable for training.
 
 ## MODEL-2C Locked Re-Eval
 
