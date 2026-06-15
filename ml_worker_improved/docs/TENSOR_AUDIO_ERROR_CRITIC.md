@@ -46,11 +46,42 @@ Outputs:
 - `tensor_audio_error_localization.jsonl`
 - `tensor_audio_error_critic_summary.json`
 
+The trainer evaluates multiple tensor-only candidate classifiers and selects
+the best shadow model by conservative zero-false-accept coverage first, then
+AUROC and accuracy. Current candidate kinds are:
+
+- `logistic_regression_balanced`
+- `random_forest_balanced`
+
+The selected `model_kind` and all `candidate_model_metrics` are recorded in
+`tensor_audio_error_critic_manifest.json`.
+
+## Calibrate Shadow Thresholds
+
+```bash
+docker compose run --rm --no-deps ml-worker python tools/calibrate_tensor_audio_error_critic.py \
+  --model-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_001 \
+  --output-dir /app/lab_artifacts/audio_error_critic/tensor_r1_calibration_001 \
+  --max-false-accept-rate 0.0
+```
+
+Outputs:
+
+- `tensor_audio_error_thresholds.json`
+- `tensor_audio_error_threshold_sweep.jsonl`
+
+Calibration reads only the locked eval predictions from the trained shadow
+critic. It refuses `release_ready` models and scalar-fallback models, and it
+marks the calibration `not_usable` if no positive eval coverage is possible
+within the false-accept budget.
+
 ## Validate
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/validate_tensor_audio_error_critic.py \
   --model-dir /app/lab_artifacts/audio_error_critic/tensor_r1_model_001 \
+  --calibration-dir /app/lab_artifacts/audio_error_critic/tensor_r1_calibration_001 \
+  --require-usable-calibration \
   --require-trained
 ```
 

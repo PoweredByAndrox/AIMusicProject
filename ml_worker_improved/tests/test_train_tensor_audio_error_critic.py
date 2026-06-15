@@ -97,6 +97,8 @@ def test_train_tensor_critic_uses_npz_maps_and_writes_localization(tmp_path: Pat
     assert manifest["scalar_fallback_used"] is False
     assert manifest["release_ready"] is False
     assert manifest["threshold_metrics"]["threshold_false_accept_rate"] == 0.0
+    assert manifest["model_kind"] in {"logistic_regression_balanced", "random_forest_balanced"}
+    assert set(manifest["candidate_model_metrics"]) == {"logistic_regression_balanced", "random_forest_balanced"}
     assert (tmp_path / "model" / "tensor_audio_error_critic.joblib").exists()
     assert read_jsonl(tmp_path / "model" / "tensor_audio_error_critic_eval.jsonl")
     localizations = read_jsonl(tmp_path / "model" / "tensor_audio_error_localization.jsonl")

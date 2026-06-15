@@ -15,7 +15,13 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def validate_tensor_audio_error_critic(model_dir: Path, *, require_trained: bool = False) -> dict[str, Any]:
+def validate_tensor_audio_error_critic(
+    model_dir: Path,
+    *,
+    calibration_dir: Path | None = None,
+    require_trained: bool = False,
+    require_usable_calibration: bool = False,
+) -> dict[str, Any]:
     errors: list[str] = []
     manifest_path = model_dir / "tensor_audio_error_critic_manifest.json"
     if not manifest_path.exists():
@@ -41,11 +47,28 @@ def validate_tensor_audio_error_critic(model_dir: Path, *, require_trained: bool
         errors.append("training_not_completed")
     if manifest.get("training_completed") is True and not (model_dir / "tensor_audio_error_critic.joblib").exists():
         errors.append("missing_trained_model_file")
+    calibration_status = ""
+    if calibration_dir is None and require_usable_calibration:
+        errors.append("missing_required_calibration_dir")
+    if calibration_dir is not None:
+        calibration_path = calibration_dir / "tensor_audio_error_thresholds.json"
+        if not calibration_path.exists():
+            errors.append("missing_tensor_threshold_calibration")
+        else:
+            calibration = read_json(calibration_path)
+            calibration_status = str(calibration.get("calibration_status") or "")
+            if calibration.get("release_ready") is True:
+                errors.append("calibration_release_ready_true")
+            if calibration.get("scalar_fallback_used") is True:
+                errors.append("calibration_scalar_fallback_used")
+            if require_usable_calibration and calibration_status != "calibrated":
+                errors.append("calibration_not_usable")
     result = {
         "schema": "tensor_audio_error_critic_validation.v1",
         "model_dir": str(model_dir),
         "ok": not errors,
         "errors": errors,
+        "calibration_status": calibration_status,
         "release_ready": False,
         "separator_training_started": False,
         "repair_adapter_training_started": False,
@@ -58,13 +81,20 @@ def validate_tensor_audio_error_critic(model_dir: Path, *, require_trained: bool
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate a shadow tensor audio error critic artifact.")
     parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--calibration-dir", type=Path, default=None)
     parser.add_argument("--require-trained", action="store_true")
+    parser.add_argument("--require-usable-calibration", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    result = validate_tensor_audio_error_critic(args.model_dir, require_trained=args.require_trained)
+    result = validate_tensor_audio_error_critic(
+        args.model_dir,
+        calibration_dir=args.calibration_dir,
+        require_trained=args.require_trained,
+        require_usable_calibration=args.require_usable_calibration,
+    )
     return 0 if result["ok"] else 1
 
 

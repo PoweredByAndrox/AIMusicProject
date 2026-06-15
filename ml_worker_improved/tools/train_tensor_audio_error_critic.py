@@ -11,6 +11,7 @@ import joblib
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -221,11 +222,39 @@ def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_
 
     train_x = np.vstack([row["features"] for row in train_rows])
     train_y = np.asarray(train_labels, dtype=np.int32)
-    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000, class_weight="balanced", random_state=1729))
-    model.fit(train_x, train_y)
     eval_target_rows = eval_rows if eval_rows else train_rows
     eval_x = np.vstack([row["features"] for row in eval_target_rows])
-    probabilities = model.predict_proba(eval_x)[:, 1].astype(float)
+    candidates: list[tuple[str, Any, np.ndarray, dict[str, Any], dict[str, Any]]] = []
+    model_specs = [
+        (
+            "logistic_regression_balanced",
+            make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000, class_weight="balanced", random_state=1729)),
+        ),
+        (
+            "random_forest_balanced",
+            RandomForestClassifier(
+                n_estimators=160,
+                random_state=1729,
+                class_weight="balanced",
+                min_samples_leaf=2,
+                max_features="sqrt",
+            ),
+        ),
+    ]
+    for model_kind, model in model_specs:
+        model.fit(train_x, train_y)
+        candidate_probabilities = model.predict_proba(eval_x)[:, 1].astype(float)
+        candidate_metrics = metrics_for_rows(eval_target_rows, candidate_probabilities)
+        candidate_threshold_metrics = conservative_threshold_metrics(eval_target_rows, candidate_probabilities)
+        candidates.append((model_kind, model, candidate_probabilities, candidate_metrics, candidate_threshold_metrics))
+    model_kind, model, probabilities, eval_metrics, threshold_metrics = max(
+        candidates,
+        key=lambda item: (
+            float((item[4] or {}).get("accept_coverage") or 0.0),
+            float((item[3] or {}).get("auroc") or 0.0),
+            float((item[3] or {}).get("accuracy") or 0.0),
+        ),
+    )
     eval_payloads = []
     localization_rows = []
     for row, probability in zip(eval_target_rows, probabilities):
@@ -242,8 +271,6 @@ def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_
             }
         )
         localization_rows.append(localization_payload(row, float(probability)))
-    eval_metrics = metrics_for_rows(eval_target_rows, probabilities)
-    threshold_metrics = conservative_threshold_metrics(eval_target_rows, probabilities)
     joblib.dump({"model": model, "required_map_names": REQUIRED_MAP_NAMES}, output_dir / "tensor_audio_error_critic.joblib")
     write_jsonl(output_dir / "tensor_audio_error_critic_eval.jsonl", eval_payloads)
     write_jsonl(output_dir / "tensor_audio_error_localization.jsonl", localization_rows)
@@ -263,7 +290,12 @@ def train_tensor_audio_error_critic(*, dataset_dir: Path, output_dir: Path, min_
         "scalar_fallback_used": False,
         "critic_training_started": True,
         "shadow_only": True,
+        "model_kind": model_kind,
         "model_file": "tensor_audio_error_critic.joblib",
+        "candidate_model_metrics": {
+            candidate_kind: {"eval_metrics": candidate_metrics, "threshold_metrics": candidate_threshold_metrics}
+            for candidate_kind, _, _, candidate_metrics, candidate_threshold_metrics in candidates
+        },
         **SAFETY_FLAGS,
     }
     write_json(output_dir / "tensor_audio_error_critic_manifest.json", manifest)
