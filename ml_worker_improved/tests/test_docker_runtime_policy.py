@@ -88,6 +88,8 @@ REQUIRED_DOCKER_ONLY_ENTRYPOINTS = (
     TOOLS_ROOT / "run_metadata_regression.py",
     TOOLS_ROOT / "route_drum_model_zoo_segments.py",
     TOOLS_ROOT / "run_model_zoo_benchmark.py",
+    TOOLS_ROOT / "run_aris_refinement_matrix.py",
+    TOOLS_ROOT / "build_aris_refinement_candidate_pool.py",
     TOOLS_ROOT / "run_posthoc_release_evaluator.py",
     TOOLS_ROOT / "run_reco_regression.py",
     TOOLS_ROOT / "run_registered_model_candidate.py",
