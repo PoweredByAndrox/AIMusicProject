@@ -32,6 +32,7 @@ REQUIRED_DOCKER_ONLY_ENTRYPOINTS = (
     TOOLS_ROOT / "apply_windowed_vocal_intelligibility_restore.py",
     TOOLS_ROOT / "batch_export_hq_stem_previews.py",
     TOOLS_ROOT / "batch_export_hq_vocal_previews.py",
+    TOOLS_ROOT / "build_aris_idea_funnel.py",
     TOOLS_ROOT / "build_metadata_regression.py",
     TOOLS_ROOT / "build_flstudio_ground_truth_bundle.py",
     TOOLS_ROOT / "build_complex_oracle_mask_teacher.py",
