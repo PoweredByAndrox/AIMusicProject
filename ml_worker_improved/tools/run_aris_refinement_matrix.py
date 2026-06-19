@@ -204,10 +204,25 @@ def _truthy_contract_flag(value: Any) -> bool:
     return _normalize_token(value) in {"1", "true", "yes", "y", "used"}
 
 
+def _falsey_contract_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    return _normalize_token(value) in {"0", "false", "no", "n", "unavailable", "missing", "pruned"}
+
+
 def _candidate_has_forbidden_fallback(candidate: dict[str, Any]) -> bool:
     return _truthy_contract_flag(candidate.get("fallback_used")) or _truthy_contract_flag(
         candidate.get("fallback_as_success")
     )
+
+
+def _candidate_has_audio_bytes(candidate: dict[str, Any]) -> bool:
+    if _truthy_contract_flag(candidate.get("metadata_only")):
+        return False
+    for key in ("binary_audio_available", "audio_bytes_available", "binary_audio_model_bytes_available"):
+        if key in candidate and _falsey_contract_flag(candidate.get(key)):
+            return False
+    return True
 
 
 def _candidate_has_objective_gate(candidate: dict[str, Any]) -> bool:
@@ -221,6 +236,8 @@ def _candidate_passed(candidate: dict[str, Any]) -> bool:
     if _candidate_failed_checks(candidate):
         return False
     if _candidate_has_forbidden_fallback(candidate):
+        return False
+    if not _candidate_has_audio_bytes(candidate):
         return False
     if _normalize_token(candidate.get("pair_consistency_gate") or "failed") != "passed":
         return False
@@ -237,6 +254,8 @@ def _candidate_blockers(candidate: dict[str, Any], stem: str) -> list[str]:
         blockers.append(f"{stem}_candidate_not_accepted")
     if _candidate_has_forbidden_fallback(candidate):
         blockers.append("fallback_used_not_allowed")
+    if not _candidate_has_audio_bytes(candidate):
+        blockers.append("binary_audio_unavailable")
     if _normalize_token(candidate.get("pair_consistency_gate") or "failed") != "passed":
         blockers.append("pair_consistency_gate_failed")
     if not _candidate_has_objective_gate(candidate):

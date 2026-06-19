@@ -98,8 +98,26 @@ def _truthy_contract_flag(value: Any) -> bool:
     return _normalize_token(value) in {"1", "true", "yes", "y", "used"}
 
 
+def _falsey_contract_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    return _normalize_token(value) in {"0", "false", "no", "n", "unavailable", "missing", "pruned"}
+
+
 def _provenance_flag(key: str, *sources: dict[str, Any]) -> bool:
     return any(_truthy_contract_flag(source.get(key)) for source in sources if isinstance(source, dict))
+
+
+def _audio_bytes_available(*sources: dict[str, Any]) -> bool:
+    if _provenance_flag("metadata_only", *sources):
+        return False
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("binary_audio_available", "audio_bytes_available", "binary_audio_model_bytes_available"):
+            if key in source and _falsey_contract_flag(source.get(key)):
+                return False
+    return True
 
 
 def _validate_family(value: Any) -> str:
@@ -167,6 +185,7 @@ def _row_from_job(
     candidate_manifest = execution_manifest.get("candidate_manifest") if isinstance(execution_manifest.get("candidate_manifest"), dict) else {}
     fallback_used = _provenance_flag("fallback_used", job, execution_manifest, candidate_manifest)
     fallback_as_success = _provenance_flag("fallback_as_success", job, execution_manifest, candidate_manifest)
+    audio_available = _audio_bytes_available(job, execution_manifest, candidate_manifest)
     target_audio_path = str(candidate_manifest.get("target_audio_path") or "")
     short_audio_path = _short_audio_path(target_audio_path, track_alias_value=track_alias_value, stem=stem)
     status = _normalize_token(job.get("candidate_status") or "")
@@ -193,6 +212,9 @@ def _row_from_job(
         "release_ready": False,
         "fallback_used": fallback_used,
         "fallback_as_success": fallback_as_success,
+        "binary_audio_available": audio_available,
+        "audio_bytes_available": audio_available,
+        "metadata_only": not audio_available,
     }
     failed_checks = job.get("failed_checks") or job.get("failed_check_names")
     if failed_checks:

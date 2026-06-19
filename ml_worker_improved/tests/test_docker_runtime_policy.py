@@ -79,6 +79,7 @@ REQUIRED_DOCKER_ONLY_ENTRYPOINTS = (
     TOOLS_ROOT / "list_model_registry.py",
     TOOLS_ROOT / "localize_reference_quality_failures.py",
     TOOLS_ROOT / "manage_artifact_rag.py",
+    TOOLS_ROOT / "materialize_aris_rag_wave_metadata.py",
     TOOLS_ROOT / "oracle_stem_upper_bound.py",
     TOOLS_ROOT / "query_artifact_rag.py",
     TOOLS_ROOT / "reference_guided_drum_candidate_router.py",

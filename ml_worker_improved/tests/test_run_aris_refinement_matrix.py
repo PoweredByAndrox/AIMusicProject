@@ -323,6 +323,57 @@ def test_rejects_fallback_as_success_provenance(tmp_path: Path) -> None:
     assert "fallback_used_not_allowed" in rejected[0]["failed_checks"]
 
 
+def test_rejects_metadata_only_candidates_without_audio_bytes(tmp_path: Path) -> None:
+    rag_root = tmp_path / "artifact_rag"
+    plan_json = _plan(rag_root)
+    pool = _write_jsonl(
+        tmp_path / "pool.jsonl",
+        [
+            {
+                "track_alias": "t001",
+                "stem": "vocal",
+                "family": "scnet",
+                "candidate_alias": "v001",
+                "candidate_status": "passed",
+                "reference_gate": "passed",
+                "no_reference_gate": "not_required",
+                "pair_consistency_gate": "passed",
+                "binary_audio_available": False,
+                "audio_bytes_available": False,
+                "metadata_only": True,
+                "short_audio_path": "audio/t001/vocal.flac",
+            },
+            {
+                "track_alias": "t001",
+                "stem": "minus",
+                "family": "bs_roformer",
+                "candidate_alias": "m001",
+                "candidate_status": "passed",
+                "reference_gate": "passed",
+                "no_reference_gate": "not_required",
+                "pair_consistency_gate": "passed",
+                "binary_audio_available": False,
+                "audio_bytes_available": False,
+                "metadata_only": True,
+                "short_audio_path": "audio/t001/minus.flac",
+            },
+        ],
+    )
+
+    manifest = run_aris_refinement_matrix(
+        artifact_rag_root=rag_root,
+        planning_json=plan_json,
+        candidate_pool_jsonl=pool,
+        output_dir=rag_root / "runs" / "r001",
+    )
+
+    assert manifest["accepted_count"] == 0
+    assert manifest["delivery_allowed"] is False
+    assert _read_jsonl(Path(manifest["accepted_jsonl"])) == []
+    rejected = _read_jsonl(Path(manifest["rejected_jsonl"]))
+    assert "binary_audio_unavailable" in rejected[0]["failed_checks"]
+
+
 def test_rejects_unsafe_or_raw_track_alias_paths(tmp_path: Path) -> None:
     rag_root = tmp_path / "artifact_rag"
     plan_json = _plan(rag_root)
