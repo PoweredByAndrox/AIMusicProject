@@ -66,6 +66,42 @@ ALWAYS-APPLY AUDIO OBSERVABILITY AND ACCELERATOR RULE
 - accepted/listen artifacts запрещено выдавать из route, у которого отсутствует достаточный progress/provenance trail для воспроизведения candidate generation, scoring, gating и accelerator mode.
 
 ==================================================
+ALWAYS-APPLY WINDOWS-SAFE ARTIFACT NAMING RULE
+==================================================
+
+Любая новая папка или файл для listen/result/debug/model/audio artifacts должна иметь короткое Windows-safe имя.
+
+Обязательный contract:
+- не вставлять raw track title, full track_id, full stem_id, full config_id, long route name или полный hash в имя файла/папки;
+- использовать короткие стабильные alias-пути вроде `audio/v001.flac`, `audio/m001.flac`, `audio/t001/vocal.flac`, `audio/t001/minus.flac`;
+- держать один path segment коротким: целевой лимит <= 32 символа для generated artifact segments, hard limit <= 64 символа, если старый внешний tool требует более длинный segment;
+- metadata/debug/queue/review filenames тоже должны быть короткими, например `pack.json`, `tpl.json`, `items.jsonl`, `handoff.json`, `playlist.m3u`, `validation.json`, `queue.json`, `rows.jsonl`, `summary.md`, `progress.jsonl`;
+- provenance хранить в machine-readable manifest: source track id/title, source stem id, config id, route id, source audio path, sha256, duration, quality gates;
+- user-facing listen pack обязан иметь alias/provenance map, чтобы короткий файл можно было однозначно связать с исходным candidate;
+- новые tests для artifact builders должны проверять, что raw IDs не попадают в path и что provenance сохранён в manifest;
+- старые artifacts не переименовывать на месте без отдельной migration-команды; новые deliverables и rebuilt listen packs обязаны соблюдать это правило.
+
+==================================================
+ALWAYS-APPLY ARTIFACT RAG RETENTION RULE
+==================================================
+
+Любая новая работа с `lab_artifacts` должна идти через RAG/manifest retention system, а не через бесконтрольное накопление файлов в `lab_artifacts`.
+
+Обязательный contract:
+- перед чтением старых результатов сначала проверять `artifact_rag/current.json`, затем `artifact_rag/<rag_id>/idx.json`, `chunks.jsonl`, `manifest_refs.jsonl`, `roots.jsonl`, `files.jsonl` и `path_map.jsonl`, если они есть;
+- не создавать новые result/listen/debug/model/audio artifact roots напрямую в `lab_artifacts`, если это не краткоживущий staging root с последующим RAG ingest/cleanup в той же итерации;
+- каждый новый artifact batch обязан иметь RAG pack под `artifact_rag/<short_id>` с короткими Windows-safe именами: `idx.json`, `sum.md`, `roots.jsonl`, `files.jsonl`, `manifest_refs.jsonl`, `chunks.jsonl`, `text_refs.zip`, `cleanup.json`, `path_map.jsonl`, `progress.jsonl`;
+- RAG pack обязан хранить provenance: source root, original path, short alias, sha256 для сохранённых text refs, size, mtime, schema/status fields, delivery/release flags, blocker reasons и cleanup/retention mode;
+- после любого route, который создаёт bulky files в `lab_artifacts`, нужно запустить Docker-only RAG ingest и затем либо удалить disposable roots, либо перевести старые covered roots в thin-RAG state;
+- thin-RAG cleanup должен сохранять полноценные LLM-readable evidence surfaces: `idx.json`, `roots.jsonl`, `files.jsonl`, `manifest_refs.jsonl`, `chunks.jsonl`, `text_refs.zip`, `cleanup.json`, `progress.jsonl`, status fields, blocker reasons и provenance; bulky binary audio/model bytes при этом удаляются и manifest обязан явно писать `binary_audio_model_bytes_available=false`;
+- exact-byte vault допустим только когда binary preservation действительно требуется; для разгрузки проекта он не должен оставаться внутри `D:\AIMusicProject`, иначе размер проекта не уменьшится;
+- metadata-only RAG delete допустим только для disposable diagnostic/cache roots; source/reference/golden/training audio roots нельзя удалять без thin-RAG evidence coverage, а если нужны сами binary bytes, их нужно хранить во внешнем явно указанном vault/storage, не маскируя это как освобождение места;
+- rejected/blocked/diagnostic artifacts в RAG остаются evidence only и не становятся listen/result artifacts;
+- LLM/agent обязан ссылаться на RAG manifest/chunks как первый retrieval слой и не обходить RAG прямым ручным browsing `lab_artifacts`, если нужный root уже покрыт RAG pack;
+- cleanup считается выполненным только если dry-run/execute manifest подтверждает, что удалённые или перенесённые roots находятся внутри `lab_artifacts`, имеют RAG coverage и отражены в `cleanup.json`/`path_map.jsonl`;
+- если RAG coverage неполный, явно фиксировать blocker и не удалять root ради экономии места.
+
+==================================================
 MANDATORY EXECUTION PROTOCOL
 ==================================================
 
