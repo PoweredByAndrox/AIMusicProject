@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-if str(APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(APP_ROOT))
+TOOLS_ROOT = Path(__file__).resolve().parent
+for import_root in (APP_ROOT, TOOLS_ROOT):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
 
+from docker_runtime import require_docker_runtime  # noqa: E402
 from tools.artifact_name_policy import indexed_alias, validate_artifact_segment  # noqa: E402
-from tools.docker_runtime import require_docker_runtime  # noqa: E402
 
 SCHEMA = "artifact_rag_pack.v1"
 INDEX_SCHEMA = "artifact_rag_index.v2"
@@ -391,6 +393,7 @@ def prune_existing_vault_pack(*, pack_dir: Path, allow_prune_vault: bool = False
     if isinstance(contract, dict):
         contract["binary_audio_model_bytes_available"] = False
         contract["exact_byte_vault_available"] = False
+        contract["move_to_vault_preserves_binary_bytes"] = False
         contract["llm_retrieval_complete_for_textual_evidence"] = True
         contract["current_retention_mode"] = "thin_rag_only"
     write_json(idx_path, idx)

@@ -275,6 +275,7 @@ def test_prune_existing_vault_marks_pack_thin_and_removes_binary_bytes(tmp_path:
     idx = read_json(pack_dir / "idx.json")
     assert idx["current_retention_mode"] == "thin_rag_only"
     assert idx["retention_contract"]["exact_byte_vault_available"] is False
+    assert idx["retention_contract"]["move_to_vault_preserves_binary_bytes"] is False
     cleanup = read_json(pack_dir / "cleanup.json")
     assert cleanup["path_map_status"] == "historical_only_vault_pruned"
     path_map = read_jsonl(pack_dir / "path_map.jsonl")
