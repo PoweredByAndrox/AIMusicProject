@@ -104,10 +104,14 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _discover_audio_files(corpus_dir: Path, *, limit: int) -> list[Path]:
+def _discover_audio_files(corpus_dir: Path, *, limit: int, track_offset: int = 0) -> list[Path]:
     if not corpus_dir.exists():
         raise FileNotFoundError(f"corpus_dir is missing: {corpus_dir}")
+    if track_offset < 0:
+        raise ValueError("track_offset must be >= 0")
     rows = sorted(path for path in corpus_dir.rglob("*") if path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES)
+    if track_offset > 0:
+        rows = rows[track_offset:]
     if limit > 0:
         return rows[:limit]
     return rows
@@ -138,10 +142,16 @@ def _job_output_dir(
     return safe
 
 
-def _candidate_jobs(work_order: dict[str, Any], *, source_files: Sequence[Path], output: Path) -> list[dict[str, Any]]:
+def _candidate_jobs(
+    work_order: dict[str, Any],
+    *,
+    source_files: Sequence[Path],
+    output: Path,
+    track_index_offset: int = 0,
+) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     work_items = list(work_order.get("work_items") or [])
-    for track_index, source_audio_path in enumerate(source_files, start=1):
+    for track_index, source_audio_path in enumerate(source_files, start=track_index_offset + 1):
         track_alias_value = track_alias(track_index)
         track_id = _sha256_file(source_audio_path)[:16]
         for work_item_index, item in enumerate(work_items, start=1):
@@ -268,6 +278,7 @@ def run_aris_top_route_work_order(
     corpus_dir: Path,
     output_dir: Path,
     limit: int = 0,
+    track_offset: int = 0,
     max_jobs: int = 0,
     reuse_existing: bool = False,
     command_runner: CommandRunner | None = None,
@@ -288,12 +299,14 @@ def run_aris_top_route_work_order(
         work_order_json=str(work_order_path),
         corpus_dir=str(corpus_dir),
         output_dir=str(output),
+        limit=int(limit),
+        track_offset=int(track_offset),
         max_jobs=int(max_jobs),
         reuse_existing=bool(reuse_existing),
     )
-    source_files = _discover_audio_files(corpus_dir, limit=int(limit))
+    source_files = _discover_audio_files(corpus_dir, limit=int(limit), track_offset=int(track_offset))
     work_order = _read_json(work_order_path)
-    jobs = _candidate_jobs(work_order, source_files=source_files, output=output)
+    jobs = _candidate_jobs(work_order, source_files=source_files, output=output, track_index_offset=int(track_offset))
     if max_jobs > 0:
         jobs = jobs[: int(max_jobs)]
     runner = command_runner or _default_command_runner
@@ -363,6 +376,8 @@ def run_aris_top_route_work_order(
         "jobs_jsonl": str(jobs_path),
         "progress_jsonl": str(progress_path),
         "summary_md": str(output / SUMMARY_NAME),
+        "limit": int(limit),
+        "track_offset": int(track_offset),
         "job_count": len(executed_jobs),
         "completed_count": completed_count,
         "failed_count": failed_count,
@@ -399,6 +414,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--corpus-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--track-offset", type=int, default=0)
     parser.add_argument("--max-jobs", type=int, default=0)
     parser.add_argument("--reuse-existing", action="store_true")
     return parser.parse_args(argv)
@@ -416,6 +432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         corpus_dir=args.corpus_dir,
         output_dir=args.output_dir,
         limit=args.limit,
+        track_offset=args.track_offset,
         max_jobs=args.max_jobs,
         reuse_existing=args.reuse_existing,
         command_args=list(argv or sys.argv[1:]),

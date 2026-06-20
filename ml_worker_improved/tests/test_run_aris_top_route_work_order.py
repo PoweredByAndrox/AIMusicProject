@@ -182,3 +182,29 @@ def test_reuse_existing_execution_manifest_without_rerunning_command(tmp_path: P
     assert jobs[0]["binary_audio_available"] is True
     progress = _read_jsonl(Path(manifest["progress_jsonl"]))
     assert any(row["event"] == "job_reuse" for row in progress)
+
+
+def test_track_offset_preserves_corpus_alias_for_bounded_scale_batches(tmp_path: Path) -> None:
+    root = tmp_path / "artifact_rag"
+    order = _work_order(root / "work" / "r001" / "order.json")
+    corpus = tmp_path / "corpus"
+    first = _write_bytes(corpus / "a.mp3", b"first")
+    second = _write_bytes(corpus / "b.mp3", b"second")
+
+    manifest = run_aris_top_route_work_order(
+        artifact_rag_root=root,
+        work_order_json=order,
+        corpus_dir=corpus,
+        output_dir=root / "exec" / "r002",
+        limit=1,
+        track_offset=1,
+        max_jobs=2,
+        command_runner=_fake_runner,
+    )
+
+    assert manifest["status"] == "completed"
+    jobs = _read_jsonl(Path(manifest["jobs_jsonl"]))
+    assert len(jobs) == 2
+    assert {job["track_alias"] for job in jobs} == {"t002"}
+    assert all(job["source_audio_path"] == str(second) for job in jobs)
+    assert all(str(first) != job["source_audio_path"] for job in jobs)

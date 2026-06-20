@@ -192,6 +192,44 @@ def test_converts_registered_wave_jobs_without_granting_delivery(tmp_path: Path)
     assert "no_reference_gate" not in rows[0]
 
 
+def test_preserves_safe_executor_track_alias_for_corpus_batches(tmp_path: Path) -> None:
+    rag_root = tmp_path / "artifact_rag"
+    target_audio = rag_root / "wave" / "scnet" / "b" / "vocal.flac"
+    exec_manifest = _execution_manifest(
+        rag_root / "wave" / "scnet" / "b" / "registry_candidate_execution_manifest.json",
+        target_audio_path=str(target_audio),
+    )
+    wave_manifest = _wave_manifest(
+        rag_root,
+        [
+            {
+                "schema": "registered_candidate_family_wave_job.v1",
+                "id": "example-b",
+                "track_id": "track-b",
+                "track_alias": "t002",
+                "stem_type": "vocal",
+                "source_candidate_family": "scnet",
+                "source_candidate_model_id": "scnet_xl_ihf_musdb18",
+                "execution_manifest_path": str(exec_manifest),
+                "status": "completed",
+                "fallback_used": False,
+                "delivery_allowed": False,
+                "release_ready": False,
+            }
+        ],
+    )
+
+    manifest = build_aris_refinement_candidate_pool(
+        artifact_rag_root=rag_root,
+        wave_manifest_jsons=[wave_manifest],
+        output_dir=rag_root / "runs" / "r001" / "pool",
+    )
+
+    rows = _read_jsonl(Path(manifest["candidate_pool_jsonl"]))
+    assert rows[0]["track_alias"] == "t002"
+    assert rows[0]["short_audio_path"] == "audio/t002/vocal.flac"
+
+
 def test_passes_through_existing_objective_gate_evidence_without_inventing_it(tmp_path: Path) -> None:
     rag_root = tmp_path / "artifact_rag"
     exec_manifest = _execution_manifest(rag_root / "wave" / "bs" / "a" / "registry_candidate_execution_manifest.json")

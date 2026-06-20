@@ -127,9 +127,20 @@ def _validate_family(value: Any) -> str:
     return family
 
 
-def _stable_track_alias(track_id: str, aliases: dict[str, str]) -> str:
+def _next_unused_track_alias(aliases: dict[str, str]) -> str:
+    used = set(aliases.values())
+    index = len(aliases) + 1
+    while track_alias(index) in used:
+        index += 1
+    return track_alias(index)
+
+
+def _stable_track_alias(track_id: str, aliases: dict[str, str], *, requested_alias: str = "") -> str:
     if track_id not in aliases:
-        aliases[track_id] = track_alias(len(aliases) + 1)
+        if requested_alias and requested_alias not in set(aliases.values()):
+            aliases[track_id] = requested_alias
+        else:
+            aliases[track_id] = _next_unused_track_alias(aliases)
     return aliases[track_id]
 
 
@@ -180,7 +191,10 @@ def _row_from_job(
         stem = "minus"
     if stem not in {"vocal", "minus"}:
         raise ValueError(f"unsupported stem for ARIS refinement candidate pool: {stem}")
-    track_alias_value = _stable_track_alias(track_id, track_aliases)
+    requested_track_alias = str(job.get("track_alias") or "")
+    if requested_track_alias:
+        validate_artifact_segment(requested_track_alias)
+    track_alias_value = _stable_track_alias(track_id, track_aliases, requested_alias=requested_track_alias)
     validate_artifact_segment(track_alias_value)
     candidate_manifest = execution_manifest.get("candidate_manifest") if isinstance(execution_manifest.get("candidate_manifest"), dict) else {}
     fallback_used = _provenance_flag("fallback_used", job, execution_manifest, candidate_manifest)
