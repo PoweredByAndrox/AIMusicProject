@@ -163,6 +163,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-tta", action="store_true")
     parser.add_argument("--listen-dir")
     parser.add_argument("--listen-label", default="01_instrumental_resurrection_minus.flac")
+    parser.add_argument("--minus-output-name", default="instrumental_resurrection_minus.flac")
+    parser.add_argument("--progress-name", default="instrumental_resurrection_progress.jsonl")
     return parser.parse_args()
 
 
@@ -186,7 +188,7 @@ def main() -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     started_at = time.perf_counter()
-    progress_log_path = output_dir / "instrumental_resurrection_progress.jsonl"
+    progress_log_path = output_dir / str(args.progress_name)
     progress_log_path.write_text("", encoding="utf-8")
     force_cpu, device_ids = _resolve_bs_roformer_device(args.device)
     execution_contract = {
@@ -297,7 +299,7 @@ def main() -> int:
         )
         minus_audio, minus_sample_rate = sf.read(str(target_output_path), always_2d=True)
         raw_ref_flac_path = output_dir / "raw_ref.flac"
-        minus_flac_path = output_dir / "instrumental_resurrection_minus.flac"
+        minus_flac_path = output_dir / str(args.minus_output_name)
 
         _write_flac_copy(source_audio_path, raw_ref_flac_path)
         sf.write(str(minus_flac_path), minus_audio, minus_sample_rate, subtype="PCM_24")

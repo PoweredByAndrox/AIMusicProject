@@ -91,6 +91,7 @@ REQUIRED_DOCKER_ONLY_ENTRYPOINTS = (
     TOOLS_ROOT / "route_drum_model_zoo_segments.py",
     TOOLS_ROOT / "run_model_zoo_benchmark.py",
     TOOLS_ROOT / "run_aris_refinement_matrix.py",
+    TOOLS_ROOT / "run_aris_paired_gpu_route.py",
     TOOLS_ROOT / "build_aris_refinement_candidate_pool.py",
     TOOLS_ROOT / "build_aris_top1_top2_plan.py",
     TOOLS_ROOT / "run_posthoc_release_evaluator.py",
