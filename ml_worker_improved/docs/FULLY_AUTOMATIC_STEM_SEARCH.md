@@ -221,6 +221,24 @@ if the trained detector does not cover every forbidden pair needed by the full
 matrix, the search blocks as `blocked_no_clean_candidate` and no `listen/` pack
 is published.
 
+`tools/build_procedural_stem_clean_pairs.py` can create a safe synthetic
+clean-pairs manifest for the whole forbidden-source matrix:
+
+```powershell
+docker compose run --rm --no-deps -T ml-worker `
+  python tools/build_procedural_stem_clean_pairs.py `
+    --out "/host_artifacts/stem_eval/cp001" `
+    --duration-sec 1.0 `
+    --examples-per-pair 2
+```
+
+The builder writes procedural `vocals`, `drums`, `bass`, `guitar`, `piano`,
+`other`, and derived `minus` audio under short paths, then emits
+`manifest.json` with every forbidden pair. It does not use generated separator
+outputs, dirty references, pseudo labels, or human review. These rows are
+allowed as `synthetic_clean` ground truth for detector bootstrap only; the
+normal full-matrix gates still decide runtime delivery.
+
 Docker command shape:
 
 ```powershell
