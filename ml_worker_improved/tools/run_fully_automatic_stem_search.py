@@ -20,6 +20,7 @@ if __package__ in {None, ""}:
 from tools.score_stem_contamination import score_stem_contamination
 from tools.stem_contamination_common import (
     FORBIDDEN_SOURCES,
+    NON_VOCAL_STEMS,
     STEMS,
     VERDICTS,
     build_minus_from_non_vocal_stems,
@@ -118,6 +119,7 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
             "candidate_id": candidate_id,
             "route_family": "demucs_htdemucs_6s",
             "residual_correction_stem": residual_stem,
+            "conservation_repair_stem": "other",
             "required_stems": list(STEMS),
             "command_template": command_template,
         }
@@ -241,6 +243,80 @@ def validate_mix_conservation(*, mix_path: Path, stem_paths: Mapping[str, str]) 
         "mix_rms": round(mix_rms, 8),
         "residual_rms": round(residual_rms, 8),
         "tolerance": round(tolerance, 8),
+    }
+
+
+def apply_mix_conservation_repair(
+    *,
+    mix_path: Path,
+    stem_paths: Mapping[str, str],
+    target_stem: str,
+) -> dict[str, Any]:
+    if target_stem not in NON_VOCAL_STEMS:
+        return {
+            "applied": False,
+            "repair_owner": "runner_conservation_repair_v1",
+            "reason": "unsupported_conservation_repair_stem",
+            "target_stem": target_stem,
+        }
+    target_path = stem_paths.get(target_stem)
+    if not target_path:
+        return {
+            "applied": False,
+            "repair_owner": "runner_conservation_repair_v1",
+            "reason": "missing_conservation_repair_stem",
+            "target_stem": target_stem,
+        }
+
+    mix_audio, mix_rate = _read_audio(mix_path)
+    summed = np.zeros_like(mix_audio, dtype=np.float32)
+    blockers: list[str] = []
+    for stem in STEMS:
+        stem_path = stem_paths.get(stem)
+        if not stem_path:
+            blockers.append(f"missing_repair_stem:{stem}")
+            continue
+        stem_audio, stem_rate = _read_audio(Path(stem_path))
+        if stem_rate != mix_rate:
+            blockers.append(f"sample_rate_mismatch:{stem}:{stem_rate}!={mix_rate}")
+            continue
+        if stem_audio.shape != mix_audio.shape:
+            blockers.append(f"shape_mismatch:{stem}:{stem_audio.shape}!={mix_audio.shape}")
+            continue
+        summed = summed + stem_audio
+    if blockers:
+        return {
+            "applied": False,
+            "repair_owner": "runner_conservation_repair_v1",
+            "reason": "repair_inputs_invalid",
+            "target_stem": target_stem,
+            "blockers": blockers,
+        }
+
+    residual = mix_audio.astype(np.float32) - summed
+    residual_rms = _rms(residual)
+    if residual_rms <= 1e-12:
+        return {
+            "applied": False,
+            "repair_owner": "runner_conservation_repair_v1",
+            "reason": "residual_floor",
+            "target_stem": target_stem,
+            "pre_repair_residual_rms": 0.0,
+        }
+    target_audio, target_rate = _read_audio(Path(target_path))
+    if target_rate != mix_rate or target_audio.shape != mix_audio.shape:
+        return {
+            "applied": False,
+            "repair_owner": "runner_conservation_repair_v1",
+            "reason": "target_shape_mismatch",
+            "target_stem": target_stem,
+        }
+    _write_audio(Path(target_path), target_audio.astype(np.float32) + residual, mix_rate)
+    return {
+        "applied": True,
+        "repair_owner": "runner_conservation_repair_v1",
+        "target_stem": target_stem,
+        "pre_repair_residual_rms": round(residual_rms, 8),
     }
 
 
@@ -399,6 +475,15 @@ def execute_recipe_candidate(
         _write_json(candidate_dir / "score.json", {"verdict": "blocked_missing_stem", "missing_stems": missing, "next_action": next_action})
         return manifest
 
+    repair_stem = str(candidate.get("conservation_repair_stem") or "").strip()
+    reconstruction_repair: dict[str, Any] | None = None
+    if repair_stem:
+        reconstruction_repair = apply_mix_conservation_repair(
+            mix_path=Path(str(window["mix_path"])),
+            stem_paths=stem_paths,
+            target_stem=repair_stem,
+        )
+
     minus_path = build_minus_from_non_vocal_stems({stem: Path(path) for stem, path in stem_paths.items()}, stems_dir / "minus.flac")
     stem_paths["minus"] = str(minus_path)
     reconstruction = validate_mix_conservation(mix_path=Path(str(window["mix_path"])), stem_paths=stem_paths)
@@ -412,12 +497,21 @@ def execute_recipe_candidate(
                 "stem_paths": stem_paths,
                 "missing_stems": [],
                 "reconstruction": reconstruction,
+                "reconstruction_repair": reconstruction_repair,
                 "next_action": next_action,
                 "delivery_allowed": False,
                 "presentation_status": "blocked_from_listen_pack",
             }
         )
-        _write_json(candidate_dir / "score.json", {"verdict": "blocked_bad_reconstruction", "reconstruction": reconstruction, "next_action": next_action})
+        _write_json(
+            candidate_dir / "score.json",
+            {
+                "verdict": "blocked_bad_reconstruction",
+                "reconstruction": reconstruction,
+                "reconstruction_repair": reconstruction_repair,
+                "next_action": next_action,
+            },
+        )
         _write_json(candidate_dir / "manifest.json", manifest)
         return manifest
 
@@ -436,6 +530,7 @@ def execute_recipe_candidate(
             "stem_paths": stem_paths,
             "missing_stems": [],
             "reconstruction": reconstruction,
+            "reconstruction_repair": reconstruction_repair,
             "contamination_score": score,
             "next_action": next_action,
             "delivery_allowed": score["verdict"] == "auto_accept",

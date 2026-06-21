@@ -116,6 +116,7 @@ def test_default_from_scratch_recipe_uses_demucs_six_stem_route() -> None:
     assert recipe["candidates"][0]["route_family"] == "demucs_htdemucs_6s"
     assert "run_demucs_six_stem_candidate.py" in " ".join(recipe["candidates"][0]["command_template"])
     assert recipe["candidates"][0]["required_stems"] == list(STEMS)
+    assert all(candidate["conservation_repair_stem"] == "other" for candidate in recipe["candidates"])
     assert len(recipe["candidates"]) >= 5
     assert any("--residual-correction-stem" in candidate["command_template"] for candidate in recipe["candidates"])
 
@@ -364,6 +365,106 @@ def test_recipe_candidate_uses_trainable_no_reference_model(tmp_path: Path) -> N
     assert result["verdict"] == "auto_accept"
     assert leak_result["detector_mode"] == "no_reference_neural_v1"
     assert leak_result["model_manifest"] == str(model_dir / "manifest.json")
+
+
+def test_conservation_repair_assigns_residual_before_reconstruction_gate(tmp_path: Path) -> None:
+    vocal = sine(880.0, seconds=0.25, amp=0.04)
+    drums = sine(110.0, seconds=0.25, amp=0.12)
+    missing_other = sine(330.0, seconds=0.25, amp=0.03)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums + missing_other)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-needs-repair", "{window_mix}"],
+                        "conservation_repair_stem": "other",
+                        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)])
+        write_wav(stems_dir / "drums.flac", drums[: len(window_audio)])
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "auto_accept"
+    assert candidate["reconstruction_repair"]["applied"] is True
+    assert candidate["reconstruction_repair"]["repair_owner"] == "runner_conservation_repair_v1"
+    assert candidate["reconstruction_repair"]["target_stem"] == "other"
+    assert candidate["reconstruction_repair"]["pre_repair_residual_rms"] > 0.0
+    assert candidate["reconstruction"]["ok"] is True
+
+
+def test_conservation_repair_rejects_vocal_target(tmp_path: Path) -> None:
+    vocal = sine(880.0, seconds=0.25, amp=0.04)
+    drums = sine(110.0, seconds=0.25, amp=0.12)
+    missing_other = sine(330.0, seconds=0.25, amp=0.03)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums + missing_other)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-unsafe-repair", "{window_mix}"],
+                        "conservation_repair_stem": "vocals",
+                        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)])
+        write_wav(stems_dir / "drums.flac", drums[: len(window_audio)])
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert candidate["verdict"] == "blocked_bad_reconstruction"
+    assert candidate["reconstruction_repair"]["applied"] is False
+    assert candidate["reconstruction_repair"]["reason"] == "unsupported_conservation_repair_stem"
 
 
 def test_recipe_candidate_missing_stem_blocks_candidate(tmp_path: Path) -> None:

@@ -14,6 +14,29 @@ runner for six-stem separation candidates.
 - Failed or rejected candidates remain scratch/debug evidence only.
 - The runner must not write into `artifact_rag`.
 
+## Reconstruction Conservation
+
+Candidates may declare:
+
+```json
+{
+  "conservation_repair_stem": "other"
+}
+```
+
+When present, the runner computes `mix - sum(vocals, drums, bass, guitar,
+piano, other)` before rebuilding `minus`, and writes that residual into the
+declared non-vocal stem. This is not threshold relaxation: the same
+reconstruction gate still runs after repair. If repair is missing, unsafe,
+shape-mismatched, or insufficient, the candidate remains blocked.
+
+Allowed repair targets are non-vocal stems only. `vocals` and `minus` are not
+valid conservation-repair targets.
+
+The candidate manifest records `reconstruction_repair.repair_owner`, target
+stem, and `pre_repair_residual_rms`; the post-repair residual remains the normal
+`reconstruction.residual_rms` from the unchanged reconstruction gate.
+
 ## Contamination Checks
 
 Candidates may declare explicit checks:
