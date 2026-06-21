@@ -31,6 +31,11 @@ from tools.stem_contamination_model import band_limited_audio
 
 
 CommandRunner = Callable[[list[str], int], None]
+TARGET_SPECIFIC_ROLE_OUTPUTS = {
+    "six_stems": tuple(STEMS),
+    "vocals": ("vocals",),
+    "non_vocal_stems": tuple(NON_VOCAL_STEMS),
+}
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
@@ -200,8 +205,88 @@ def _candidate_items(recipe: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [item for item in (items or []) if isinstance(item, dict)]
 
 
+def _target_specific_items(candidate: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    items = candidate.get("target_specific_commands")
+    return [item for item in (items or []) if isinstance(item, dict)] if isinstance(items, list) else []
+
+
 def _collect_stem_paths(stems_dir: Path) -> dict[str, str]:
     return {stem: str(stems_dir / f"{stem}.flac") for stem in STEMS if (stems_dir / f"{stem}.flac").is_file()}
+
+
+def _copy_target_specific_outputs(*, role: str, role_stems_dir: Path, final_stems_dir: Path) -> list[str]:
+    required_outputs = TARGET_SPECIFIC_ROLE_OUTPUTS.get(role)
+    if required_outputs is None:
+        return [f"unsupported_target_specific_role:{role}"]
+    blockers: list[str] = []
+    for stem in required_outputs:
+        source_path = role_stems_dir / f"{stem}.flac"
+        if not source_path.is_file():
+            blockers.append(f"missing_target_specific_output:{role}:{stem}")
+            continue
+        final_stems_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, final_stems_dir / f"{stem}.flac")
+    return blockers
+
+
+def _run_target_specific_commands(
+    *,
+    candidate: Mapping[str, Any],
+    window: Mapping[str, Any],
+    candidate_dir: Path,
+    stems_dir: Path,
+    command_runner: CommandRunner,
+    timeout_sec: int,
+) -> dict[str, Any]:
+    routes: list[dict[str, Any]] = []
+    blocker_reasons: list[str] = []
+    for idx, item in enumerate(_target_specific_items(candidate), start=1):
+        role = str(item.get("role") or "").strip()
+        command_template = item.get("command_template")
+        route_id = str(item.get("route_id") or role or f"r{idx:03d}")
+        route_dir = candidate_dir / "routes" / route_id
+        route_stems_dir = route_dir / "stems"
+        route_manifest = {
+            "role": role,
+            "route_id": route_id,
+            "output_dir": str(route_dir),
+            "stems_dir": str(route_stems_dir),
+            "required_outputs": list(TARGET_SPECIFIC_ROLE_OUTPUTS.get(role, ())),
+            "missing_outputs": [],
+            "blocker_reasons": [],
+        }
+        if not isinstance(command_template, list) or not command_template:
+            route_manifest["blocker_reasons"] = [f"missing_target_specific_command:{role or route_id}"]
+            blocker_reasons.extend(route_manifest["blocker_reasons"])
+            routes.append(route_manifest)
+            continue
+        replacements = {
+            "window_id": str(window["window_id"]),
+            "input_audio": str(window["mix_path"]),
+            "window_mix": str(window["mix_path"]),
+            "output_dir": str(route_dir),
+            "stems_dir": str(route_stems_dir),
+            "candidate_id": str(candidate.get("candidate_id") or "c001"),
+            "route_role": role,
+            "route_id": route_id,
+        }
+        command = render_recipe_command(command_template, replacements)
+        route_manifest["command"] = command
+        route_stems_dir.mkdir(parents=True, exist_ok=True)
+        setattr(command_runner, "stems_dir", route_stems_dir)
+        command_runner(command, timeout_sec)
+        route_blockers = _copy_target_specific_outputs(role=role, role_stems_dir=route_stems_dir, final_stems_dir=stems_dir)
+        route_manifest["missing_outputs"] = [
+            reason.split(":")[-1] for reason in route_blockers if reason.startswith("missing_target_specific_output:")
+        ]
+        route_manifest["blocker_reasons"] = route_blockers
+        blocker_reasons.extend(route_blockers)
+        routes.append(route_manifest)
+    return {
+        "applied": True,
+        "routes": routes,
+        "blocker_reasons": blocker_reasons,
+    }
 
 
 def _full_forbidden_contamination_checks() -> list[dict[str, str]]:
@@ -622,7 +707,8 @@ def execute_recipe_candidate(
         }
     )
     command_template = candidate.get("command_template")
-    if not isinstance(command_template, list) or not command_template:
+    target_specific_commands = _target_specific_items(candidate)
+    if not target_specific_commands and (not isinstance(command_template, list) or not command_template):
         next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "missing_command_template"})
         manifest.update(
             {
@@ -635,20 +721,31 @@ def execute_recipe_candidate(
         _write_json(candidate_dir / "score.json", {"verdict": "blocked_unknown", "reason": "missing_command_template", "next_action": next_action})
         return manifest
 
-    replacements = {
-        "window_id": str(window["window_id"]),
-        "input_audio": str(window["mix_path"]),
-        "window_mix": str(window["mix_path"]),
-        "output_dir": str(candidate_dir),
-        "stems_dir": str(stems_dir),
-        "candidate_id": candidate_id,
-    }
-    command = render_recipe_command(command_template, replacements)
-    manifest["command"] = command
     stems_dir.mkdir(parents=True, exist_ok=True)
-    setattr(command_runner, "stems_dir", stems_dir)
+    target_specific_composition: dict[str, Any] = {"applied": False, "routes": [], "blocker_reasons": []}
     try:
-        command_runner(command, timeout_sec)
+        if target_specific_commands:
+            target_specific_composition = _run_target_specific_commands(
+                candidate=candidate,
+                window=window,
+                candidate_dir=candidate_dir,
+                stems_dir=stems_dir,
+                command_runner=command_runner,
+                timeout_sec=timeout_sec,
+            )
+        else:
+            replacements = {
+                "window_id": str(window["window_id"]),
+                "input_audio": str(window["mix_path"]),
+                "window_mix": str(window["mix_path"]),
+                "output_dir": str(candidate_dir),
+                "stems_dir": str(stems_dir),
+                "candidate_id": candidate_id,
+            }
+            command = render_recipe_command(command_template, replacements)
+            manifest["command"] = command
+            setattr(command_runner, "stems_dir", stems_dir)
+            command_runner(command, timeout_sec)
     except subprocess.TimeoutExpired as exc:
         next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "failed_timeout"})
         manifest.update(
@@ -677,6 +774,30 @@ def execute_recipe_candidate(
         return manifest
 
     stem_paths = _collect_stem_paths(stems_dir)
+    if target_specific_composition["blocker_reasons"]:
+        next_action = choose_next_action(
+            {"verdict": "blocked_missing_stem", "reason": ",".join(target_specific_composition["blocker_reasons"])}
+        )
+        manifest.update(
+            {
+                "execution_status": "completed",
+                "verdict": "blocked_missing_stem",
+                "missing_stems": missing_required_stems(stem_paths),
+                "stem_paths": stem_paths,
+                "target_specific_composition": target_specific_composition,
+                "next_action": next_action,
+            }
+        )
+        _write_json(candidate_dir / "manifest.json", manifest)
+        _write_json(
+            candidate_dir / "score.json",
+            {
+                "verdict": "blocked_missing_stem",
+                "target_specific_composition": target_specific_composition,
+                "next_action": next_action,
+            },
+        )
+        return manifest
     missing = missing_required_stems(stem_paths)
     if missing:
         next_action = choose_next_action({"verdict": "blocked_missing_stem", "reason": "missing_required_stem"})
@@ -686,6 +807,7 @@ def execute_recipe_candidate(
                 "verdict": "blocked_missing_stem",
                 "missing_stems": missing,
                 "stem_paths": stem_paths,
+                "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
             }
         )
@@ -722,6 +844,7 @@ def execute_recipe_candidate(
                 "reconstruction": reconstruction,
                 "reconstruction_repair": reconstruction_repair,
                 "minus_vocal_debleed": minus_vocal_debleed,
+                "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
                 "delivery_allowed": False,
                 "presentation_status": "blocked_from_listen_pack",
@@ -734,6 +857,7 @@ def execute_recipe_candidate(
                 "reconstruction": reconstruction,
                 "reconstruction_repair": reconstruction_repair,
                 "minus_vocal_debleed": minus_vocal_debleed,
+                "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
             },
         )
@@ -757,6 +881,7 @@ def execute_recipe_candidate(
             "reconstruction": reconstruction,
             "reconstruction_repair": reconstruction_repair,
             "minus_vocal_debleed": minus_vocal_debleed,
+            "target_specific_composition": target_specific_composition,
             "contamination_score": score,
             "next_action": next_action,
             "delivery_allowed": score["verdict"] == "auto_accept",

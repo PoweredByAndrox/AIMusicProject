@@ -219,3 +219,36 @@ docker compose run --rm --no-deps -T ml-worker `
     --require-gpu true `
     --no-artifact-rag
 ```
+
+## Target-Specific Candidate Composition
+
+Candidates may use separate routes for different targets before the normal
+reconstruction and contamination gates run:
+
+```json
+{
+  "target_specific_commands": [
+    {
+      "role": "six_stems",
+      "command_template": ["python", "tools/run_demucs_six_stem_candidate.py", "..."]
+    },
+    {
+      "role": "vocals",
+      "command_template": ["python", "tools/run_vocal_candidate.py", "..."]
+    }
+  ]
+}
+```
+
+Supported roles:
+
+- `six_stems`: must write `vocals`, `drums`, `bass`, `guitar`, `piano`,
+  `other`; these initialize the full candidate set.
+- `vocals`: must write `vocals`; this can replace the six-stem vocal output
+  before `minus` is rebuilt.
+- `non_vocal_stems`: must write `drums`, `bass`, `guitar`, `piano`, `other`;
+  this can replace the instrumental stem set before `minus` is rebuilt.
+
+If a declared route misses one of its required outputs, the candidate blocks as
+`blocked_missing_stem`. `minus` is still rebuilt from the final non-vocal stems,
+and the full forbidden-source matrix still decides delivery.

@@ -405,6 +405,133 @@ def test_recipe_candidate_accepts_only_with_full_forbidden_matrix_references(tmp
     assert candidate["contamination_score"]["blocker_reasons"] == []
 
 
+def test_target_specific_vocal_route_overrides_six_stem_vocals(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, seconds=0.5, amp=0.04),
+        "drums": sine(110.0, seconds=0.5, amp=0.12),
+        "bass": sine(220.0, seconds=0.5, amp=0.08),
+        "guitar": sine(330.0, seconds=0.5, amp=0.06),
+        "piano": sine(440.0, seconds=0.5, amp=0.05),
+        "other": sine(550.0, seconds=0.5, amp=0.03),
+    }
+    bad_vocal = sine(660.0, seconds=0.5, amp=0.03)
+    mix = write_wav(tmp_path / "mix.wav", sum(source_audio.values()))
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "target_specific_commands": [
+                            {
+                                "role": "six_stems",
+                                "command_template": ["fixture-write-six-stem-route", "{window_mix}"],
+                            },
+                            {
+                                "role": "vocals",
+                                "command_template": ["fixture-write-vocal-route", "{window_mix}"],
+                            },
+                        ],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        if command[0] == "fixture-write-six-stem-route":
+            for stem, audio in source_audio.items():
+                route_audio = bad_vocal if stem == "vocals" else audio
+                sf.write(stems_dir / f"{stem}.flac", route_audio[: len(window_audio)].astype(np.float32), mix_rate)
+        elif command[0] == "fixture-write-vocal-route":
+            sf.write(stems_dir / "vocals.flac", source_audio["vocals"][: len(window_audio)].astype(np.float32), mix_rate)
+        else:
+            raise AssertionError(command)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    accepted_vocal, _ = sf.read(candidate["stem_paths"]["vocals"], dtype="float32", always_2d=False)
+    assert result["verdict"] == "auto_accept"
+    assert candidate["target_specific_composition"]["applied"] is True
+    assert [route["role"] for route in candidate["target_specific_composition"]["routes"]] == ["six_stems", "vocals"]
+    np.testing.assert_allclose(accepted_vocal, source_audio["vocals"], atol=2e-4)
+
+
+def test_target_specific_missing_route_output_blocks(tmp_path: Path) -> None:
+    vocal = sine(880.0, seconds=0.25, amp=0.04)
+    drums = sine(110.0, seconds=0.25, amp=0.12)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "target_specific_commands": [
+                            {
+                                "role": "six_stems",
+                                "command_template": ["fixture-write-six-stem-route", "{window_mix}"],
+                            },
+                            {
+                                "role": "vocals",
+                                "command_template": ["fixture-write-missing-vocal-route", "{window_mix}"],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        if command[0] == "fixture-write-six-stem-route":
+            write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)])
+            write_wav(stems_dir / "drums.flac", drums[: len(window_audio)])
+            for stem in ("bass", "guitar", "piano", "other"):
+                sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+        elif command[0] == "fixture-write-missing-vocal-route":
+            stems_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            raise AssertionError(command)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert candidate["verdict"] == "blocked_missing_stem"
+    assert "missing_target_specific_output:vocals:vocals" in candidate["target_specific_composition"]["blocker_reasons"]
+
+
 def test_recipe_candidate_blocks_no_reference_vocal_leak_in_minus(tmp_path: Path) -> None:
     vocal = sine(880.0, seconds=0.25, amp=0.04)
     drums = sine(110.0, seconds=0.25, amp=0.12)
