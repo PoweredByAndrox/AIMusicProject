@@ -168,7 +168,9 @@ def score_stem_contamination(
             leak_dbfs = _dbfs(_rms(leak_audio))
             probability = float(prediction["probability"])
             threshold = float(prediction["threshold"])
-            verdict = "fail" if probability >= threshold else "pass"
+            probability_failed = probability >= threshold
+            acoustic_leak_failed = leak_dbfs > detection_floor_db
+            verdict = "fail" if probability_failed and acoustic_leak_failed else "pass"
             return _write_no_reference_result(
                 tested_stem=tested_stem,
                 foreign_source=foreign_source,
@@ -184,6 +186,8 @@ def score_stem_contamination(
                 extra={
                     "contamination_probability": round(probability, 6),
                     "probability_threshold": threshold,
+                    "probability_failed": probability_failed,
+                    "acoustic_leak_failed": acoustic_leak_failed,
                     "model_id": prediction["model_id"],
                     "model_manifest": prediction["model_manifest"],
                     "features": prediction["features"],

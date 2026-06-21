@@ -9,6 +9,7 @@ import pytest
 import soundfile as sf
 
 from tools.build_stem_contamination_dataset import validate_stem_contamination_row
+import tools.score_stem_contamination as scorer
 from tools.score_stem_contamination import score_stem_contamination
 from tools.stem_contamination_common import build_minus_from_non_vocal_stems
 from tools.stem_contamination_model import BASE_FEATURE_NAMES, StemContaminationNet
@@ -217,6 +218,39 @@ def test_legacy_single_pair_model_manifest_remains_scorable(tmp_path: Path) -> N
 
     assert result["verdict"] in {"pass", "fail"}
     assert result["detector_mode"] == "no_reference_neural_v1"
+
+
+def test_no_reference_model_probability_without_leak_audio_stays_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    def high_probability_without_acoustic_leak(**_kwargs: object) -> dict[str, object]:
+        return {
+            "probability": 0.99,
+            "threshold": 0.5,
+            "model_id": "fixture",
+            "model_manifest": str(manifest_path),
+            "features": [],
+            "feature_names": [],
+        }
+
+    monkeypatch.setattr(scorer, "predict_no_reference_probability", high_probability_without_acoustic_leak)
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "guitar.wav", sine(110.0, amp=0.2)),
+        tested_stem="guitar",
+        foreign_source="vocals",
+        output_dir=tmp_path / "score",
+        foreign_reference_path=None,
+        model_manifest_path=manifest_path,
+        detection_floor_db=-45.0,
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["detector_mode"] == "no_reference_neural_v1"
+    assert result["contamination_probability"] == 0.99
+    assert result["leak_dbfs"] <= result["detection_floor_db"]
+    assert result["leak_audio"] == ""
 
 
 def test_no_reference_unsupported_pair_blocks_unknown(tmp_path: Path) -> None:
