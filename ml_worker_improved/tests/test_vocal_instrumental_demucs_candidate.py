@@ -113,18 +113,15 @@ def test_vocal_instrumental_demucs_route_passes_vocal_model_identity(tmp_path: P
         manifest_path=tmp_path / "manifest.json",
         command_runner=fake_runner,
         timeout_sec=120,
-        vocal_model_filename="MelBandRoformer.ckpt",
-        vocal_model_file_dir="/app/vendor/mel_band_roformer_vocal_model_weights",
-        vocal_model_id="audio_separator_melband_roformer_vocals",
-        vocal_model_display_name="Audio Separator MelBand RoFormer vocal checkpoint",
+        vocal_model_filename="model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+        vocal_model_file_dir="/app/vendor/melband_roformer_viperx_11436",
+        vocal_model_id="audio_separator_melband_roformer_viperx_vocals",
+        vocal_model_display_name="Audio Separator MelBand RoFormer ViperX vocal checkpoint",
     )
 
     vocal_command = vocal_commands[0]
-    assert vocal_command[vocal_command.index("--model-filename") + 1] == "MelBandRoformer.ckpt"
-    assert (
-        vocal_command[vocal_command.index("--model-file-dir") + 1]
-        == "/app/vendor/mel_band_roformer_vocal_model_weights"
-    )
-    assert vocal_command[vocal_command.index("--manifest-model-id") + 1] == "audio_separator_melband_roformer_vocals"
-    assert "MelBand RoFormer" in vocal_command[vocal_command.index("--manifest-model-display-name") + 1]
-    assert manifest["vocal_model_id"] == "audio_separator_melband_roformer_vocals"
+    assert vocal_command[vocal_command.index("--model-filename") + 1] == "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt"
+    assert vocal_command[vocal_command.index("--model-file-dir") + 1] == "/app/vendor/melband_roformer_viperx_11436"
+    assert vocal_command[vocal_command.index("--manifest-model-id") + 1] == "audio_separator_melband_roformer_viperx_vocals"
+    assert "MelBand RoFormer ViperX" in vocal_command[vocal_command.index("--manifest-model-display-name") + 1]
+    assert manifest["vocal_model_id"] == "audio_separator_melband_roformer_viperx_vocals"

@@ -436,10 +436,10 @@ def build_default_from_scratch_recipe(
                 spec[5],
                 *(
                     (
-                        "MelBandRoformer.ckpt",
-                        "/app/vendor/mel_band_roformer_vocal_model_weights",
-                        "audio_separator_melband_roformer_vocals",
-                        "Audio Separator MelBand RoFormer vocal checkpoint",
+                        "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+                        "/app/vendor/melband_roformer_viperx_11436",
+                        "audio_separator_melband_roformer_viperx_vocals",
+                        "Audio Separator MelBand RoFormer ViperX vocal checkpoint",
                     )
                     if spec[0] == "c010"
                     else ()
