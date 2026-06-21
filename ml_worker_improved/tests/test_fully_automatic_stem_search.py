@@ -167,23 +167,26 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
         "audio_separator_bs_roformer_vocals",
         "mdx23c_vocals",
     ]
-    assert all(candidate["conservation_repair_stem"] == "other" for candidate in recipe["candidates"])
+    assert all(
+        candidate["conservation_repair_stem"] == "other"
+        for candidate in recipe["candidates"]
+    )
+    assert all(candidate["max_conservation_repair_ratio"] == 0.30 for candidate in recipe["candidates"])
     assert all("contamination_checks" not in candidate for candidate in recipe["candidates"])
     assert len(recipe["candidates"]) == 10
     assert any(candidate.get("minus_vocal_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
     assert any(candidate.get("vocal_projection_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
     assert any(
-        "run_vocal_instrumental_demucs_candidate.py" in " ".join(candidate.get("command_template") or [])
+        "run_registered_six_stem_candidate.py" in " ".join(candidate.get("command_template") or [])
         for candidate in recipe["candidates"]
     )
     c009 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c009")
     c010 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c010")
     assert c009["vocal_route_id"] == "audio_separator_bs_roformer_vocals"
-    assert c010["vocal_route_id"] == "audio_separator_melband_roformer_viperx_vocals"
-    assert "--vocal-model-filename" in c010["command_template"]
-    assert "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt" in c010["command_template"]
-    assert "/app/vendor/melband_roformer_viperx_11436" in c010["command_template"]
-    assert c010["command_template"][c010["command_template"].index("--instrumental-model-id") + 1] == "becruily_instrumental_vocals"
+    assert c010["route_family"] == "registered_six_stem_hybrid_htdemucs_ft_bs_roformer_6s"
+    assert c010["registered_model_id"] == "hybrid_htdemucs_ft_bs_roformer_6s"
+    assert c010["conservation_repair_stem"] == "other"
+    assert c010["command_template"][c010["command_template"].index("--model-id") + 1] == "hybrid_htdemucs_ft_bs_roformer_6s"
     assert any(
         "--residual-correction-stem" in route["command_template"]
         for candidate in recipe["candidates"]
@@ -898,6 +901,67 @@ def test_conservation_repair_rejects_vocal_target(tmp_path: Path) -> None:
     assert candidate["verdict"] == "blocked_bad_reconstruction"
     assert candidate["reconstruction_repair"]["applied"] is False
     assert candidate["reconstruction_repair"]["reason"] == "unsupported_conservation_repair_stem"
+
+
+def test_conservation_repair_rejects_excessive_residual_ratio(tmp_path: Path) -> None:
+    vocal = sine(880.0, seconds=0.25, amp=0.02)
+    drums = sine(110.0, seconds=0.25, amp=0.02)
+    missing_other = sine(330.0, seconds=0.25, amp=0.15)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums + missing_other)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-excessive-repair", "{window_mix}"],
+                        "conservation_repair_stem": "other",
+                        "max_conservation_repair_ratio": 0.10,
+                        "foreign_references": write_full_foreign_references(
+                            tmp_path,
+                            {
+                                "vocals": vocal,
+                                "drums": drums,
+                                "bass": np.zeros_like(vocal, dtype=np.float32),
+                                "guitar": np.zeros_like(vocal, dtype=np.float32),
+                                "piano": np.zeros_like(vocal, dtype=np.float32),
+                                "other": missing_other,
+                            },
+                        ),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)])
+        write_wav(stems_dir / "drums.flac", drums[: len(window_audio)])
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert candidate["verdict"] == "blocked_bad_reconstruction"
+    assert candidate["reconstruction_repair"]["applied"] is False
+    assert candidate["reconstruction_repair"]["reason"] == "conservation_repair_ratio_too_high"
+    assert candidate["reconstruction_repair"]["max_residual_ratio"] == 0.10
 
 
 def test_minus_vocal_debleed_does_not_publish_without_full_matrix_proof(tmp_path: Path) -> None:

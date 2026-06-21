@@ -325,6 +325,7 @@ def build_default_from_scratch_recipe(
             "vocal_route_id": vocal_route_id,
             "residual_correction_stem": residual_stem,
             "conservation_repair_stem": "other",
+            "max_conservation_repair_ratio": 0.30,
             "required_stems": list(STEMS),
             "target_specific_commands": [
                 {
@@ -374,6 +375,7 @@ def build_default_from_scratch_recipe(
             "route_family": f"vocal_instrumental_demucs_6s_{vocal_model_id}",
             "vocal_route_id": vocal_model_id,
             "conservation_repair_stem": "other",
+            "max_conservation_repair_ratio": 0.30,
             "required_stems": list(STEMS),
             "command_template": [
                 "python",
@@ -421,6 +423,50 @@ def build_default_from_scratch_recipe(
             }
         return candidate
 
+    def registered_six_stem_candidate(
+        candidate_id: str,
+        model_id: str,
+        debleed_strength: float,
+    ) -> dict[str, Any]:
+        candidate = {
+            "candidate_id": candidate_id,
+            "route_family": f"registered_six_stem_{model_id}",
+            "registered_model_id": model_id,
+            "conservation_repair_stem": "other",
+            "max_conservation_repair_ratio": 0.30,
+            "required_stems": list(STEMS),
+            "command_template": [
+                "python",
+                "tools/run_registered_six_stem_candidate.py",
+                "--input-audio",
+                "{input_audio}",
+                "--stems-dir",
+                "{stems_dir}",
+                "--work-dir",
+                "{output_dir}/work",
+                "--manifest",
+                "{output_dir}/registered.json",
+                "--model-id",
+                model_id,
+                "--device",
+                "cuda",
+                "--timeout-sec",
+                "900",
+            ],
+        }
+        if debleed_strength > 0.0:
+            candidate["minus_vocal_debleed"] = {
+                "strength": debleed_strength,
+                "low_hz": 700.0,
+                "high_hz": 1200.0,
+                "target_stems": list(NON_VOCAL_STEMS),
+            }
+            candidate["vocal_projection_debleed"] = {
+                "strength": debleed_strength,
+                "target_stems": list(NON_VOCAL_STEMS),
+            }
+        return candidate
+
     return {
         "schema": "stem_search_recipe.v1",
         "recipe_source": "from_scratch_default",
@@ -449,7 +495,13 @@ def build_default_from_scratch_recipe(
                     else ()
                 ),
             )
-            if spec[0] in {"c009", "c010"}
+            if spec[0] == "c009"
+            else registered_six_stem_candidate(
+                spec[0],
+                "hybrid_htdemucs_ft_bs_roformer_6s",
+                spec[5],
+            )
+            if spec[0] == "c010"
             else demucs_candidate(*spec)
             for spec in variant_specs
         ],
@@ -694,6 +746,7 @@ def apply_mix_conservation_repair(
     mix_path: Path,
     stem_paths: Mapping[str, str],
     target_stem: str,
+    max_residual_ratio: float | None = None,
 ) -> dict[str, Any]:
     if target_stem not in NON_VOCAL_STEMS:
         return {
@@ -737,6 +790,7 @@ def apply_mix_conservation_repair(
         }
 
     residual = mix_audio.astype(np.float32) - summed
+    mix_rms = _rms(mix_audio)
     residual_rms = _rms(residual)
     if residual_rms <= 1e-12:
         return {
@@ -745,6 +799,20 @@ def apply_mix_conservation_repair(
             "reason": "residual_floor",
             "target_stem": target_stem,
             "pre_repair_residual_rms": 0.0,
+            "pre_repair_mix_rms": round(mix_rms, 8),
+            "pre_repair_residual_ratio": 0.0,
+        }
+    residual_ratio = residual_rms / max(mix_rms, 1e-12)
+    if max_residual_ratio is not None and residual_ratio > max_residual_ratio:
+        return {
+            "applied": False,
+            "repair_owner": "runner_conservation_repair_v1",
+            "reason": "conservation_repair_ratio_too_high",
+            "target_stem": target_stem,
+            "pre_repair_residual_rms": round(residual_rms, 8),
+            "pre_repair_mix_rms": round(mix_rms, 8),
+            "pre_repair_residual_ratio": round(residual_ratio, 8),
+            "max_residual_ratio": round(float(max_residual_ratio), 8),
         }
     target_audio, target_rate = _read_audio(Path(target_path))
     if target_rate != mix_rate or target_audio.shape != mix_audio.shape:
@@ -760,6 +828,9 @@ def apply_mix_conservation_repair(
         "repair_owner": "runner_conservation_repair_v1",
         "target_stem": target_stem,
         "pre_repair_residual_rms": round(residual_rms, 8),
+        "pre_repair_mix_rms": round(mix_rms, 8),
+        "pre_repair_residual_ratio": round(residual_ratio, 8),
+        "max_residual_ratio": round(float(max_residual_ratio), 8) if max_residual_ratio is not None else None,
     }
 
 
@@ -1264,10 +1335,13 @@ def execute_recipe_candidate(
     repair_stem = str(candidate.get("conservation_repair_stem") or "").strip()
     reconstruction_repair: dict[str, Any] | None = None
     if repair_stem:
+        max_repair_ratio_raw = candidate.get("max_conservation_repair_ratio")
+        max_repair_ratio = float(max_repair_ratio_raw) if max_repair_ratio_raw is not None else None
         reconstruction_repair = apply_mix_conservation_repair(
             mix_path=Path(str(window["mix_path"])),
             stem_paths=stem_paths,
             target_stem=repair_stem,
+            max_residual_ratio=max_repair_ratio,
         )
 
     minus_path = build_minus_from_non_vocal_stems({stem: Path(path) for stem, path in stem_paths.items()}, stems_dir / "minus.flac")
