@@ -88,7 +88,12 @@ only after the run-level delivery fields are accepted.
 
 ## Contamination Checks
 
-Candidates may declare explicit checks:
+The full forbidden-source matrix is mandatory for delivery acceptance. Candidate
+configuration cannot narrow that matrix. If a forbidden pair has no reference
+and no supported no-reference detector, the candidate blocks as
+`blocked_unknown`.
+
+Candidates may declare check hints for specific matrix pairs:
 
 ```json
 {
@@ -102,18 +107,18 @@ Candidates may declare explicit checks:
 }
 ```
 
-When explicit checks are present, the runner scores exactly those checks. If a
-foreign reference is provided through `foreign_references`, the scorer uses
-reference projection. If no reference is provided, the scorer may use a
-supported no-reference detector.
+When hints are present, the runner still scores the full matrix and applies the
+hint, such as `model_manifest`, only to the matching pair. If a foreign
+reference is provided through `foreign_references`, the scorer uses reference
+projection. If no reference is provided, the scorer may use a supported
+no-reference detector.
 
-The default from-scratch Demucs candidates declare the explicit `minus` /
-`vocals` check, so scratch search uses the available automatic vocal-leak
-sentinel instead of blocking every candidate on the reference-required matrix.
-
-When no explicit checks are present, the runner keeps the full forbidden-source
-matrix and blocks missing references as `missing_contamination_reference:*`.
-This prevents a candidate with no contamination proof from becoming accepted.
+The default from-scratch Demucs candidates do not declare a shortened
+`contamination_checks` list. They must satisfy the same full matrix delivery
+contract as custom recipes. With the current no-reference detector this means a
+default scratch search can block until the missing pair detectors or references
+exist; it must not publish a listen pack from a single `minus` / `vocals`
+sentinel.
 
 ## No-Reference Detector V1
 

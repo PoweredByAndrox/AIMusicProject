@@ -39,6 +39,25 @@ def write_wav(path: Path, audio: np.ndarray) -> Path:
     return path
 
 
+def write_full_foreign_references(tmp_path: Path, source_audio: dict[str, np.ndarray]) -> dict[str, dict[str, str]]:
+    ref_paths = {
+        stem: write_wav(tmp_path / "refs" / f"{stem}.flac", audio)
+        for stem, audio in source_audio.items()
+    }
+    return {
+        tested_stem: {foreign_source: str(ref_paths[foreign_source]) for foreign_source in foreign_sources}
+        for tested_stem, foreign_sources in FORBIDDEN_SOURCES.items()
+    }
+
+
+def find_leak_result(candidate: dict, tested_stem: str, foreign_source: str) -> dict:
+    return next(
+        result
+        for result in candidate["contamination_score"]["leak_results"]
+        if result["tested_stem"] == tested_stem and result["foreign_source"] == foreign_source
+    )
+
+
 def test_all_six_stems_are_required() -> None:
     assert STEMS == ("vocals", "drums", "bass", "guitar", "piano", "other")
     assert missing_required_stems({"vocals": "v.flac", "drums": "d.flac"}) == [
@@ -136,10 +155,7 @@ def test_default_from_scratch_recipe_uses_demucs_six_stem_route() -> None:
     assert "run_demucs_six_stem_candidate.py" in " ".join(recipe["candidates"][0]["command_template"])
     assert recipe["candidates"][0]["required_stems"] == list(STEMS)
     assert all(candidate["conservation_repair_stem"] == "other" for candidate in recipe["candidates"])
-    assert all(
-        candidate["contamination_checks"] == [{"tested_stem": "minus", "foreign_source": "vocals"}]
-        for candidate in recipe["candidates"]
-    )
+    assert all("contamination_checks" not in candidate for candidate in recipe["candidates"])
     assert len(recipe["candidates"]) == 10
     assert any(candidate.get("minus_vocal_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
     assert any("--residual-correction-stem" in candidate["command_template"] for candidate in recipe["candidates"])
@@ -209,7 +225,7 @@ def test_recipe_candidate_executes_and_blocks_without_contamination_proof(tmp_pa
     assert result["windows"][0]["window_id"] == "w000"
 
 
-def test_recipe_candidate_accepts_clean_no_reference_minus_vocal_check(tmp_path: Path) -> None:
+def test_recipe_candidate_blocks_clean_minus_check_when_full_matrix_unproven(tmp_path: Path) -> None:
     vocal = sine(880.0, seconds=0.25, amp=0.04)
     drums = sine(110.0, seconds=0.25, amp=0.12)
     mix = write_wav(tmp_path / "mix.wav", vocal + drums)
@@ -251,11 +267,67 @@ def test_recipe_candidate_accepts_clean_no_reference_minus_vocal_check(tmp_path:
     )
 
     candidate = result["candidates"][0]
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert result["delivery_allowed"] is False
+    assert result["listen_pack"] == {}
+    assert candidate["verdict"] == "blocked_unknown"
+    assert candidate["contamination_score"]["check_mode"] == "full_forbidden_matrix"
+    assert "contamination_detector_unknown:vocals:drums" in candidate["contamination_score"]["blocker_reasons"]
+    assert find_leak_result(candidate, "minus", "vocals")["detector_mode"] == "no_reference_spectral_v1"
+
+
+def test_recipe_candidate_accepts_only_with_full_forbidden_matrix_references(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(100.0, seconds=0.5, amp=0.03),
+        "drums": sine(200.0, seconds=0.5, amp=0.04),
+        "bass": sine(300.0, seconds=0.5, amp=0.05),
+        "guitar": sine(400.0, seconds=0.5, amp=0.02),
+        "piano": sine(500.0, seconds=0.5, amp=0.02),
+        "other": sine(600.0, seconds=0.5, amp=0.01),
+    }
+    mix = write_wav(tmp_path / "mix.wav", sum(source_audio.values()))
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-full-matrix-clean", "{window_mix}"],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        for stem, audio in source_audio.items():
+            sf.write(stems_dir / f"{stem}.flac", audio[: len(window_audio)].astype(np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    required_check_count = sum(len(sources) for sources in FORBIDDEN_SOURCES.values())
     assert result["verdict"] == "auto_accept"
     assert result["delivery_allowed"] is True
     assert candidate["verdict"] == "auto_accept"
-    assert candidate["contamination_score"]["attempted_checks"] == 1
-    assert candidate["contamination_score"]["leak_results"][0]["detector_mode"] == "no_reference_spectral_v1"
+    assert candidate["contamination_score"]["check_mode"] == "full_forbidden_matrix"
+    assert candidate["contamination_score"]["attempted_checks"] == required_check_count
+    assert candidate["contamination_score"]["blocker_reasons"] == []
 
 
 def test_recipe_candidate_blocks_no_reference_vocal_leak_in_minus(tmp_path: Path) -> None:
@@ -301,7 +373,7 @@ def test_recipe_candidate_blocks_no_reference_vocal_leak_in_minus(tmp_path: Path
     )
 
     candidate = result["candidates"][0]
-    leak_result = candidate["contamination_score"]["leak_results"][0]
+    leak_result = find_leak_result(candidate, "minus", "vocals")
     assert result["verdict"] == "blocked_no_clean_candidate"
     assert candidate["verdict"] == "blocked_leak"
     assert leak_result["verdict"] == "fail"
@@ -385,10 +457,13 @@ def test_recipe_candidate_uses_trainable_no_reference_model(tmp_path: Path) -> N
         command_runner=fake_runner,
     )
 
-    leak_result = result["candidates"][0]["contamination_score"]["leak_results"][0]
-    assert result["verdict"] == "auto_accept"
+    candidate = result["candidates"][0]
+    leak_result = find_leak_result(candidate, "minus", "vocals")
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert candidate["verdict"] == "blocked_unknown"
     assert leak_result["detector_mode"] == "no_reference_neural_v1"
     assert leak_result["model_manifest"] == str(model_dir / "manifest.json")
+    assert "contamination_detector_unknown:vocals:drums" in candidate["contamination_score"]["blocker_reasons"]
 
 
 def test_conservation_repair_assigns_residual_before_reconstruction_gate(tmp_path: Path) -> None:
@@ -406,7 +481,17 @@ def test_conservation_repair_assigns_residual_before_reconstruction_gate(tmp_pat
                         "candidate_id": "c001",
                         "command_template": ["fixture-write-needs-repair", "{window_mix}"],
                         "conservation_repair_stem": "other",
-                        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+                        "foreign_references": write_full_foreign_references(
+                            tmp_path,
+                            {
+                                "vocals": vocal,
+                                "drums": drums,
+                                "bass": np.zeros_like(vocal, dtype=np.float32),
+                                "guitar": np.zeros_like(vocal, dtype=np.float32),
+                                "piano": np.zeros_like(vocal, dtype=np.float32),
+                                "other": missing_other,
+                            },
+                        ),
                     }
                 ],
             }
@@ -491,7 +576,7 @@ def test_conservation_repair_rejects_vocal_target(tmp_path: Path) -> None:
     assert candidate["reconstruction_repair"]["reason"] == "unsupported_conservation_repair_stem"
 
 
-def test_minus_vocal_debleed_moves_vocal_band_out_of_minus(tmp_path: Path) -> None:
+def test_minus_vocal_debleed_does_not_publish_without_full_matrix_proof(tmp_path: Path) -> None:
     vocal_band_residue = sine(900.0, seconds=0.25, amp=0.04)
     bass = sine(110.0, seconds=0.25, amp=0.12)
     mix = write_wav(tmp_path / "mix.wav", vocal_band_residue + bass)
@@ -534,22 +619,15 @@ def test_minus_vocal_debleed_moves_vocal_band_out_of_minus(tmp_path: Path) -> No
     )
 
     candidate = result["candidates"][0]
-    assert result["verdict"] == "auto_accept"
-    assert result["delivery_status"] == "accepted"
-    assert result["delivery_allowed"] is True
-    assert result["presentation_status"] == "accepted_for_listen_pack"
-    pack_path = Path(result["listen_pack"]["path"])
-    assert pack_path.exists()
-    listen_pack = json.loads(pack_path.read_text(encoding="utf-8"))
-    assert listen_pack["delivery_status"] == "accepted"
-    assert listen_pack["delivery_allowed"] is True
-    assert listen_pack["presentation_status"] == "accepted_for_listen_pack"
-    assert Path(listen_pack["audio_paths"]["minus"]).exists()
-    assert Path(listen_pack["audio_paths"]["vocals"]).exists()
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert result["delivery_status"] == "blocked"
+    assert result["delivery_allowed"] is False
+    assert result["presentation_status"] == "blocked_from_listen_pack"
+    assert result["listen_pack"] == {}
     assert candidate["minus_vocal_debleed"]["applied"] is True
     assert candidate["minus_vocal_debleed"]["moved_rms"] > 0.0
     assert candidate["reconstruction"]["ok"] is True
-    assert candidate["contamination_score"]["verdict"] == "auto_accept"
+    assert candidate["contamination_score"]["verdict"] == "blocked_unknown"
 
 
 def test_recipe_candidate_missing_stem_blocks_candidate(tmp_path: Path) -> None:

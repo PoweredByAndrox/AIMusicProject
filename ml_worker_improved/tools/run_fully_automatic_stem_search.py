@@ -134,7 +134,6 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
             "residual_correction_stem": residual_stem,
             "conservation_repair_stem": "other",
             "required_stems": list(STEMS),
-            "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
             "command_template": command_template,
         }
         if debleed_strength > 0.0:
@@ -205,28 +204,41 @@ def _collect_stem_paths(stems_dir: Path) -> dict[str, str]:
     return {stem: str(stems_dir / f"{stem}.flac") for stem in STEMS if (stems_dir / f"{stem}.flac").is_file()}
 
 
-def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[dict[str, str]], bool]:
-    checks = candidate.get("contamination_checks")
-    if isinstance(checks, list):
-        normalized: list[dict[str, str]] = []
-        for item in checks:
-            if not isinstance(item, dict):
-                continue
-            tested_stem = str(item.get("tested_stem") or "").strip()
-            foreign_source = str(item.get("foreign_source") or "").strip()
-            if tested_stem and foreign_source:
-                check = {"tested_stem": tested_stem, "foreign_source": foreign_source}
-                model_manifest = str(item.get("model_manifest") or "").strip()
-                if model_manifest:
-                    check["model_manifest"] = model_manifest
-                normalized.append(check)
-        return normalized, True
-
+def _full_forbidden_contamination_checks() -> list[dict[str, str]]:
     return [
         {"tested_stem": tested_stem, "foreign_source": foreign_source}
         for tested_stem, forbidden_sources in FORBIDDEN_SOURCES.items()
         for foreign_source in forbidden_sources
-    ], False
+    ]
+
+
+def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[dict[str, str]], bool]:
+    required_checks = _full_forbidden_contamination_checks()
+    checks = candidate.get("contamination_checks")
+    if not isinstance(checks, list):
+        return required_checks, False
+
+    hints: dict[tuple[str, str], dict[str, str]] = {}
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        tested_stem = str(item.get("tested_stem") or "").strip()
+        foreign_source = str(item.get("foreign_source") or "").strip()
+        if not tested_stem or not foreign_source:
+            continue
+        hint: dict[str, str] = {}
+        model_manifest = str(item.get("model_manifest") or "").strip()
+        if model_manifest:
+            hint["model_manifest"] = model_manifest
+        hints[(tested_stem, foreign_source)] = hint
+
+    merged: list[dict[str, str]] = []
+    for check in required_checks:
+        pair = (check["tested_stem"], check["foreign_source"])
+        merged_check = dict(check)
+        merged_check.update(hints.get(pair, {}))
+        merged.append(merged_check)
+    return merged, True
 
 
 def _rms(audio: np.ndarray) -> float:
@@ -532,9 +544,6 @@ def _score_candidate_contamination(
     attempted = 0
     checks, explicit_checks = _candidate_contamination_checks(candidate)
 
-    if explicit_checks and not checks:
-        blocker_reasons.append("empty_contamination_checks")
-
     for check in checks:
         tested_stem = check["tested_stem"]
         foreign_source = check["foreign_source"]
@@ -578,7 +587,9 @@ def _score_candidate_contamination(
         "attempted_checks": attempted,
         "blocker_reasons": blocker_reasons,
         "leak_results": leak_results,
-        "check_mode": "explicit_candidate_checks" if explicit_checks else "full_forbidden_matrix",
+        "check_mode": "full_forbidden_matrix",
+        "candidate_check_hints_used": explicit_checks,
+        "required_check_count": len(checks),
     }
 
 
