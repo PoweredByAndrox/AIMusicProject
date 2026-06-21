@@ -9,7 +9,10 @@ from typing import Any
 
 import numpy as np
 
-FEATURE_NAMES = (
+from tools.stem_contamination_common import FORBIDDEN_SOURCES, MINUS_STEM, STEMS
+
+
+BASE_FEATURE_NAMES = (
     "vocal_band_dbfs",
     "low_band_dbfs",
     "mid_band_dbfs",
@@ -18,7 +21,22 @@ FEATURE_NAMES = (
     "vocal_to_low_db",
     "vocal_to_total_db",
 )
+TESTED_STEM_FEATURES = (*STEMS, MINUS_STEM)
+FOREIGN_SOURCE_FEATURES = STEMS
+FEATURE_NAMES = (
+    *BASE_FEATURE_NAMES,
+    *(f"tested_stem={stem}" for stem in TESTED_STEM_FEATURES),
+    *(f"foreign_source={stem}" for stem in FOREIGN_SOURCE_FEATURES),
+)
 VOCAL_BAND_HZ = (700.0, 1200.0)
+SOURCE_BANDS_HZ = {
+    "vocals": VOCAL_BAND_HZ,
+    "drums": (1200.0, 6000.0),
+    "bass": (40.0, 300.0),
+    "guitar": (300.0, 1600.0),
+    "piano": (250.0, 4000.0),
+    "other": (300.0, 4000.0),
+}
 
 try:  # pragma: no cover - exercised in Docker tests.
     import torch
@@ -55,7 +73,16 @@ def band_limited_audio(audio: np.ndarray, sample_rate: int, low_hz: float, high_
     return np.fft.irfft(filtered, n=len(audio), axis=0).astype(np.float32)
 
 
-def extract_no_reference_features(audio: np.ndarray, sample_rate: int) -> list[float]:
+def _one_hot(value: str, choices: tuple[str, ...]) -> list[float]:
+    return [1.0 if value == choice else 0.0 for choice in choices]
+
+
+def source_band_limited_audio(audio: np.ndarray, sample_rate: int, foreign_source: str) -> np.ndarray:
+    low_hz, high_hz = SOURCE_BANDS_HZ.get(foreign_source, VOCAL_BAND_HZ)
+    return band_limited_audio(audio, sample_rate, low_hz, high_hz)
+
+
+def extract_base_no_reference_features(audio: np.ndarray, sample_rate: int) -> list[float]:
     vocal_db = dbfs(rms(band_limited_audio(audio, sample_rate, 700.0, 1200.0)))
     low_db = dbfs(rms(band_limited_audio(audio, sample_rate, 80.0, 300.0)))
     mid_db = dbfs(rms(band_limited_audio(audio, sample_rate, 300.0, 700.0)))
@@ -70,6 +97,38 @@ def extract_no_reference_features(audio: np.ndarray, sample_rate: int) -> list[f
         vocal_db - low_db,
         vocal_db - total_db,
     ]
+
+
+def extract_no_reference_features(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    tested_stem: str = "",
+    foreign_source: str = "",
+) -> list[float]:
+    base_features = extract_base_no_reference_features(audio, sample_rate)
+    return [
+        *base_features,
+        *_one_hot(tested_stem, TESTED_STEM_FEATURES),
+        *_one_hot(foreign_source, FOREIGN_SOURCE_FEATURES),
+    ]
+
+
+def _trained_pair_set(manifest: dict[str, Any]) -> set[tuple[str, str]]:
+    trained_pairs = manifest.get("trained_pairs")
+    if isinstance(trained_pairs, list):
+        pairs: set[tuple[str, str]] = set()
+        for item in trained_pairs:
+            if not isinstance(item, dict):
+                continue
+            tested_stem = str(item.get("tested_stem") or "")
+            foreign_source = str(item.get("foreign_source") or "")
+            if tested_stem and foreign_source:
+                pairs.add((tested_stem, foreign_source))
+        return pairs
+    tested_stem = str(manifest.get("tested_stem") or "")
+    foreign_source = str(manifest.get("foreign_source") or "")
+    return {(tested_stem, foreign_source)} if tested_stem and foreign_source else set()
 
 
 if TORCH_AVAILABLE:
@@ -104,8 +163,10 @@ def predict_no_reference_probability(
     if not TORCH_AVAILABLE:
         raise RuntimeError("torch_unavailable")
     manifest = json.loads(model_manifest_path.read_text(encoding="utf-8-sig"))
-    if manifest.get("tested_stem") != tested_stem or manifest.get("foreign_source") != foreign_source:
-        raise ValueError("model_pair_mismatch")
+    if foreign_source not in FORBIDDEN_SOURCES.get(tested_stem, ()):
+        raise ValueError(f"invalid_forbidden_pair:{tested_stem}:{foreign_source}")
+    if (tested_stem, foreign_source) not in _trained_pair_set(manifest):
+        raise ValueError(f"model_pair_untrained:{tested_stem}:{foreign_source}")
     model_file = Path(str(manifest.get("model_file") or ""))
     if not model_file.is_file():
         raise FileNotFoundError(f"missing model file: {model_file}")
@@ -118,7 +179,13 @@ def predict_no_reference_probability(
     model = StemContaminationNet(input_width=input_width, hidden_size=hidden_size)
     model.load_state_dict(bundle["state_dict"])
     model.eval()
-    features = np.asarray(extract_no_reference_features(audio, sample_rate), dtype=np.float32)
+    if input_width == len(BASE_FEATURE_NAMES):
+        features = np.asarray(extract_base_no_reference_features(audio, sample_rate), dtype=np.float32)
+    else:
+        features = np.asarray(
+            extract_no_reference_features(audio, sample_rate, tested_stem=tested_stem, foreign_source=foreign_source),
+            dtype=np.float32,
+        )
     mean = np.asarray(bundle["feature_mean"], dtype=np.float32)
     std = np.asarray(bundle["feature_std"], dtype=np.float32)
     normalized = (features - mean) / np.maximum(std, 1.0e-6)
@@ -131,4 +198,6 @@ def predict_no_reference_probability(
         "model_manifest": str(model_manifest_path),
         "feature_names": list(bundle.get("feature_names") or FEATURE_NAMES),
         "features": [round(float(value), 6) for value in features.tolist()],
+        "tested_stem": tested_stem,
+        "foreign_source": foreign_source,
     }

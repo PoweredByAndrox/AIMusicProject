@@ -147,17 +147,31 @@ neural contamination models are trained and promoted.
 from synthetic contamination rows produced by
 `tools/build_stem_contamination_dataset.py` or equivalent rows with:
 
-- `base_stem=minus`
-- `foreign_source=vocals`
+- `base_stem`: any tested stem from the forbidden-source matrix
+- `foreign_source`: a source forbidden for that tested stem
 - `label_type=synthetic_clean`
 - `is_ground_truth=true`
-- `input_stem`: clean minus plus injected vocal leak
+- `input_stem`: clean stem plus injected foreign-source leak
 - `target_leak`: the injected leak signal
 
 For each safe row, training derives a positive example from `input_stem` and a
 negative example from `input_stem - target_leak`. Generated separator output,
 dirty references, pseudo labels, and non-ground-truth rows cannot become
 training ground truth.
+
+The manifest records `trained_pairs`. A single manifest may cover multiple
+forbidden pairs, and the runner can apply it to the full matrix with:
+
+```json
+{
+  "contamination_model_manifest": "artifacts/scd/m001/manifest.json"
+}
+```
+
+Pair-specific `contamination_checks[].model_manifest` entries are hints that
+override the shared manifest only for that pair. If a requested pair is not in
+`trained_pairs`, the scorer blocks as `blocked_unknown` with
+`model_pair_untrained` evidence.
 
 The trained manifest remains shadow evidence:
 
@@ -168,7 +182,8 @@ The trained manifest remains shadow evidence:
 - `release_ready=false`
 - `can_publish_as_result=false`
 
-At runtime, a candidate may opt into this model by setting
+At runtime, a candidate may opt into this model through
+`contamination_model_manifest` or a pair-specific
 `contamination_checks[].model_manifest`. The scorer then reports
 `contamination_probability`, `probability_threshold`, model provenance, and the
 same leak-audio reconstruction path for failed candidates. If the model is

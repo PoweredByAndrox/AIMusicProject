@@ -9,6 +9,7 @@ import pytest
 import soundfile as sf
 
 from tools.run_fully_automatic_stem_search import (
+    _candidate_contamination_checks,
     build_candidate_manifest,
     build_default_from_scratch_recipe,
     choose_next_action,
@@ -161,6 +162,32 @@ def test_default_from_scratch_recipe_uses_demucs_six_stem_route() -> None:
     assert any("--residual-correction-stem" in candidate["command_template"] for candidate in recipe["candidates"])
 
 
+def test_contamination_model_manifest_applies_to_full_matrix() -> None:
+    checks, hints_used = _candidate_contamination_checks(
+        {
+            "contamination_model_manifest": "artifacts/scd/m001/manifest.json",
+            "contamination_checks": [
+                {
+                    "tested_stem": "minus",
+                    "foreign_source": "vocals",
+                    "model_manifest": "artifacts/scd/m002/manifest.json",
+                }
+            ],
+        }
+    )
+
+    required_check_count = sum(len(sources) for sources in FORBIDDEN_SOURCES.values())
+    assert hints_used is True
+    assert len(checks) == required_check_count
+    assert all(check["model_manifest"] for check in checks)
+    assert next(
+        check for check in checks if check["tested_stem"] == "minus" and check["foreign_source"] == "vocals"
+    )["model_manifest"] == "artifacts/scd/m002/manifest.json"
+    assert next(
+        check for check in checks if check["tested_stem"] == "vocals" and check["foreign_source"] == "drums"
+    )["model_manifest"] == "artifacts/scd/m001/manifest.json"
+
+
 def test_no_default_separator_blocks_without_old_recipe(tmp_path: Path) -> None:
     mix = write_wav(tmp_path / "mix.wav", sine(220.0, seconds=0.25))
     result = run_fully_automatic_stem_search(
@@ -274,6 +301,54 @@ def test_recipe_candidate_blocks_clean_minus_check_when_full_matrix_unproven(tmp
     assert candidate["contamination_score"]["check_mode"] == "full_forbidden_matrix"
     assert "contamination_detector_unknown:vocals:drums" in candidate["contamination_score"]["blocker_reasons"]
     assert find_leak_result(candidate, "minus", "vocals")["detector_mode"] == "no_reference_spectral_v1"
+
+
+def test_recipe_level_contamination_model_manifest_reaches_candidate_checks(tmp_path: Path) -> None:
+    vocal = sine(880.0, seconds=0.25, amp=0.04)
+    drums = sine(110.0, seconds=0.25, amp=0.12)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums)
+    recipe = tmp_path / "recipe.json"
+    missing_manifest = tmp_path / "missing_model" / "manifest.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "contamination_model_manifest": str(missing_manifest),
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-clean-with-model", "{window_mix}"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)])
+        write_wav(stems_dir / "drums.flac", drums[: len(window_audio)])
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert candidate["contamination_score"]["candidate_check_hints_used"] is True
+    assert candidate["contamination_score"]["attempted_checks"] == sum(len(sources) for sources in FORBIDDEN_SOURCES.values())
+    assert any("no_reference_model_unavailable" in reason for reason in candidate["contamination_score"]["blocker_reasons"])
 
 
 def test_recipe_candidate_accepts_only_with_full_forbidden_matrix_references(tmp_path: Path) -> None:

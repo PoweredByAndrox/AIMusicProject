@@ -11,6 +11,7 @@ import soundfile as sf
 from tools.build_stem_contamination_dataset import validate_stem_contamination_row
 from tools.score_stem_contamination import score_stem_contamination
 from tools.stem_contamination_common import build_minus_from_non_vocal_stems
+from tools.stem_contamination_model import BASE_FEATURE_NAMES, StemContaminationNet
 from tools.train_stem_contamination_detector import train_stem_contamination_detector
 
 
@@ -73,6 +74,21 @@ def test_dirty_ref_cannot_be_exact_ground_truth() -> None:
                 "base_stem": "minus",
                 "foreign_source": "vocals",
                 "label_type": "dirty_ref",
+                "is_ground_truth": True,
+            }
+        )
+
+
+def test_invalid_forbidden_pair_row_is_rejected() -> None:
+    with pytest.raises(ValueError, match="invalid forbidden source pair"):
+        validate_stem_contamination_row(
+            {
+                "row_id": "d000003",
+                "input_stem": "audio/in.flac",
+                "target_leak": "audio/leak.flac",
+                "base_stem": "vocals",
+                "foreign_source": "vocals",
+                "label_type": "synthetic_clean",
                 "is_ground_truth": True,
             }
         )
@@ -157,6 +173,50 @@ def test_no_reference_clean_minus_passes_without_reference(tmp_path: Path) -> No
     assert result["verdict"] == "pass"
     assert result["detector_mode"] == "no_reference_spectral_v1"
     assert result["leak_audio"] == ""
+
+
+def test_legacy_single_pair_model_manifest_remains_scorable(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    model = StemContaminationNet(input_width=len(BASE_FEATURE_NAMES), hidden_size=8)
+    model_file = tmp_path / "legacy_model.pt"
+    torch.save(
+        {
+            "model_id": "legacy_scd",
+            "input_width": len(BASE_FEATURE_NAMES),
+            "hidden_size": 8,
+            "feature_names": list(BASE_FEATURE_NAMES),
+            "feature_mean": [0.0 for _ in BASE_FEATURE_NAMES],
+            "feature_std": [1.0 for _ in BASE_FEATURE_NAMES],
+            "state_dict": model.state_dict(),
+        },
+        model_file,
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "stem_contamination_detector_model.v1",
+                "model_id": "legacy_scd",
+                "model_file": str(model_file),
+                "tested_stem": "minus",
+                "foreign_source": "vocals",
+                "threshold": 0.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "minus.wav", sine(110.0, amp=0.2) + sine(880.0, amp=0.04)),
+        tested_stem="minus",
+        foreign_source="vocals",
+        output_dir=tmp_path / "legacy_score",
+        foreign_reference_path=None,
+        model_manifest_path=manifest_path,
+    )
+
+    assert result["verdict"] in {"pass", "fail"}
+    assert result["detector_mode"] == "no_reference_neural_v1"
 
 
 def test_no_reference_unsupported_pair_blocks_unknown(tmp_path: Path) -> None:
@@ -244,3 +304,154 @@ def test_trainable_no_reference_detector_scores_dirty_and_clean_minus(tmp_path: 
     assert clean_result["verdict"] == "pass"
     assert clean_result["detector_mode"] == "no_reference_neural_v1"
     assert clean_result["leak_audio"] == ""
+
+
+def test_trainable_no_reference_detector_scores_non_minus_pair(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    rows = []
+    for idx, freq in enumerate((820.0, 880.0, 960.0), start=1):
+        clean_guitar = sine(330.0 + idx * 20.0, amp=0.14) + sine(440.0, amp=0.03)
+        leaked_vocal = sine(freq, amp=0.05)
+        row_id = f"d{idx:06d}"
+        rows.append(
+            {
+                "row_id": row_id,
+                "input_stem": str(write_wav(tmp_path / "train" / f"{row_id}_in.flac", clean_guitar + leaked_vocal)),
+                "target_leak": str(write_wav(tmp_path / "train" / f"{row_id}_leak.flac", leaked_vocal)),
+                "base_stem": "guitar",
+                "foreign_source": "vocals",
+                "label_type": "synthetic_clean",
+                "is_ground_truth": True,
+                "split": "train",
+            }
+        )
+    rows_path = tmp_path / "rows_guitar_vocals.jsonl"
+    rows_path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    model_dir = tmp_path / "model_guitar_vocals"
+
+    manifest = train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=120,
+        hidden_size=8,
+        min_positive_rows=2,
+    )
+
+    dirty_guitar = sine(330.0, amp=0.14) + sine(880.0, amp=0.05)
+    clean_guitar = sine(330.0, amp=0.14) + sine(440.0, amp=0.03)
+    dirty_result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "dirty_guitar.wav", dirty_guitar),
+        tested_stem="guitar",
+        foreign_source="vocals",
+        output_dir=tmp_path / "dirty_guitar_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+    clean_result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "clean_guitar.wav", clean_guitar),
+        tested_stem="guitar",
+        foreign_source="vocals",
+        output_dir=tmp_path / "clean_guitar_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    assert manifest["training_status"] == "trained"
+    assert any(
+        pair["tested_stem"] == "guitar" and pair["foreign_source"] == "vocals"
+        for pair in manifest["trained_pairs"]
+    )
+    assert dirty_result["verdict"] == "fail"
+    assert dirty_result["detector_mode"] == "no_reference_neural_v1"
+    assert dirty_result["leak_audio"]
+    assert clean_result["verdict"] == "pass"
+    assert clean_result["detector_mode"] == "no_reference_neural_v1"
+
+
+def test_trainable_no_reference_detector_blocks_untrained_pair(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    rows_path = _write_contamination_rows(tmp_path)
+    model_dir = tmp_path / "model"
+    train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=120,
+        hidden_size=8,
+        min_positive_rows=2,
+    )
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "guitar.wav", sine(330.0, amp=0.2) + sine(880.0, amp=0.05)),
+        tested_stem="guitar",
+        foreign_source="vocals",
+        output_dir=tmp_path / "score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    assert result["verdict"] == "blocked_unknown"
+    assert "model_pair_untrained" in result["reason"]
+
+
+def test_trainable_no_reference_detector_single_manifest_scores_multiple_pairs(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    rows = []
+    pair_specs = [
+        ("minus", "vocals", 110.0, 0.18),
+        ("guitar", "vocals", 330.0, 0.14),
+    ]
+    for pair_idx, (base_stem, foreign_source, base_freq, base_amp) in enumerate(pair_specs, start=1):
+        for sample_idx, leak_freq in enumerate((820.0, 880.0, 960.0), start=1):
+            clean = sine(base_freq + sample_idx * 20.0, amp=base_amp) + sine(base_freq * 2.0, amp=0.025)
+            leak = sine(leak_freq, amp=0.05)
+            row_id = f"d{pair_idx}{sample_idx:05d}"
+            rows.append(
+                {
+                    "row_id": row_id,
+                    "input_stem": str(write_wav(tmp_path / "train_multi" / f"{row_id}_in.flac", clean + leak)),
+                    "target_leak": str(write_wav(tmp_path / "train_multi" / f"{row_id}_leak.flac", leak)),
+                    "base_stem": base_stem,
+                    "foreign_source": foreign_source,
+                    "label_type": "synthetic_clean",
+                    "is_ground_truth": True,
+                    "split": "train",
+                }
+            )
+    rows_path = tmp_path / "rows_multi.jsonl"
+    rows_path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    model_dir = tmp_path / "model_multi"
+
+    manifest = train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=160,
+        hidden_size=12,
+        min_positive_rows=4,
+    )
+
+    dirty_minus = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "dirty_minus.wav", sine(110.0, amp=0.18) + sine(880.0, amp=0.05)),
+        tested_stem="minus",
+        foreign_source="vocals",
+        output_dir=tmp_path / "dirty_minus_multi_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+    dirty_guitar = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "dirty_guitar.wav", sine(330.0, amp=0.14) + sine(880.0, amp=0.05)),
+        tested_stem="guitar",
+        foreign_source="vocals",
+        output_dir=tmp_path / "dirty_guitar_multi_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    trained_pairs = {(pair["tested_stem"], pair["foreign_source"]) for pair in manifest["trained_pairs"]}
+    assert manifest["training_status"] == "trained"
+    assert manifest["pair_count"] == 2
+    assert trained_pairs == {("minus", "vocals"), ("guitar", "vocals")}
+    assert dirty_minus["verdict"] == "fail"
+    assert dirty_guitar["verdict"] == "fail"

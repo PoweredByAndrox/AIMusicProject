@@ -64,6 +64,14 @@ def validate_no_artifact_rag_output(output_dir: Path | str) -> None:
         raise ValueError("fully automatic stem search must not write into artifact_rag")
 
 
+def validate_forbidden_source_pair(tested_stem: Any, foreign_source: Any) -> tuple[str, str]:
+    tested = normalize_stem_name(tested_stem)
+    foreign = normalize_stem_name(foreign_source)
+    if foreign not in FORBIDDEN_SOURCES.get(tested, ()):
+        raise ValueError(f"invalid forbidden source pair: {tested}:{foreign}")
+    return tested, foreign
+
+
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:
     audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
     return np.asarray(audio, dtype=np.float32), int(sample_rate)

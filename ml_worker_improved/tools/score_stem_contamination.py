@@ -15,7 +15,7 @@ import soundfile as sf
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.stem_contamination_model import band_limited_audio, predict_no_reference_probability
+from tools.stem_contamination_model import SOURCE_BANDS_HZ, band_limited_audio, predict_no_reference_probability, source_band_limited_audio
 
 
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:
@@ -106,6 +106,7 @@ def _write_no_reference_result(
     leak_dbfs: float,
     detection_floor_db: float,
     detector_mode: str,
+    spectral_band_hz: list[float] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     leak_path = ""
@@ -124,7 +125,7 @@ def _write_no_reference_result(
         "leak_dbfs": round(leak_dbfs, 4),
         "detection_floor_db": detection_floor_db,
         "detector_mode": detector_mode,
-        "spectral_band_hz": [700.0, 1200.0],
+        "spectral_band_hz": spectral_band_hz or [700.0, 1200.0],
     }
     if extra:
         result.update(extra)
@@ -146,14 +147,6 @@ def score_stem_contamination(
     result_path = output_dir / f"{tested_stem}_{foreign_source}.json"
 
     if foreign_reference_path is None:
-        if tested_stem != "minus" or foreign_source != "vocals":
-            return _blocked_unknown_result(
-                tested_stem=tested_stem,
-                foreign_source=foreign_source,
-                result_path=result_path,
-                reason="no_reference_detector_not_available",
-            )
-
         stem_audio, stem_rate = _read_audio(tested_stem_path)
         if model_manifest_path is not None:
             try:
@@ -169,9 +162,9 @@ def score_stem_contamination(
                     tested_stem=tested_stem,
                     foreign_source=foreign_source,
                     result_path=result_path,
-                    reason=f"no_reference_model_unavailable:{type(exc).__name__}",
+                    reason=f"no_reference_model_unavailable:{type(exc).__name__}:{exc}",
                 )
-            leak_audio = _band_limited_audio(stem_audio, stem_rate, 700.0, 1200.0)
+            leak_audio = source_band_limited_audio(stem_audio, stem_rate, foreign_source)
             leak_dbfs = _dbfs(_rms(leak_audio))
             probability = float(prediction["probability"])
             threshold = float(prediction["threshold"])
@@ -187,6 +180,7 @@ def score_stem_contamination(
                 leak_dbfs=leak_dbfs,
                 detection_floor_db=detection_floor_db,
                 detector_mode="no_reference_neural_v1",
+                spectral_band_hz=list(SOURCE_BANDS_HZ.get(foreign_source, (700.0, 1200.0))),
                 extra={
                     "contamination_probability": round(probability, 6),
                     "probability_threshold": threshold,
@@ -196,6 +190,14 @@ def score_stem_contamination(
                     "feature_names": prediction["feature_names"],
                     "shadow_only": True,
                 },
+            )
+
+        if tested_stem != "minus" or foreign_source != "vocals":
+            return _blocked_unknown_result(
+                tested_stem=tested_stem,
+                foreign_source=foreign_source,
+                result_path=result_path,
+                reason="no_reference_detector_not_available",
             )
 
         verdict, leak_audio, leak_dbfs = _no_reference_vocal_in_minus_score(

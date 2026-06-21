@@ -18,6 +18,7 @@ if str(APP_ROOT) not in sys.path:
 
 from tools.build_stem_contamination_dataset import validate_stem_contamination_row
 from tools.docker_runtime import require_docker_runtime
+from tools.stem_contamination_common import FORBIDDEN_SOURCES
 from tools.stem_contamination_model import (
     FEATURE_NAMES,
     TORCH_AVAILABLE,
@@ -71,13 +72,16 @@ def _stable_id(rows: list[dict[str, Any]]) -> str:
     return "scd_" + hashlib.sha256(payload).hexdigest()[:12]
 
 
-def _training_examples(rows: list[dict[str, Any]]) -> tuple[list[list[float]], list[float], int]:
+def _training_examples(rows: list[dict[str, Any]]) -> tuple[list[list[float]], list[float], int, dict[tuple[str, str], int]]:
     features: list[list[float]] = []
     labels: list[float] = []
     positive_rows = 0
+    pair_counts: dict[tuple[str, str], int] = {}
     for row in rows:
         validate_stem_contamination_row(row)
-        if row.get("base_stem") != "minus" or row.get("foreign_source") != "vocals":
+        tested_stem = str(row.get("base_stem") or "")
+        foreign_source = str(row.get("foreign_source") or "")
+        if foreign_source not in FORBIDDEN_SOURCES.get(tested_stem, ()):
             continue
         if row.get("label_type") != "synthetic_clean" or row.get("is_ground_truth") is not True:
             continue
@@ -91,12 +95,21 @@ def _training_examples(rows: list[dict[str, Any]]) -> tuple[list[list[float]], l
         dirty = dirty[:min_len]
         leak = leak[:min_len]
         clean = dirty - leak
-        features.append(extract_no_reference_features(dirty, dirty_rate))
+        features.append(extract_no_reference_features(dirty, dirty_rate, tested_stem=tested_stem, foreign_source=foreign_source))
         labels.append(1.0)
-        features.append(extract_no_reference_features(clean, dirty_rate))
+        features.append(extract_no_reference_features(clean, dirty_rate, tested_stem=tested_stem, foreign_source=foreign_source))
         labels.append(0.0)
         positive_rows += 1
-    return features, labels, positive_rows
+        pair = (tested_stem, foreign_source)
+        pair_counts[pair] = pair_counts.get(pair, 0) + 1
+    return features, labels, positive_rows, pair_counts
+
+
+def _trained_pairs(pair_counts: dict[tuple[str, str], int]) -> list[dict[str, Any]]:
+    return [
+        {"tested_stem": tested_stem, "foreign_source": foreign_source, "positive_row_count": pair_counts[(tested_stem, foreign_source)]}
+        for tested_stem, foreign_source in sorted(pair_counts)
+    ]
 
 
 def train_stem_contamination_detector(
@@ -118,7 +131,8 @@ def train_stem_contamination_detector(
             path.unlink()
     _append_progress(progress_path, {"event": "start", "rows_jsonl": str(rows_jsonl), "device": device})
     rows = _iter_jsonl(rows_jsonl)
-    features, labels, positive_rows = _training_examples(rows)
+    features, labels, positive_rows, pair_counts = _training_examples(rows)
+    trained_pairs = _trained_pairs(pair_counts)
     reason = ""
     if not TORCH_AVAILABLE:
         reason = "torch_unavailable"
@@ -135,8 +149,10 @@ def train_stem_contamination_detector(
             "training_status": "skipped",
             "critic_not_usable_reason": reason,
             "detector_mode": "no_reference_neural_v1",
-            "tested_stem": "minus",
-            "foreign_source": "vocals",
+            "tested_stem": trained_pairs[0]["tested_stem"] if len(trained_pairs) == 1 else "",
+            "foreign_source": trained_pairs[0]["foreign_source"] if len(trained_pairs) == 1 else "",
+            "trained_pairs": trained_pairs,
+            "pair_count": len(trained_pairs),
             "shadow_only": True,
             "promotion_allowed": False,
             "delivery_allowed": False,
@@ -194,8 +210,10 @@ def train_stem_contamination_detector(
         "training_completed": True,
         "critic_not_usable_reason": "",
         "detector_mode": "no_reference_neural_v1",
-        "tested_stem": "minus",
-        "foreign_source": "vocals",
+        "tested_stem": trained_pairs[0]["tested_stem"] if len(trained_pairs) == 1 else "",
+        "foreign_source": trained_pairs[0]["foreign_source"] if len(trained_pairs) == 1 else "",
+        "trained_pairs": trained_pairs,
+        "pair_count": len(trained_pairs),
         "threshold": float(threshold),
         "positive_row_count": positive_rows,
         "train_example_count": len(labels),
@@ -217,6 +235,8 @@ def train_stem_contamination_detector(
         {
             "training_status": "trained",
             "positive_row_count": positive_rows,
+            "pair_count": len(trained_pairs),
+            "trained_pairs": trained_pairs,
             "train_example_count": len(labels),
             "final_loss": round(final_loss, 8),
         },

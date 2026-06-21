@@ -14,7 +14,7 @@ import soundfile as sf
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.stem_contamination_common import validate_contamination_label_row, write_jsonl
+from tools.stem_contamination_common import validate_contamination_label_row, validate_forbidden_source_pair, write_jsonl
 
 
 def validate_stem_contamination_row(row: Mapping[str, Any]) -> None:
@@ -23,6 +23,7 @@ def validate_stem_contamination_row(row: Mapping[str, Any]) -> None:
     missing = [key for key in required if not row.get(key)]
     if missing:
         raise ValueError(f"missing contamination row fields: {', '.join(missing)}")
+    validate_forbidden_source_pair(row["base_stem"], row["foreign_source"])
 
 
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:

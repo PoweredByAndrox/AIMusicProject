@@ -214,9 +214,12 @@ def _full_forbidden_contamination_checks() -> list[dict[str, str]]:
 
 def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[dict[str, str]], bool]:
     required_checks = _full_forbidden_contamination_checks()
+    default_model_manifest = str(candidate.get("contamination_model_manifest") or "").strip()
     checks = candidate.get("contamination_checks")
     if not isinstance(checks, list):
-        return required_checks, False
+        if not default_model_manifest:
+            return required_checks, False
+        return [{**check, "model_manifest": default_model_manifest} for check in required_checks], True
 
     hints: dict[tuple[str, str], dict[str, str]] = {}
     for item in checks:
@@ -236,6 +239,8 @@ def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[
     for check in required_checks:
         pair = (check["tested_stem"], check["foreign_source"])
         merged_check = dict(check)
+        if default_model_manifest:
+            merged_check["model_manifest"] = default_model_manifest
         merged_check.update(hints.get(pair, {}))
         merged.append(merged_check)
     return merged, True
@@ -573,7 +578,10 @@ def _score_candidate_contamination(
         if result.get("verdict") == "fail":
             blocker_reasons.append(f"foreign_source_recovered:{tested_stem}:{foreign_source}")
         elif result.get("verdict") == "blocked_unknown":
-            blocker_reasons.append(f"contamination_detector_unknown:{tested_stem}:{foreign_source}")
+            reason = f"contamination_detector_unknown:{tested_stem}:{foreign_source}"
+            blocker_reasons.append(reason)
+            if result.get("reason"):
+                blocker_reasons.append(f"{reason}:{result['reason']}")
 
     if any(reason.startswith("foreign_source_recovered:") for reason in blocker_reasons):
         verdict = "blocked_leak"
@@ -949,12 +957,15 @@ def run_fully_automatic_stem_search(
         recipe_candidates = _candidate_items(recipe)[:max_candidates]
         runner = command_runner or default_command_runner
         timeout_sec = int(recipe.get("timeout_sec") or 300)
+        recipe_model_manifest = str(recipe.get("contamination_model_manifest") or "").strip()
         for window in windows:
             window_dir = output_dir / str(window["window_id"])
             window_candidates: list[dict[str, Any]] = []
             for idx, item in enumerate(recipe_candidates, start=1):
                 item = dict(item)
                 item.setdefault("candidate_id", f"c{idx:03d}")
+                if recipe_model_manifest and not item.get("contamination_model_manifest"):
+                    item["contamination_model_manifest"] = recipe_model_manifest
                 _append_jsonl(
                     progress_path,
                     {
