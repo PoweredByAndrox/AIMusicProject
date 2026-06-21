@@ -66,6 +66,7 @@ DEFAULT_VOCAL_ROUTE_REQUIRED_PATHS = {
         "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt",
     ),
 }
+MIN_TRAILING_WINDOW_SEC = 1.0
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
@@ -513,24 +514,46 @@ def split_audio_windows(mix_path: Path, output_dir: Path, window_sec: float) -> 
     if window_sec <= 0:
         raise ValueError("window_sec must be positive")
     samples_per_window = max(1, int(round(window_sec * sample_rate)))
-    windows: list[dict[str, Any]] = []
+    min_trailing_samples = max(1, int(round(MIN_TRAILING_WINDOW_SEC * sample_rate)))
+    segments: list[tuple[int, int, dict[str, Any]]] = []
     for start in range(0, len(audio), samples_per_window):
         end = min(len(audio), start + samples_per_window)
         if end <= start:
             continue
+        segments.append((start, end, {}))
+    if len(segments) >= 2:
+        tail_start, tail_end, _tail_meta = segments[-1]
+        tail_samples = tail_end - tail_start
+        if tail_samples < min_trailing_samples:
+            prev_start, _prev_end, prev_meta = segments[-2]
+            merged_meta = dict(prev_meta)
+            merged_meta.update(
+                {
+                    "short_tail_merged": True,
+                    "merged_tail_sec": round(tail_samples / sample_rate, 6),
+                    "merged_tail_sample_count": int(tail_samples),
+                    "nominal_window_sec": float(window_sec),
+                }
+            )
+            segments[-2] = (prev_start, tail_end, merged_meta)
+            segments.pop()
+    windows: list[dict[str, Any]] = []
+    for start, end, segment_meta in segments:
         window_id = f"w{len(windows):03d}"
         window_path = _write_audio(output_dir / window_id / "mix.flac", audio[start:end], sample_rate)
-        windows.append(
-            {
-                "window_id": window_id,
-                "mix_path": str(window_path),
-                "start_sec": round(start / sample_rate, 6),
-                "end_sec": round(end / sample_rate, 6),
-                "sample_rate": sample_rate,
-                "sample_count": int(end - start),
-                "channel_count": int(audio.shape[1]),
-            }
-        )
+        window = {
+            "window_id": window_id,
+            "mix_path": str(window_path),
+            "start_sec": round(start / sample_rate, 6),
+            "end_sec": round(end / sample_rate, 6),
+            "sample_rate": sample_rate,
+            "sample_count": int(end - start),
+            "channel_count": int(audio.shape[1]),
+            "short_tail_merged": bool(segment_meta.get("short_tail_merged", False)),
+        }
+        if segment_meta.get("short_tail_merged"):
+            window.update(segment_meta)
+        windows.append(window)
     return windows
 
 

@@ -12,7 +12,7 @@ import numpy as np
 from tools.stem_contamination_common import FORBIDDEN_SOURCES, MINUS_STEM, STEMS
 
 
-BASE_FEATURE_NAMES = (
+LEGACY_BASE_FEATURE_NAMES = (
     "vocal_band_dbfs",
     "low_band_dbfs",
     "mid_band_dbfs",
@@ -21,10 +21,34 @@ BASE_FEATURE_NAMES = (
     "vocal_to_low_db",
     "vocal_to_total_db",
 )
+BASE_FEATURE_NAMES = (
+    *LEGACY_BASE_FEATURE_NAMES,
+    "spectral_centroid_hz",
+    "spectral_bandwidth_hz",
+    "spectral_rolloff85_hz",
+    "spectral_flatness",
+    "zero_crossing_rate",
+    "crest_factor_db",
+    "envelope_cv",
+    "transient_ratio",
+)
+PAIR_FEATURE_NAMES = (
+    "foreign_band_dbfs",
+    "foreign_to_total_db",
+    "foreign_to_vocal_db",
+    "foreign_to_low_db",
+    "foreign_to_high_db",
+)
 TESTED_STEM_FEATURES = (*STEMS, MINUS_STEM)
 FOREIGN_SOURCE_FEATURES = STEMS
+LEGACY_FEATURE_NAMES = (
+    *LEGACY_BASE_FEATURE_NAMES,
+    *(f"tested_stem={stem}" for stem in TESTED_STEM_FEATURES),
+    *(f"foreign_source={stem}" for stem in FOREIGN_SOURCE_FEATURES),
+)
 FEATURE_NAMES = (
     *BASE_FEATURE_NAMES,
+    *PAIR_FEATURE_NAMES,
     *(f"tested_stem={stem}" for stem in TESTED_STEM_FEATURES),
     *(f"foreign_source={stem}" for stem in FOREIGN_SOURCE_FEATURES),
 )
@@ -82,7 +106,64 @@ def source_band_limited_audio(audio: np.ndarray, sample_rate: int, foreign_sourc
     return band_limited_audio(audio, sample_rate, low_hz, high_hz)
 
 
-def extract_base_no_reference_features(audio: np.ndarray, sample_rate: int) -> list[float]:
+def _mono(audio: np.ndarray) -> np.ndarray:
+    array = np.asarray(audio, dtype=np.float32)
+    if array.ndim == 1:
+        return array
+    return np.mean(array, axis=1).astype(np.float32)
+
+
+def _safe_ratio_db(numerator: float, denominator: float) -> float:
+    return dbfs(float(numerator)) - dbfs(float(denominator))
+
+
+def _spectral_shape_features(audio: np.ndarray, sample_rate: int) -> list[float]:
+    mono = _mono(audio)
+    if mono.size <= 1:
+        return [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    window = np.hanning(len(mono)).astype(np.float32)
+    spectrum = np.abs(np.fft.rfft(mono * window)).astype(np.float64)
+    freqs = np.fft.rfftfreq(len(mono), d=1.0 / float(sample_rate))
+    spectrum = np.maximum(spectrum, 1.0e-12)
+    magnitude_sum = float(np.sum(spectrum))
+    centroid = float(np.sum(freqs * spectrum) / magnitude_sum)
+    bandwidth = float(np.sqrt(np.sum(((freqs - centroid) ** 2) * spectrum) / magnitude_sum))
+    cumulative = np.cumsum(spectrum)
+    rolloff_index = int(np.searchsorted(cumulative, cumulative[-1] * 0.85))
+    rolloff = float(freqs[min(rolloff_index, len(freqs) - 1)])
+    flatness = float(np.exp(np.mean(np.log(spectrum))) / (np.mean(spectrum) + 1.0e-12))
+    zero_crossings = float(np.mean(np.abs(np.diff(np.signbit(mono)).astype(np.float32))))
+    audio_rms = rms(mono)
+    crest_db = dbfs(float(np.max(np.abs(mono)))) - dbfs(audio_rms)
+
+    frame = max(128, int(sample_rate * 0.02))
+    hop = max(1, frame // 2)
+    if len(mono) < frame:
+        envelope = np.asarray([audio_rms], dtype=np.float32)
+    else:
+        envelope = np.asarray(
+            [
+                rms(mono[start : start + frame])
+                for start in range(0, len(mono) - frame + 1, hop)
+            ],
+            dtype=np.float32,
+        )
+    envelope_mean = float(np.mean(envelope) + 1.0e-12)
+    envelope_cv = float(np.std(envelope) / envelope_mean)
+    transient_ratio = float(np.mean(np.abs(np.diff(envelope))) / envelope_mean) if len(envelope) > 1 else 0.0
+    return [
+        centroid,
+        bandwidth,
+        rolloff,
+        flatness,
+        zero_crossings,
+        crest_db,
+        envelope_cv,
+        transient_ratio,
+    ]
+
+
+def _legacy_extract_base_no_reference_features(audio: np.ndarray, sample_rate: int) -> list[float]:
     vocal_db = dbfs(rms(band_limited_audio(audio, sample_rate, 700.0, 1200.0)))
     low_db = dbfs(rms(band_limited_audio(audio, sample_rate, 80.0, 300.0)))
     mid_db = dbfs(rms(band_limited_audio(audio, sample_rate, 300.0, 700.0)))
@@ -99,6 +180,48 @@ def extract_base_no_reference_features(audio: np.ndarray, sample_rate: int) -> l
     ]
 
 
+def extract_base_no_reference_features(audio: np.ndarray, sample_rate: int) -> list[float]:
+    legacy = _legacy_extract_base_no_reference_features(audio, sample_rate)
+    return [
+        *legacy,
+        *_spectral_shape_features(audio, sample_rate),
+    ]
+
+
+def extract_pair_no_reference_features(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    foreign_source: str = "",
+) -> list[float]:
+    vocal_rms = rms(band_limited_audio(audio, sample_rate, 700.0, 1200.0))
+    low_rms = rms(band_limited_audio(audio, sample_rate, 80.0, 300.0))
+    high_rms = rms(band_limited_audio(audio, sample_rate, 1200.0, 4000.0))
+    total_rms = rms(audio)
+    foreign_rms = rms(source_band_limited_audio(audio, sample_rate, foreign_source))
+    return [
+        dbfs(foreign_rms),
+        _safe_ratio_db(foreign_rms, total_rms),
+        _safe_ratio_db(foreign_rms, vocal_rms),
+        _safe_ratio_db(foreign_rms, low_rms),
+        _safe_ratio_db(foreign_rms, high_rms),
+    ]
+
+
+def _legacy_extract_no_reference_features(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    tested_stem: str = "",
+    foreign_source: str = "",
+) -> list[float]:
+    return [
+        *_legacy_extract_base_no_reference_features(audio, sample_rate),
+        *_one_hot(tested_stem, TESTED_STEM_FEATURES),
+        *_one_hot(foreign_source, FOREIGN_SOURCE_FEATURES),
+    ]
+
+
 def extract_no_reference_features(
     audio: np.ndarray,
     sample_rate: int,
@@ -109,6 +232,7 @@ def extract_no_reference_features(
     base_features = extract_base_no_reference_features(audio, sample_rate)
     return [
         *base_features,
+        *extract_pair_no_reference_features(audio, sample_rate, foreign_source=foreign_source),
         *_one_hot(tested_stem, TESTED_STEM_FEATURES),
         *_one_hot(foreign_source, FOREIGN_SOURCE_FEATURES),
     ]
@@ -179,13 +303,23 @@ def predict_no_reference_probability(
     model = StemContaminationNet(input_width=input_width, hidden_size=hidden_size)
     model.load_state_dict(bundle["state_dict"])
     model.eval()
-    if input_width == len(BASE_FEATURE_NAMES):
+    bundle_feature_names = list(bundle.get("feature_names") or [])
+    if bundle_feature_names == list(LEGACY_BASE_FEATURE_NAMES) or input_width == len(LEGACY_BASE_FEATURE_NAMES):
+        features = np.asarray(_legacy_extract_base_no_reference_features(audio, sample_rate), dtype=np.float32)
+    elif bundle_feature_names == list(LEGACY_FEATURE_NAMES) or input_width == len(LEGACY_FEATURE_NAMES):
+        features = np.asarray(
+            _legacy_extract_no_reference_features(audio, sample_rate, tested_stem=tested_stem, foreign_source=foreign_source),
+            dtype=np.float32,
+        )
+    elif bundle_feature_names == list(BASE_FEATURE_NAMES) or input_width == len(BASE_FEATURE_NAMES):
         features = np.asarray(extract_base_no_reference_features(audio, sample_rate), dtype=np.float32)
-    else:
+    elif bundle_feature_names == list(FEATURE_NAMES) or input_width == len(FEATURE_NAMES):
         features = np.asarray(
             extract_no_reference_features(audio, sample_rate, tested_stem=tested_stem, foreign_source=foreign_source),
             dtype=np.float32,
         )
+    else:
+        raise ValueError(f"unsupported feature vector width: {input_width}")
     mean = np.asarray(bundle["feature_mean"], dtype=np.float32)
     std = np.asarray(bundle["feature_std"], dtype=np.float32)
     normalized = (features - mean) / np.maximum(std, 1.0e-6)

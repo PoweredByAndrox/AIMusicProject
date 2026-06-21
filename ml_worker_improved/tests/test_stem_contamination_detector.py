@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from tools.build_stem_contamination_dataset import validate_stem_contamination_row
+from tools.build_procedural_stem_clean_pairs import build_procedural_stem_clean_pairs
+from tools.build_stem_contamination_dataset import build_dataset_from_manifest, validate_stem_contamination_row
 import tools.score_stem_contamination as scorer
 from tools.score_stem_contamination import score_stem_contamination
 from tools.stem_contamination_common import build_minus_from_non_vocal_stems
@@ -22,6 +23,32 @@ SAMPLE_RATE = 16_000
 def sine(freq: float, seconds: float = 0.25, amp: float = 0.2) -> np.ndarray:
     t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
     return (amp * np.sin(2.0 * math.pi * freq * t)).astype(np.float32)
+
+
+def voice_like_vocal(seconds: float = 0.75) -> np.ndarray:
+    t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
+    f0 = 185.0 + 18.0 * np.sin(2.0 * math.pi * 4.5 * t)
+    phase = np.cumsum(2.0 * math.pi * f0 / float(SAMPLE_RATE)).astype(np.float32)
+    audio = np.zeros_like(t)
+    for harmonic, gain in ((1, 0.13), (2, 0.09), (3, 0.07), (4, 0.045), (5, 0.035), (7, 0.026), (9, 0.018)):
+        audio += gain * np.sin(float(harmonic) * phase + 0.17 * float(harmonic))
+    envelope = 0.52 + 0.48 * np.sin(2.0 * math.pi * 2.2 * t) ** 2
+    return (audio * envelope).astype(np.float32)
+
+
+def kick_drum_like(seconds: float = 0.75) -> np.ndarray:
+    frames = int(SAMPLE_RATE * seconds)
+    audio = np.zeros(frames, dtype=np.float32)
+    pulse_spacing = int(SAMPLE_RATE * 0.18)
+    decay_len = int(SAMPLE_RATE * 0.09)
+    t = np.arange(decay_len, dtype=np.float32) / float(SAMPLE_RATE)
+    kick = 0.34 * np.sin(2.0 * math.pi * 82.0 * t) * np.exp(-t * 38.0)
+    click = np.zeros(decay_len, dtype=np.float32)
+    click[: max(1, int(SAMPLE_RATE * 0.004))] = 0.22
+    for start in range(0, frames, pulse_spacing):
+        end = min(frames, start + decay_len)
+        audio[start:end] += (kick[: end - start] + click[: end - start]).astype(np.float32)
+    return audio.astype(np.float32)
 
 
 def write_wav(path: Path, audio: np.ndarray) -> Path:
@@ -489,3 +516,69 @@ def test_trainable_no_reference_detector_single_manifest_scores_multiple_pairs(t
     assert trained_pairs == {("minus", "vocals"), ("guitar", "vocals")}
     assert dirty_minus["verdict"] == "fail"
     assert dirty_guitar["verdict"] == "fail"
+
+
+def test_full_matrix_detector_treats_clean_voice_like_vocal_as_negative(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    clean_pairs_manifest = build_procedural_stem_clean_pairs(
+        output_dir=tmp_path / "pairs",
+        sample_rate=SAMPLE_RATE,
+        duration_sec=0.75,
+        examples_per_pair=6,
+    )
+    rows_path = build_dataset_from_manifest(clean_pairs_manifest, tmp_path / "dataset", contamination_db=-24.0)
+    model_dir = tmp_path / "full_matrix_model"
+    train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=220,
+        hidden_size=24,
+        min_positive_rows=6,
+    )
+
+    clean_vocal_path = write_wav(tmp_path / "clean_voice_like_vocal.flac", voice_like_vocal())
+    for foreign_source in ("guitar", "piano", "other"):
+        result = score_stem_contamination(
+            tested_stem_path=clean_vocal_path,
+            tested_stem="vocals",
+            foreign_source=foreign_source,
+            output_dir=tmp_path / "clean_voice_score",
+            foreign_reference_path=None,
+            model_manifest_path=model_dir / "manifest.json",
+        )
+
+        assert result["verdict"] == "pass", result
+        assert result["leak_audio"] == ""
+
+
+def test_full_matrix_detector_treats_clean_kick_drum_as_negative_for_bass(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    clean_pairs_manifest = build_procedural_stem_clean_pairs(
+        output_dir=tmp_path / "pairs",
+        sample_rate=SAMPLE_RATE,
+        duration_sec=0.75,
+        examples_per_pair=8,
+    )
+    rows_path = build_dataset_from_manifest(clean_pairs_manifest, tmp_path / "dataset", contamination_db=-24.0)
+    model_dir = tmp_path / "kick_model"
+    train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=220,
+        hidden_size=24,
+        min_positive_rows=8,
+    )
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "clean_kick.flac", kick_drum_like()),
+        tested_stem="drums",
+        foreign_source="bass",
+        output_dir=tmp_path / "clean_kick_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    assert result["verdict"] == "pass", result
+    assert result["leak_audio"] == ""

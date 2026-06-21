@@ -149,6 +149,20 @@ def test_no_artifact_rag_write_in_scratch_search(tmp_path: Path) -> None:
     assert "human" not in json.dumps(result)
 
 
+def test_split_audio_windows_merges_tiny_tail_into_previous_window(tmp_path: Path) -> None:
+    mix = write_wav(tmp_path / "mix.wav", sine(220.0, seconds=1.025))
+
+    windows = stem_search.split_audio_windows(mix, tmp_path / "split", window_sec=1.0)
+
+    assert len(windows) == 1
+    assert windows[0]["window_id"] == "w000"
+    assert windows[0]["start_sec"] == 0.0
+    assert windows[0]["end_sec"] == pytest.approx(1.025, abs=1.0 / SAMPLE_RATE)
+    assert windows[0]["sample_count"] == int(round(1.025 * SAMPLE_RATE))
+    assert windows[0]["short_tail_merged"] is True
+    assert windows[0]["merged_tail_sec"] == pytest.approx(0.025, abs=1.0 / SAMPLE_RATE)
+
+
 def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     recipe = build_default_from_scratch_recipe(
         demucs_available=True,
