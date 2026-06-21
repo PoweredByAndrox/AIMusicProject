@@ -52,6 +52,50 @@ def _projection_leak(stem_audio: np.ndarray, foreign_audio: np.ndarray) -> np.nd
     return (foreign * coeff).astype(np.float32)
 
 
+def _band_limited_audio(audio: np.ndarray, sample_rate: int, low_hz: float, high_hz: float) -> np.ndarray:
+    if len(audio) <= 0:
+        return np.zeros_like(audio, dtype=np.float32)
+    working = audio.astype(np.float64)
+    spectrum = np.fft.rfft(working, axis=0)
+    freqs = np.fft.rfftfreq(len(audio), d=1.0 / float(sample_rate))
+    mask = (freqs >= low_hz) & (freqs <= high_hz)
+    filtered = np.zeros_like(spectrum)
+    filtered[mask, :] = spectrum[mask, :]
+    return np.fft.irfft(filtered, n=len(audio), axis=0).astype(np.float32)
+
+
+def _no_reference_vocal_in_minus_score(
+    *,
+    stem_audio: np.ndarray,
+    sample_rate: int,
+    detection_floor_db: float,
+) -> tuple[str, np.ndarray, float]:
+    leak_audio = _band_limited_audio(stem_audio, sample_rate, 700.0, 1200.0)
+    leak_dbfs = _dbfs(_rms(leak_audio))
+    verdict = "fail" if leak_dbfs > detection_floor_db else "pass"
+    return verdict, leak_audio, leak_dbfs
+
+
+def _blocked_unknown_result(
+    *,
+    tested_stem: str,
+    foreign_source: str,
+    result_path: Path,
+    reason: str,
+) -> dict[str, Any]:
+    result = {
+        "tested_stem": tested_stem,
+        "foreign_source": foreign_source,
+        "verdict": "blocked_unknown",
+        "leak_audio": "",
+        "regions": [],
+        "reason": reason,
+        "detector_mode": "none",
+    }
+    result_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+    return result
+
+
 def score_stem_contamination(
     *,
     tested_stem_path: Path,
@@ -65,13 +109,38 @@ def score_stem_contamination(
     result_path = output_dir / f"{tested_stem}_{foreign_source}.json"
 
     if foreign_reference_path is None:
+        if tested_stem != "minus" or foreign_source != "vocals":
+            return _blocked_unknown_result(
+                tested_stem=tested_stem,
+                foreign_source=foreign_source,
+                result_path=result_path,
+                reason="no_reference_detector_not_available",
+            )
+
+        stem_audio, stem_rate = _read_audio(tested_stem_path)
+        verdict, leak_audio, leak_dbfs = _no_reference_vocal_in_minus_score(
+            stem_audio=stem_audio,
+            sample_rate=stem_rate,
+            detection_floor_db=detection_floor_db,
+        )
+        leak_path = ""
+        regions: list[dict[str, float]] = []
+        if verdict == "fail":
+            audio_path = _write_audio(output_dir / "leaks" / f"{tested_stem}_{foreign_source}.flac", leak_audio, stem_rate)
+            leak_path = _relative_path(audio_path, output_dir)
+            duration = float(len(leak_audio) / stem_rate)
+            regions = [{"start": 0.0, "end": round(duration, 6)}]
+
         result = {
             "tested_stem": tested_stem,
             "foreign_source": foreign_source,
-            "verdict": "blocked_unknown",
-            "leak_audio": "",
-            "regions": [],
-            "reason": "foreign_reference_required_for_fixture_scorer",
+            "verdict": verdict,
+            "leak_audio": leak_path,
+            "regions": regions,
+            "leak_dbfs": round(leak_dbfs, 4),
+            "detection_floor_db": detection_floor_db,
+            "detector_mode": "no_reference_spectral_v1",
+            "spectral_band_hz": [700.0, 1200.0],
         }
         result_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
         return result
@@ -100,6 +169,7 @@ def score_stem_contamination(
         "regions": regions,
         "leak_dbfs": round(leak_dbfs, 4),
         "detection_floor_db": detection_floor_db,
+        "detector_mode": "reference_projection_v1",
     }
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     return result

@@ -183,6 +183,106 @@ def test_recipe_candidate_executes_and_blocks_without_contamination_proof(tmp_pa
     assert result["windows"][0]["window_id"] == "w000"
 
 
+def test_recipe_candidate_accepts_clean_no_reference_minus_vocal_check(tmp_path: Path) -> None:
+    vocal = sine(880.0, seconds=0.25, amp=0.04)
+    drums = sine(110.0, seconds=0.25, amp=0.12)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-clean", "{window_mix}"],
+                        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        assert command[0] == "fixture-write-clean"
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)])
+        write_wav(stems_dir / "drums.flac", drums[: len(window_audio)])
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "auto_accept"
+    assert result["delivery_allowed"] is True
+    assert candidate["verdict"] == "auto_accept"
+    assert candidate["contamination_score"]["attempted_checks"] == 1
+    assert candidate["contamination_score"]["leak_results"][0]["detector_mode"] == "no_reference_spectral_v1"
+
+
+def test_recipe_candidate_blocks_no_reference_vocal_leak_in_minus(tmp_path: Path) -> None:
+    vocal = sine(880.0, seconds=0.25, amp=0.04)
+    drums = sine(110.0, seconds=0.25, amp=0.12)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-leaky", "{window_mix}"],
+                        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        assert command[0] == "fixture-write-leaky"
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        leak = 0.5 * vocal[: len(window_audio)]
+        stems_dir = fake_runner.stems_dir
+        write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)] - leak)
+        write_wav(stems_dir / "drums.flac", drums[: len(window_audio)] + leak)
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    leak_result = candidate["contamination_score"]["leak_results"][0]
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert candidate["verdict"] == "blocked_leak"
+    assert leak_result["verdict"] == "fail"
+    assert leak_result["leak_audio"]
+    assert Path(candidate["output_dir"], "score", leak_result["leak_audio"]).exists()
+
+
 def test_recipe_candidate_missing_stem_blocks_candidate(tmp_path: Path) -> None:
     mix = write_wav(tmp_path / "mix.wav", sine(220.0, seconds=0.25))
     recipe = tmp_path / "recipe.json"

@@ -181,6 +181,26 @@ def _collect_stem_paths(stems_dir: Path) -> dict[str, str]:
     return {stem: str(stems_dir / f"{stem}.flac") for stem in STEMS if (stems_dir / f"{stem}.flac").is_file()}
 
 
+def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[dict[str, str]], bool]:
+    checks = candidate.get("contamination_checks")
+    if isinstance(checks, list):
+        normalized: list[dict[str, str]] = []
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            tested_stem = str(item.get("tested_stem") or "").strip()
+            foreign_source = str(item.get("foreign_source") or "").strip()
+            if tested_stem and foreign_source:
+                normalized.append({"tested_stem": tested_stem, "foreign_source": foreign_source})
+        return normalized, True
+
+    return [
+        {"tested_stem": tested_stem, "foreign_source": foreign_source}
+        for tested_stem, forbidden_sources in FORBIDDEN_SOURCES.items()
+        for foreign_source in forbidden_sources
+    ], False
+
+
 def _rms(audio: np.ndarray) -> float:
     if audio.size == 0:
         return 0.0
@@ -231,28 +251,40 @@ def _score_candidate_contamination(
     blocker_reasons: list[str] = []
     leak_results: list[dict[str, Any]] = []
     attempted = 0
+    checks, explicit_checks = _candidate_contamination_checks(candidate)
 
-    for tested_stem, forbidden_sources in FORBIDDEN_SOURCES.items():
+    if explicit_checks and not checks:
+        blocker_reasons.append("empty_contamination_checks")
+
+    for check in checks:
+        tested_stem = check["tested_stem"]
+        foreign_source = check["foreign_source"]
+        if tested_stem not in FORBIDDEN_SOURCES or foreign_source not in FORBIDDEN_SOURCES[tested_stem]:
+            blocker_reasons.append(f"invalid_contamination_check:{tested_stem}:{foreign_source}")
+            continue
         stem_path = stem_paths.get(tested_stem)
         if not stem_path:
+            blocker_reasons.append(f"missing_contamination_stem:{tested_stem}")
             continue
         source_refs = references.get(tested_stem) if isinstance(references.get(tested_stem), dict) else {}
-        for foreign_source in forbidden_sources:
-            reference_path = source_refs.get(foreign_source) if isinstance(source_refs, dict) else None
-            if not reference_path:
-                blocker_reasons.append(f"missing_contamination_reference:{tested_stem}:{foreign_source}")
-                continue
-            attempted += 1
-            result = score_stem_contamination(
-                tested_stem_path=Path(stem_path),
-                tested_stem=tested_stem,
-                foreign_source=foreign_source,
-                output_dir=score_dir,
-                foreign_reference_path=Path(str(reference_path)),
-            )
-            leak_results.append(result)
-            if result.get("verdict") == "fail":
-                blocker_reasons.append(f"foreign_source_recovered:{tested_stem}:{foreign_source}")
+        reference_path = source_refs.get(foreign_source) if isinstance(source_refs, dict) else None
+        if not reference_path and not explicit_checks:
+            blocker_reasons.append(f"missing_contamination_reference:{tested_stem}:{foreign_source}")
+            continue
+
+        attempted += 1
+        result = score_stem_contamination(
+            tested_stem_path=Path(stem_path),
+            tested_stem=tested_stem,
+            foreign_source=foreign_source,
+            output_dir=score_dir,
+            foreign_reference_path=Path(str(reference_path)) if reference_path else None,
+        )
+        leak_results.append(result)
+        if result.get("verdict") == "fail":
+            blocker_reasons.append(f"foreign_source_recovered:{tested_stem}:{foreign_source}")
+        elif result.get("verdict") == "blocked_unknown":
+            blocker_reasons.append(f"contamination_detector_unknown:{tested_stem}:{foreign_source}")
 
     if any(reason.startswith("foreign_source_recovered:") for reason in blocker_reasons):
         verdict = "blocked_leak"
@@ -266,6 +298,7 @@ def _score_candidate_contamination(
         "attempted_checks": attempted,
         "blocker_reasons": blocker_reasons,
         "leak_results": leak_results,
+        "check_mode": "explicit_candidate_checks" if explicit_checks else "full_forbidden_matrix",
     }
 
 
