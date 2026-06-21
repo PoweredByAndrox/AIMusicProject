@@ -136,6 +136,18 @@ route, then replaces `vocals` with a specialized vocal/instrumental model route
 when that route is available in the Docker image. `minus` is still rebuilt from
 the final non-vocal stems after all target-specific routes finish.
 
+The strongest late candidates use an instrumental-first route:
+
+```text
+mix -> vocal/instrumental separator -> instrumental -> Demucs htdemucs_6s
+```
+
+Those candidates keep the specialized `vocals` output, but split the separator's
+`instrumental` output into `drums`, `bass`, `guitar`, `piano`, and `other`.
+This avoids using Demucs-on-mix non-vocal stems when the target issue is vocal
+bleed inside every non-vocal stem. Reconstruction and contamination gates are
+unchanged.
+
 The default candidate builder blocks as `missing_target_specific_vocal_route`
 when Demucs is present but no specialized vocal route is available. Available
 default vocal routes are tried in a bounded round-robin order:

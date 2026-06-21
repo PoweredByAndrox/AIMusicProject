@@ -173,9 +173,13 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     assert any(candidate.get("minus_vocal_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
     assert any(candidate.get("vocal_projection_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
     assert any(
+        "run_vocal_instrumental_demucs_candidate.py" in " ".join(candidate.get("command_template") or [])
+        for candidate in recipe["candidates"]
+    )
+    assert any(
         "--residual-correction-stem" in route["command_template"]
         for candidate in recipe["candidates"]
-        for route in candidate["target_specific_commands"]
+        for route in candidate.get("target_specific_commands", [])
     )
 
 

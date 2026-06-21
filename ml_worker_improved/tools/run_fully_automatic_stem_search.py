@@ -357,6 +357,55 @@ def build_default_from_scratch_recipe(
             }
         return candidate
 
+    def instrumental_demucs_candidate(
+        candidate_id: str,
+        segment: str,
+        overlap: str,
+        shifts: str,
+        debleed_strength: float,
+    ) -> dict[str, Any]:
+        candidate = {
+            "candidate_id": candidate_id,
+            "route_family": "vocal_instrumental_demucs_6s_audio_separator_bs_roformer_vocals",
+            "vocal_route_id": "audio_separator_bs_roformer_vocals",
+            "conservation_repair_stem": "other",
+            "required_stems": list(STEMS),
+            "command_template": [
+                "python",
+                "tools/run_vocal_instrumental_demucs_candidate.py",
+                "--input-audio",
+                "{input_audio}",
+                "--stems-dir",
+                "{stems_dir}",
+                "--work-dir",
+                "{output_dir}/work",
+                "--manifest",
+                "{output_dir}/vdemucs.json",
+                "--segment-sec",
+                segment,
+                "--overlap",
+                overlap,
+                "--shifts",
+                shifts,
+                "--device",
+                "cuda",
+                "--timeout-sec",
+                "900",
+            ],
+        }
+        if debleed_strength > 0.0:
+            candidate["minus_vocal_debleed"] = {
+                "strength": debleed_strength,
+                "low_hz": 700.0,
+                "high_hz": 1200.0,
+                "target_stems": list(NON_VOCAL_STEMS),
+            }
+            candidate["vocal_projection_debleed"] = {
+                "strength": debleed_strength,
+                "target_stems": list(NON_VOCAL_STEMS),
+            }
+        return candidate
+
     return {
         "schema": "stem_search_recipe.v1",
         "recipe_source": "from_scratch_default",
@@ -366,7 +415,12 @@ def build_default_from_scratch_recipe(
             "vocals": list(vocal_routes),
         },
         "timeout_sec": 900,
-        "candidates": [demucs_candidate(*spec) for spec in variant_specs],
+        "candidates": [
+            instrumental_demucs_candidate(spec[0], spec[1], spec[2], spec[3], spec[5])
+            if spec[0] in {"c009", "c010"}
+            else demucs_candidate(*spec)
+            for spec in variant_specs
+        ],
     }
 
 
