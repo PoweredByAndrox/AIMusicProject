@@ -23,6 +23,7 @@ __pycache__/
 
 # Docker data (audio, demix stems, models, indexes)
 /docker_data/
+/artifacts/
 /artifact_rag/
 /lab_artifacts/
 /testing_flstudio_music/
