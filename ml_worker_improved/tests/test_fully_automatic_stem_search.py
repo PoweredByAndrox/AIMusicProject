@@ -83,6 +83,21 @@ def test_best_bad_candidate_is_not_accepted() -> None:
     assert result["accepted_candidate_id"] == ""
 
 
+def test_run_accept_requires_every_window_to_have_clean_candidate() -> None:
+    result = select_accepted_candidate(
+        [
+            {"candidate_id": "c001", "window_id": "w000", "verdict": "blocked_leak"},
+            {"candidate_id": "c001", "window_id": "w001", "verdict": "auto_accept"},
+        ],
+        required_window_ids=["w000", "w001"],
+    )
+
+    assert result["verdict"] == "blocked_no_clean_candidate"
+    assert result["delivery_allowed"] is False
+    assert result["accepted_candidate_id"] == ""
+    assert result["blocked_window_ids"] == ["w000"]
+
+
 def test_no_artifact_rag_write_in_scratch_search(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="artifact_rag"):
         validate_no_artifact_rag_output(Path("D:/AIMusicProject/artifact_rag/ar47"))
@@ -117,6 +132,10 @@ def test_default_from_scratch_recipe_uses_demucs_six_stem_route() -> None:
     assert "run_demucs_six_stem_candidate.py" in " ".join(recipe["candidates"][0]["command_template"])
     assert recipe["candidates"][0]["required_stems"] == list(STEMS)
     assert all(candidate["conservation_repair_stem"] == "other" for candidate in recipe["candidates"])
+    assert all(
+        candidate["contamination_checks"] == [{"tested_stem": "minus", "foreign_source": "vocals"}]
+        for candidate in recipe["candidates"]
+    )
     assert len(recipe["candidates"]) >= 5
     assert any("--residual-correction-stem" in candidate["command_template"] for candidate in recipe["candidates"])
 

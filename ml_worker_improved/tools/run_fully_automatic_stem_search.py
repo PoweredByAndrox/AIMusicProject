@@ -121,6 +121,7 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
             "residual_correction_stem": residual_stem,
             "conservation_repair_stem": "other",
             "required_stems": list(STEMS),
+            "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
             "command_template": command_template,
         }
 
@@ -561,17 +562,66 @@ def choose_next_action(issue: Mapping[str, Any]) -> dict[str, Any]:
     return {"action": action, "verdict": verdict if verdict in VERDICTS else "blocked_unknown", "reason": reason}
 
 
-def select_accepted_candidate(candidates: list[Mapping[str, Any]]) -> dict[str, Any]:
+def select_accepted_candidate(
+    candidates: list[Mapping[str, Any]],
+    *,
+    required_window_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    if required_window_ids is not None:
+        if not required_window_ids:
+            return {
+                "verdict": "blocked_no_clean_candidate",
+                "accepted_candidate_id": "",
+                "accepted_window_candidates": {},
+                "blocked_window_ids": [],
+                "delivery_allowed": False,
+            }
+        accepted_by_window: dict[str, str] = {}
+        blocked_window_ids: list[str] = []
+        for window_id in required_window_ids:
+            accepted = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if str(candidate.get("window_id") or "") == window_id and candidate.get("verdict") == "auto_accept"
+                ),
+                None,
+            )
+            if accepted is None:
+                blocked_window_ids.append(window_id)
+                continue
+            accepted_by_window[window_id] = str(accepted.get("candidate_id") or "")
+        if blocked_window_ids:
+            return {
+                "verdict": "blocked_no_clean_candidate",
+                "accepted_candidate_id": "",
+                "accepted_window_candidates": accepted_by_window,
+                "blocked_window_ids": blocked_window_ids,
+                "delivery_allowed": False,
+            }
+        candidate_ids = sorted(set(accepted_by_window.values()))
+        return {
+            "verdict": "auto_accept",
+            "accepted_candidate_id": candidate_ids[0] if len(candidate_ids) == 1 else "window_set",
+            "accepted_window_candidates": accepted_by_window,
+            "blocked_window_ids": [],
+            "delivery_allowed": bool(required_window_ids),
+        }
+
     for candidate in candidates:
         if candidate.get("verdict") == "auto_accept":
             return {
                 "verdict": "auto_accept",
                 "accepted_candidate_id": str(candidate.get("candidate_id") or ""),
+                "accepted_window_candidates": {},
+                "blocked_window_ids": [],
                 "delivery_allowed": True,
             }
     return {
         "verdict": "blocked_no_clean_candidate",
         "accepted_candidate_id": "",
+        "accepted_window_candidates": {},
+        "blocked_window_ids": [],
         "delivery_allowed": False,
     }
 
@@ -724,7 +774,7 @@ def run_fully_automatic_stem_search(
             },
         )
 
-    selection = select_accepted_candidate(candidates)
+    selection = select_accepted_candidate(candidates, required_window_ids=[str(window["window_id"]) for window in windows])
     verdict = selection["verdict"]
     run_manifest = {
         "schema": "fully_automatic_stem_search_run.v1",
@@ -741,6 +791,9 @@ def run_fully_automatic_stem_search(
         "verdict": verdict,
         "delivery_allowed": bool(selection["delivery_allowed"]),
         "accepted_candidate_id": selection["accepted_candidate_id"],
+        "accepted_window_candidates": selection.get("accepted_window_candidates") or {},
+        "blocked_window_ids": selection.get("blocked_window_ids") or [],
+        "presentation_status": "accepted_for_listen_pack" if verdict == "auto_accept" else "blocked_from_listen_pack",
         "failed_checks": [] if verdict == "auto_accept" else [verdict],
     }
     _write_json(output_dir / "run.json", run_manifest)

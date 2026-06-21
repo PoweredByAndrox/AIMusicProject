@@ -13,6 +13,8 @@ runner for six-stem separation candidates.
 - Unknown evidence blocks automatically.
 - Failed or rejected candidates remain scratch/debug evidence only.
 - The runner must not write into `artifact_rag`.
+- A run is accepted only when every window has an accepted candidate. A clean
+  silent/tail window cannot accept the full track if earlier windows are blocked.
 
 ## Reconstruction Conservation
 
@@ -57,6 +59,10 @@ When explicit checks are present, the runner scores exactly those checks. If a
 foreign reference is provided through `foreign_references`, the scorer uses
 reference projection. If no reference is provided, the scorer may use a
 supported no-reference detector.
+
+The default from-scratch Demucs candidates declare the explicit `minus` /
+`vocals` check, so scratch search uses the available automatic vocal-leak
+sentinel instead of blocking every candidate on the reference-required matrix.
 
 When no explicit checks are present, the runner keeps the full forbidden-source
 matrix and blocks missing references as `missing_contamination_reference:*`.
