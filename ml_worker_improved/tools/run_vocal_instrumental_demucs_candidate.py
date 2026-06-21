@@ -66,6 +66,7 @@ def run_vocal_instrumental_demucs_candidate(
     vocal_model_file_dir: str = "/app/models/audio_separator",
     vocal_model_id: str = "audio_separator_bs_roformer_vocals",
     vocal_model_display_name: str = "Audio Separator BS-RoFormer vocal checkpoint",
+    instrumental_model_id: str = "",
     audio_separator_python: str = "/opt/audio-separator-venv/bin/python",
     demucs_model_name: str = "htdemucs_6s",
     demucs_segment_sec: str = "6",
@@ -99,10 +100,10 @@ def run_vocal_instrumental_demucs_candidate(
     runner(pair_command, timeout_sec)
 
     vocal_path = pair_stems_dir / "vocals.flac"
-    instrumental_path = pair_stems_dir / "instrumental.flac"
+    pair_instrumental_path = pair_stems_dir / "instrumental.flac"
     missing_pair_outputs = [
         str(path.name)
-        for path in (vocal_path, instrumental_path)
+        for path in (vocal_path, pair_instrumental_path)
         if not path.is_file()
     ]
     if missing_pair_outputs:
@@ -115,6 +116,56 @@ def run_vocal_instrumental_demucs_candidate(
         }
         _write_json(manifest_path, manifest)
         return manifest
+
+    instrumental_path = pair_instrumental_path
+    instrumental_command: list[str] = []
+    instrumental_manifest_path: Path | None = None
+    if instrumental_model_id:
+        instrumental_dir = work_dir / "instrumental_model"
+        instrumental_command = [
+            "python",
+            "tools/run_registered_model_candidate.py",
+            str(input_audio),
+            str(instrumental_dir),
+            "--model-id",
+            instrumental_model_id,
+            "--device",
+            device,
+            "--target-stem",
+            "minus",
+        ]
+        runner(instrumental_command, timeout_sec)
+        instrumental_manifest_path = instrumental_dir / "registry_candidate_execution_manifest.json"
+        if not instrumental_manifest_path.is_file():
+            manifest = {
+                "schema": "vocal_instrumental_demucs_candidate.v1",
+                "generation_status": "failed_missing_instrumental_model_manifest",
+                "input_audio": str(input_audio),
+                "stems_dir": str(stems_dir),
+                "instrumental_model_id": instrumental_model_id,
+                "instrumental_command": instrumental_command,
+            }
+            _write_json(manifest_path, manifest)
+            return manifest
+        instrumental_manifest = json.loads(instrumental_manifest_path.read_text(encoding="utf-8-sig"))
+        target_audio_path = (
+            instrumental_manifest.get("candidate_manifest", {}).get("target_audio_path")
+            if isinstance(instrumental_manifest.get("candidate_manifest"), dict)
+            else None
+        )
+        if not target_audio_path or not Path(str(target_audio_path)).is_file():
+            manifest = {
+                "schema": "vocal_instrumental_demucs_candidate.v1",
+                "generation_status": "failed_missing_instrumental_model_audio",
+                "input_audio": str(input_audio),
+                "stems_dir": str(stems_dir),
+                "instrumental_model_id": instrumental_model_id,
+                "instrumental_command": instrumental_command,
+                "instrumental_manifest_path": str(instrumental_manifest_path),
+            }
+            _write_json(manifest_path, manifest)
+            return manifest
+        instrumental_path = Path(str(target_audio_path))
 
     demucs_stems_dir = work_dir / "demucs_instrumental" / "stems"
     demucs_manifest_path = work_dir / "demucs_instrumental" / "demucs.json"
@@ -175,6 +226,10 @@ def run_vocal_instrumental_demucs_candidate(
         "generation_status": "completed" if not missing_stems else "failed_missing_stem",
         "input_audio": str(input_audio),
         "instrumental_path": str(instrumental_path),
+        "pair_instrumental_path": str(pair_instrumental_path),
+        "instrumental_model_id": instrumental_model_id,
+        "instrumental_command": instrumental_command,
+        "instrumental_manifest_path": str(instrumental_manifest_path) if instrumental_manifest_path else "",
         "vocal_model_filename": vocal_model_filename,
         "vocal_model_file_dir": vocal_model_file_dir,
         "vocal_model_id": vocal_model_id,
@@ -201,6 +256,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vocal-model-file-dir", default="/app/models/audio_separator")
     parser.add_argument("--vocal-model-id", default="audio_separator_bs_roformer_vocals")
     parser.add_argument("--vocal-model-display-name", default="Audio Separator BS-RoFormer vocal checkpoint")
+    parser.add_argument("--instrumental-model-id", default="")
     parser.add_argument("--audio-separator-python", default="/opt/audio-separator-venv/bin/python")
     parser.add_argument("--demucs-model-name", default="htdemucs_6s")
     parser.add_argument("--segment-sec", default="6")
@@ -223,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         vocal_model_file_dir=str(args.vocal_model_file_dir),
         vocal_model_id=str(args.vocal_model_id),
         vocal_model_display_name=str(args.vocal_model_display_name),
+        instrumental_model_id=str(args.instrumental_model_id),
         audio_separator_python=str(args.audio_separator_python),
         demucs_model_name=str(args.demucs_model_name),
         demucs_segment_sec=str(args.segment_sec),

@@ -367,6 +367,7 @@ def build_default_from_scratch_recipe(
         vocal_model_file_dir: str = "/app/models/audio_separator",
         vocal_model_id: str = "audio_separator_bs_roformer_vocals",
         vocal_model_display_name: str = "Audio Separator BS-RoFormer vocal checkpoint",
+        instrumental_model_id: str = "",
     ) -> dict[str, Any]:
         candidate = {
             "candidate_id": candidate_id,
@@ -393,6 +394,8 @@ def build_default_from_scratch_recipe(
                 vocal_model_id,
                 "--vocal-model-display-name",
                 vocal_model_display_name,
+                "--instrumental-model-id",
+                instrumental_model_id,
                 "--segment-sec",
                 segment,
                 "--overlap",
@@ -440,6 +443,7 @@ def build_default_from_scratch_recipe(
                         "/app/vendor/melband_roformer_viperx_11436",
                         "audio_separator_melband_roformer_viperx_vocals",
                         "Audio Separator MelBand RoFormer ViperX vocal checkpoint",
+                        "becruily_instrumental_vocals",
                     )
                     if spec[0] == "c010"
                     else ()

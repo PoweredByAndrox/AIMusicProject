@@ -183,6 +183,7 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     assert "--vocal-model-filename" in c010["command_template"]
     assert "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt" in c010["command_template"]
     assert "/app/vendor/melband_roformer_viperx_11436" in c010["command_template"]
+    assert c010["command_template"][c010["command_template"].index("--instrumental-model-id") + 1] == "becruily_instrumental_vocals"
     assert any(
         "--residual-correction-stem" in route["command_template"]
         for candidate in recipe["candidates"]
