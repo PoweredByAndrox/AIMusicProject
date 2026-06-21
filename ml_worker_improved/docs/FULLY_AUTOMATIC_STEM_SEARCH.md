@@ -15,6 +15,10 @@ runner for six-stem separation candidates.
 - The runner must not write into `artifact_rag`.
 - A run is accepted only when every window has an accepted candidate. A clean
   silent/tail window cannot accept the full track if earlier windows are blocked.
+- Accepted runs write a stitched listen pack under `listen/` with
+  `delivery_status=accepted`, `delivery_allowed=true`, and
+  `presentation_status=accepted_for_listen_pack`. Blocked runs do not publish a
+  listen pack.
 
 ## Reconstruction Conservation
 
@@ -38,6 +42,49 @@ valid conservation-repair targets.
 The candidate manifest records `reconstruction_repair.repair_owner`, target
 stem, and `pre_repair_residual_rms`; the post-repair residual remains the normal
 `reconstruction.residual_rms` from the unchanged reconstruction gate.
+
+## Minus Vocal Debleed Candidates
+
+Late default candidates may declare:
+
+```json
+{
+  "minus_vocal_debleed": {
+    "strength": 1.0,
+    "low_hz": 700.0,
+    "high_hz": 1200.0,
+    "target_stems": ["drums", "bass", "guitar", "piano", "other"]
+  }
+}
+```
+
+The runner applies this only after a six-stem candidate exists. It transfers the
+declared vocal-band component from non-vocal stems into `vocals`, then rebuilds
+`minus` from the updated non-vocal stems. The six-stem sum is preserved before
+the unchanged reconstruction gate runs. This route does not relax contamination
+thresholds: it must still pass the explicit `minus` / `vocals` check.
+
+## Listen Pack
+
+When the run is accepted, the runner concatenates the accepted candidate stems
+for every window into:
+
+```text
+listen/
+  pack.json
+  playlist.m3u
+  audio/mix.flac
+  audio/vocals.flac
+  audio/minus.flac
+  audio/drums.flac
+  audio/bass.flac
+  audio/guitar.flac
+  audio/piano.flac
+  audio/other.flac
+```
+
+The pack is not a final release artifact; it is a listen-ready pipeline artifact
+only after the run-level delivery fields are accepted.
 
 ## Contamination Checks
 

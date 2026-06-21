@@ -27,6 +27,7 @@ from tools.stem_contamination_common import (
     missing_required_stems,
     validate_no_artifact_rag_output,
 )
+from tools.stem_contamination_model import band_limited_audio
 
 
 CommandRunner = Callable[[list[str], int], None]
@@ -82,14 +83,26 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
             "candidates": [],
         }
     variant_specs = (
-        ("c001", "6", "0.25", "1", ""),
-        ("c002", "6", "0.50", "1", ""),
-        ("c003", "6", "0.25", "2", ""),
-        ("c004", "5", "0.50", "1", ""),
-        ("c005", "6", "0.25", "1", "other"),
+        ("c001", "6", "0.25", "1", "", 0.0),
+        ("c002", "6", "0.50", "1", "", 0.0),
+        ("c003", "6", "0.25", "2", "", 0.0),
+        ("c004", "5", "0.50", "1", "", 0.0),
+        ("c005", "6", "0.25", "1", "other", 0.0),
+        ("c006", "6", "0.25", "1", "", 0.65),
+        ("c007", "6", "0.50", "1", "", 0.8),
+        ("c008", "6", "0.25", "2", "", 0.9),
+        ("c009", "5", "0.50", "1", "", 1.0),
+        ("c010", "6", "0.25", "1", "other", 1.0),
     )
 
-    def demucs_candidate(candidate_id: str, segment: str, overlap: str, shifts: str, residual_stem: str) -> dict[str, Any]:
+    def demucs_candidate(
+        candidate_id: str,
+        segment: str,
+        overlap: str,
+        shifts: str,
+        residual_stem: str,
+        debleed_strength: float,
+    ) -> dict[str, Any]:
         command_template = [
             "python",
             "tools/run_demucs_six_stem_candidate.py",
@@ -115,7 +128,7 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
         if residual_stem:
             command_template.extend(["--residual-correction-stem", residual_stem])
         command_template.extend(["--timeout-sec", "900"])
-        return {
+        candidate = {
             "candidate_id": candidate_id,
             "route_family": "demucs_htdemucs_6s",
             "residual_correction_stem": residual_stem,
@@ -124,6 +137,14 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
             "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
             "command_template": command_template,
         }
+        if debleed_strength > 0.0:
+            candidate["minus_vocal_debleed"] = {
+                "strength": debleed_strength,
+                "low_hz": 700.0,
+                "high_hz": 1200.0,
+                "target_stems": list(NON_VOCAL_STEMS),
+            }
+        return candidate
 
     return {
         "schema": "stem_search_recipe.v1",
@@ -321,6 +342,183 @@ def apply_mix_conservation_repair(
     }
 
 
+def apply_minus_vocal_debleed(
+    *,
+    stem_paths: Mapping[str, str],
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    low_hz = float(config.get("low_hz", 700.0))
+    high_hz = float(config.get("high_hz", 1200.0))
+    strength = float(config.get("strength", 1.0))
+    target_stems_raw = config.get("target_stems")
+    target_stems = (
+        [str(stem) for stem in target_stems_raw]
+        if isinstance(target_stems_raw, list) and target_stems_raw
+        else list(NON_VOCAL_STEMS)
+    )
+    blockers: list[str] = []
+    if not 0.0 <= strength <= 1.0:
+        blockers.append("invalid_debleed_strength")
+    if low_hz <= 0.0 or high_hz <= low_hz:
+        blockers.append("invalid_debleed_band")
+    invalid_targets = [stem for stem in target_stems if stem not in NON_VOCAL_STEMS]
+    if invalid_targets:
+        blockers.extend(f"invalid_debleed_target:{stem}" for stem in invalid_targets)
+    vocals_path = stem_paths.get("vocals")
+    if not vocals_path:
+        blockers.append("missing_vocals_stem")
+    if blockers:
+        return {
+            "applied": False,
+            "repair_owner": "runner_minus_vocal_debleed_v1",
+            "reason": "invalid_debleed_config",
+            "blockers": blockers,
+        }
+
+    vocals_audio, sample_rate = _read_audio(Path(str(vocals_path)))
+    stem_audios: dict[str, np.ndarray] = {}
+    moved_total = np.zeros_like(vocals_audio, dtype=np.float32)
+    per_stem: dict[str, dict[str, float]] = {}
+    for stem in target_stems:
+        stem_path = stem_paths.get(stem)
+        if not stem_path:
+            blockers.append(f"missing_debleed_stem:{stem}")
+            continue
+        stem_audio, stem_rate = _read_audio(Path(str(stem_path)))
+        if stem_rate != sample_rate:
+            blockers.append(f"sample_rate_mismatch:{stem}:{stem_rate}!={sample_rate}")
+            continue
+        if stem_audio.shape != vocals_audio.shape:
+            blockers.append(f"shape_mismatch:{stem}:{stem_audio.shape}!={vocals_audio.shape}")
+            continue
+        stem_audios[stem] = stem_audio
+    if blockers:
+        return {
+            "applied": False,
+            "repair_owner": "runner_minus_vocal_debleed_v1",
+            "reason": "debleed_inputs_invalid",
+            "blockers": blockers,
+        }
+
+    for stem, stem_audio in stem_audios.items():
+        moved = band_limited_audio(stem_audio, sample_rate, low_hz, high_hz) * np.float32(strength)
+        moved_total = moved_total + moved
+        per_stem[stem] = {"moved_rms": round(_rms(moved), 8)}
+
+    moved_rms = _rms(moved_total)
+    if moved_rms <= 1e-12:
+        return {
+            "applied": False,
+            "repair_owner": "runner_minus_vocal_debleed_v1",
+            "reason": "debleed_floor",
+            "target_stems": target_stems,
+            "moved_rms": 0.0,
+        }
+    for stem, stem_audio in stem_audios.items():
+        moved = band_limited_audio(stem_audio, sample_rate, low_hz, high_hz) * np.float32(strength)
+        _write_audio(Path(str(stem_paths[stem])), stem_audio.astype(np.float32) - moved, sample_rate)
+    _write_audio(Path(str(vocals_path)), vocals_audio.astype(np.float32) + moved_total, sample_rate)
+    return {
+        "applied": True,
+        "repair_owner": "runner_minus_vocal_debleed_v1",
+        "low_hz": low_hz,
+        "high_hz": high_hz,
+        "strength": strength,
+        "target_stems": target_stems,
+        "moved_rms": round(moved_rms, 8),
+        "per_stem": per_stem,
+    }
+
+
+def _find_window_candidate(window: Mapping[str, Any], candidate_id: str) -> Mapping[str, Any]:
+    for candidate in window.get("candidates", []):
+        if str(candidate.get("candidate_id") or "") == candidate_id and candidate.get("verdict") == "auto_accept":
+            return candidate
+    raise ValueError(f"accepted candidate not found for window {window.get('window_id')}: {candidate_id}")
+
+
+def _concat_audio(paths: list[Path]) -> tuple[np.ndarray, int]:
+    if not paths:
+        raise ValueError("cannot concatenate empty audio path list")
+    chunks: list[np.ndarray] = []
+    sample_rate: int | None = None
+    channels: tuple[int, ...] | None = None
+    for path in paths:
+        audio, rate = _read_audio(path)
+        if sample_rate is None:
+            sample_rate = rate
+            channels = audio.shape[1:]
+        elif rate != sample_rate:
+            raise ValueError(f"sample rate mismatch in listen pack: {path}")
+        if audio.shape[1:] != channels:
+            raise ValueError(f"channel shape mismatch in listen pack: {path}")
+        chunks.append(audio)
+    return np.concatenate(chunks, axis=0).astype(np.float32), int(sample_rate)
+
+
+def build_listen_pack(
+    *,
+    output_dir: Path,
+    mix_path: Path,
+    windows: list[Mapping[str, Any]],
+    accepted_window_candidates: Mapping[str, str],
+) -> dict[str, Any]:
+    expected_window_ids = [str(window["window_id"]) for window in windows]
+    missing_windows = [window_id for window_id in expected_window_ids if not accepted_window_candidates.get(window_id)]
+    if missing_windows:
+        raise ValueError(f"listen pack requires accepted candidates for every window: {missing_windows}")
+
+    listen_dir = output_dir / "listen"
+    audio_dir = listen_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    source_paths: dict[str, list[Path]] = {stem: [] for stem in [*STEMS, "minus"]}
+    mix_window_paths: list[Path] = []
+    for window in windows:
+        window_id = str(window["window_id"])
+        candidate = _find_window_candidate(window, str(accepted_window_candidates[window_id]))
+        stem_paths = candidate.get("stem_paths") if isinstance(candidate.get("stem_paths"), dict) else {}
+        for stem in source_paths:
+            stem_path = stem_paths.get(stem)
+            if not stem_path:
+                raise ValueError(f"listen pack missing stem path: {window_id}:{stem}")
+            source_paths[stem].append(Path(str(stem_path)))
+        mix_window_paths.append(Path(str(window["mix_path"])))
+
+    audio_paths: dict[str, str] = {}
+    for stem, paths in source_paths.items():
+        audio, sample_rate = _concat_audio(paths)
+        output_path = _write_audio(audio_dir / f"{stem}.flac", audio, sample_rate)
+        audio_paths[stem] = str(output_path)
+    mix_audio, mix_rate = _concat_audio(mix_window_paths)
+    mix_output = _write_audio(audio_dir / "mix.flac", mix_audio, mix_rate)
+    audio_paths["mix"] = str(mix_output)
+
+    playlist_path = listen_dir / "playlist.m3u"
+    playlist_path.write_text(
+        "\n".join(f"audio/{name}.flac" for name in ["mix", "vocals", "minus", "drums", "bass", "guitar", "piano", "other"]) + "\n",
+        encoding="utf-8",
+    )
+    pack = {
+        "schema": "fully_automatic_stem_listen_pack.v1",
+        "delivery_status": "accepted",
+        "delivery_allowed": True,
+        "presentation_status": "accepted_for_listen_pack",
+        "source_mix_path": str(mix_path),
+        "window_count": len(windows),
+        "accepted_window_candidates": dict(accepted_window_candidates),
+        "audio_paths": audio_paths,
+        "playlist_path": str(playlist_path),
+    }
+    pack_path = listen_dir / "pack.json"
+    _write_json(pack_path, pack)
+    return {
+        "path": str(pack_path),
+        "audio_dir": str(audio_dir),
+        "playlist_path": str(playlist_path),
+        "audio_paths": audio_paths,
+    }
+
+
 def _score_candidate_contamination(
     *,
     candidate: Mapping[str, Any],
@@ -476,6 +674,11 @@ def execute_recipe_candidate(
         _write_json(candidate_dir / "score.json", {"verdict": "blocked_missing_stem", "missing_stems": missing, "next_action": next_action})
         return manifest
 
+    debleed_config = candidate.get("minus_vocal_debleed")
+    minus_vocal_debleed: dict[str, Any] | None = None
+    if isinstance(debleed_config, dict):
+        minus_vocal_debleed = apply_minus_vocal_debleed(stem_paths=stem_paths, config=debleed_config)
+
     repair_stem = str(candidate.get("conservation_repair_stem") or "").strip()
     reconstruction_repair: dict[str, Any] | None = None
     if repair_stem:
@@ -499,6 +702,7 @@ def execute_recipe_candidate(
                 "missing_stems": [],
                 "reconstruction": reconstruction,
                 "reconstruction_repair": reconstruction_repair,
+                "minus_vocal_debleed": minus_vocal_debleed,
                 "next_action": next_action,
                 "delivery_allowed": False,
                 "presentation_status": "blocked_from_listen_pack",
@@ -510,6 +714,7 @@ def execute_recipe_candidate(
                 "verdict": "blocked_bad_reconstruction",
                 "reconstruction": reconstruction,
                 "reconstruction_repair": reconstruction_repair,
+                "minus_vocal_debleed": minus_vocal_debleed,
                 "next_action": next_action,
             },
         )
@@ -532,6 +737,7 @@ def execute_recipe_candidate(
             "missing_stems": [],
             "reconstruction": reconstruction,
             "reconstruction_repair": reconstruction_repair,
+            "minus_vocal_debleed": minus_vocal_debleed,
             "contamination_score": score,
             "next_action": next_action,
             "delivery_allowed": score["verdict"] == "auto_accept",
@@ -679,8 +885,11 @@ def run_fully_automatic_stem_search(
             "candidates": [],
             "windows": [],
             "verdict": "blocked_no_available_separator",
+            "delivery_status": "blocked",
             "delivery_allowed": False,
             "accepted_candidate_id": "",
+            "presentation_status": "blocked_from_listen_pack",
+            "listen_pack": {},
             "failed_checks": ["blocked_no_available_separator"],
             "unavailable_reason": recipe.get("unavailable_reason") or "no_default_separator_available",
         }
@@ -712,8 +921,11 @@ def run_fully_automatic_stem_search(
                 "candidates": [],
                 "windows": [],
                 "verdict": "blocked_bad_reconstruction",
+                "delivery_status": "blocked",
                 "delivery_allowed": False,
                 "accepted_candidate_id": "",
+                "presentation_status": "blocked_from_listen_pack",
+                "listen_pack": {},
                 "failed_checks": ["blocked_bad_reconstruction"],
                 "error": {"type": type(exc).__name__, "message": str(exc)},
             }
@@ -776,6 +988,27 @@ def run_fully_automatic_stem_search(
 
     selection = select_accepted_candidate(candidates, required_window_ids=[str(window["window_id"]) for window in windows])
     verdict = selection["verdict"]
+    delivery_allowed = bool(selection["delivery_allowed"])
+    presentation_status = "accepted_for_listen_pack" if verdict == "auto_accept" else "blocked_from_listen_pack"
+    delivery_status = "accepted" if verdict == "auto_accept" else "blocked"
+    failed_checks = [] if verdict == "auto_accept" else [verdict]
+    listen_pack: dict[str, Any] = {}
+    listen_pack_error: dict[str, str] | None = None
+    if verdict == "auto_accept":
+        try:
+            listen_pack = build_listen_pack(
+                output_dir=output_dir,
+                mix_path=mix_path,
+                windows=windows,
+                accepted_window_candidates=selection.get("accepted_window_candidates") or {},
+            )
+        except Exception as exc:
+            verdict = "blocked_unknown"
+            delivery_allowed = False
+            presentation_status = "blocked_from_listen_pack"
+            delivery_status = "blocked"
+            failed_checks = ["listen_pack_build_failed"]
+            listen_pack_error = {"type": type(exc).__name__, "message": str(exc)}
     run_manifest = {
         "schema": "fully_automatic_stem_search_run.v1",
         "mix_path": str(mix_path),
@@ -789,13 +1022,17 @@ def run_fully_automatic_stem_search(
         "candidates": candidates,
         "windows": windows,
         "verdict": verdict,
-        "delivery_allowed": bool(selection["delivery_allowed"]),
-        "accepted_candidate_id": selection["accepted_candidate_id"],
+        "delivery_status": delivery_status,
+        "delivery_allowed": delivery_allowed,
+        "accepted_candidate_id": selection["accepted_candidate_id"] if delivery_allowed else "",
         "accepted_window_candidates": selection.get("accepted_window_candidates") or {},
         "blocked_window_ids": selection.get("blocked_window_ids") or [],
-        "presentation_status": "accepted_for_listen_pack" if verdict == "auto_accept" else "blocked_from_listen_pack",
-        "failed_checks": [] if verdict == "auto_accept" else [verdict],
+        "presentation_status": presentation_status,
+        "listen_pack": listen_pack,
+        "failed_checks": failed_checks,
     }
+    if listen_pack_error is not None:
+        run_manifest["listen_pack_error"] = listen_pack_error
     _write_json(output_dir / "run.json", run_manifest)
     _write_json(output_dir / "windows.json", {"schema": "fully_automatic_stem_windows.v1", "windows": windows})
     for window in windows:

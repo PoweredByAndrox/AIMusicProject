@@ -117,7 +117,11 @@ def test_no_artifact_rag_write_in_scratch_search(tmp_path: Path) -> None:
     )
 
     assert result["verdict"] == "blocked_no_clean_candidate"
+    assert result["delivery_status"] == "blocked"
+    assert result["presentation_status"] == "blocked_from_listen_pack"
+    assert result["listen_pack"] == {}
     assert (out / "run.json").exists()
+    assert not (out / "listen").exists()
     assert result["artifact_rag_write_allowed"] is False
     assert not (out / "artifact_rag").exists()
     assert "human" not in json.dumps(result)
@@ -136,7 +140,8 @@ def test_default_from_scratch_recipe_uses_demucs_six_stem_route() -> None:
         candidate["contamination_checks"] == [{"tested_stem": "minus", "foreign_source": "vocals"}]
         for candidate in recipe["candidates"]
     )
-    assert len(recipe["candidates"]) >= 5
+    assert len(recipe["candidates"]) == 10
+    assert any(candidate.get("minus_vocal_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
     assert any("--residual-correction-stem" in candidate["command_template"] for candidate in recipe["candidates"])
 
 
@@ -484,6 +489,67 @@ def test_conservation_repair_rejects_vocal_target(tmp_path: Path) -> None:
     assert candidate["verdict"] == "blocked_bad_reconstruction"
     assert candidate["reconstruction_repair"]["applied"] is False
     assert candidate["reconstruction_repair"]["reason"] == "unsupported_conservation_repair_stem"
+
+
+def test_minus_vocal_debleed_moves_vocal_band_out_of_minus(tmp_path: Path) -> None:
+    vocal_band_residue = sine(900.0, seconds=0.25, amp=0.04)
+    bass = sine(110.0, seconds=0.25, amp=0.12)
+    mix = write_wav(tmp_path / "mix.wav", vocal_band_residue + bass)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-debleedable", "{window_mix}"],
+                        "minus_vocal_debleed": {"strength": 1.0, "low_hz": 700.0, "high_hz": 1200.0},
+                        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        sf.write(stems_dir / "vocals.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+        write_wav(stems_dir / "bass.flac", bass[: len(window_audio)])
+        write_wav(stems_dir / "other.flac", vocal_band_residue[: len(window_audio)])
+        for stem in ("drums", "guitar", "piano"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "auto_accept"
+    assert result["delivery_status"] == "accepted"
+    assert result["delivery_allowed"] is True
+    assert result["presentation_status"] == "accepted_for_listen_pack"
+    pack_path = Path(result["listen_pack"]["path"])
+    assert pack_path.exists()
+    listen_pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    assert listen_pack["delivery_status"] == "accepted"
+    assert listen_pack["delivery_allowed"] is True
+    assert listen_pack["presentation_status"] == "accepted_for_listen_pack"
+    assert Path(listen_pack["audio_paths"]["minus"]).exists()
+    assert Path(listen_pack["audio_paths"]["vocals"]).exists()
+    assert candidate["minus_vocal_debleed"]["applied"] is True
+    assert candidate["minus_vocal_debleed"]["moved_rms"] > 0.0
+    assert candidate["reconstruction"]["ok"] is True
+    assert candidate["contamination_score"]["verdict"] == "auto_accept"
 
 
 def test_recipe_candidate_missing_stem_blocks_candidate(tmp_path: Path) -> None:
