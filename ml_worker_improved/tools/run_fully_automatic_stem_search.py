@@ -36,6 +36,36 @@ TARGET_SPECIFIC_ROLE_OUTPUTS = {
     "vocals": ("vocals",),
     "non_vocal_stems": tuple(NON_VOCAL_STEMS),
 }
+DEFAULT_VOCAL_ROUTE_ORDER = (
+    "audio_separator_bs_roformer_vocals",
+    "mdx23c_vocals",
+    "melband_roformer_vocals",
+    "becruily_instrumental_vocals",
+)
+DEFAULT_VOCAL_ROUTE_REQUIRED_PATHS = {
+    "audio_separator_bs_roformer_vocals": (
+        "/app/tools/export_audio_separator_vocal_full.py",
+        "/opt/audio-separator-venv/bin/python",
+        "/app/models/audio_separator/model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+        "/app/models/audio_separator/model_bs_roformer_ep_317_sdr_12.9755.yaml",
+    ),
+    "mdx23c_vocals": (
+        "/app/tools/export_mdx23c_vocal_full.py",
+        "/app/vendor/mdx23c_vocals_official/config_vocals_mdx23c.yaml",
+        "/app/vendor/mdx23c_vocals_official/model_vocals_mdx23c_sdr_10.17.ckpt",
+    ),
+    "melband_roformer_vocals": (
+        "/app/tools/export_melband_vocal_full.py",
+        "/app/vendor/mel_band_roformer_vocal_model",
+        "/app/vendor/mel_band_roformer_vocal_model_weights/MelBandRoformer.ckpt",
+    ),
+    "becruily_instrumental_vocals": (
+        "/app/tools/export_melband_vocal_full.py",
+        "/app/vendor/mel_band_roformer_vocal_model",
+        "/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml",
+        "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt",
+    ),
+}
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
@@ -76,7 +106,107 @@ def default_command_runner(command: list[str], timeout_sec: int) -> None:
     subprocess.run(command, check=True, timeout=timeout_sec)
 
 
-def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -> dict[str, Any]:
+def _default_vocal_route_available(route_id: str) -> bool:
+    return all(Path(path).exists() for path in DEFAULT_VOCAL_ROUTE_REQUIRED_PATHS.get(route_id, ()))
+
+
+def _available_default_vocal_routes(available_vocal_routes: tuple[str, ...] | None) -> tuple[str, ...]:
+    if available_vocal_routes is not None:
+        return tuple(route for route in available_vocal_routes if route in DEFAULT_VOCAL_ROUTE_ORDER)
+    return tuple(route for route in DEFAULT_VOCAL_ROUTE_ORDER if _default_vocal_route_available(route))
+
+
+def _demucs_six_stem_command_template(
+    *,
+    segment: str,
+    overlap: str,
+    shifts: str,
+    residual_stem: str,
+) -> list[str]:
+    command_template = [
+        "python",
+        "tools/run_demucs_six_stem_candidate.py",
+        "--input-audio",
+        "{input_audio}",
+        "--stems-dir",
+        "{stems_dir}",
+        "--work-dir",
+        "{output_dir}/work",
+        "--manifest",
+        "{output_dir}/demucs.json",
+        "--model-name",
+        "htdemucs_6s",
+        "--segment-sec",
+        segment,
+        "--overlap",
+        overlap,
+        "--shifts",
+        shifts,
+        "--device",
+        "cuda",
+    ]
+    if residual_stem:
+        command_template.extend(["--residual-correction-stem", residual_stem])
+    command_template.extend(["--timeout-sec", "900"])
+    return command_template
+
+
+def _vocal_route_command_template(route_id: str) -> list[str]:
+    if route_id == "audio_separator_bs_roformer_vocals":
+        return [
+            "python",
+            "tools/export_audio_separator_vocal_full.py",
+            "{input_audio}",
+            "{stems_dir}",
+            "--model-filename",
+            "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+            "--model-file-dir",
+            "/app/models/audio_separator",
+            "--audio-separator-python",
+            "/opt/audio-separator-venv/bin/python",
+            "--manifest-model-id",
+            "audio_separator_bs_roformer_vocals",
+            "--manifest-model-display-name",
+            "Audio Separator BS-RoFormer vocal checkpoint",
+            "--require-cuda-provider",
+        ]
+    if route_id == "mdx23c_vocals":
+        return [
+            "python",
+            "tools/export_mdx23c_vocal_full.py",
+            "{input_audio}",
+            "{stems_dir}",
+        ]
+    if route_id == "melband_roformer_vocals":
+        return [
+            "python",
+            "tools/export_melband_vocal_full.py",
+            "{input_audio}",
+            "{stems_dir}",
+        ]
+    if route_id == "becruily_instrumental_vocals":
+        return [
+            "python",
+            "tools/export_melband_vocal_full.py",
+            "{input_audio}",
+            "{stems_dir}",
+            "--model-path",
+            "/app/vendor/becruily_instrumental/mel_band_roformer_instrumental_becruily.ckpt",
+            "--config-path",
+            "/app/vendor/becruily_instrumental/config_instrumental_becruily.yaml",
+            "--manifest-model-id",
+            "becruily_instrumental_vocals",
+            "--manifest-model-display-name",
+            "Becruily MelBand RoFormer instrumental checkpoint",
+        ]
+    raise ValueError(f"unsupported default vocal route: {route_id}")
+
+
+def build_default_from_scratch_recipe(
+    *,
+    demucs_available: bool | None = None,
+    available_vocal_routes: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     if demucs_available is None:
         demucs_available = shutil.which("demucs") is not None
     if not demucs_available:
@@ -85,6 +215,15 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
             "recipe_source": "from_scratch_default",
             "available": False,
             "unavailable_reason": "missing_demucs_cli",
+            "candidates": [],
+        }
+    vocal_routes = _available_default_vocal_routes(available_vocal_routes)
+    if not vocal_routes:
+        return {
+            "schema": "stem_search_recipe.v1",
+            "recipe_source": "from_scratch_default",
+            "available": False,
+            "unavailable_reason": "missing_target_specific_vocal_route",
             "candidates": [],
         }
     variant_specs = (
@@ -108,38 +247,32 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
         residual_stem: str,
         debleed_strength: float,
     ) -> dict[str, Any]:
-        command_template = [
-            "python",
-            "tools/run_demucs_six_stem_candidate.py",
-            "--input-audio",
-            "{input_audio}",
-            "--stems-dir",
-            "{stems_dir}",
-            "--work-dir",
-            "{output_dir}/work",
-            "--manifest",
-            "{output_dir}/demucs.json",
-            "--model-name",
-            "htdemucs_6s",
-            "--segment-sec",
-            segment,
-            "--overlap",
-            overlap,
-            "--shifts",
-            shifts,
-            "--device",
-            "cuda",
-        ]
-        if residual_stem:
-            command_template.extend(["--residual-correction-stem", residual_stem])
-        command_template.extend(["--timeout-sec", "900"])
+        route_index = (int(candidate_id[1:]) - 1) % len(vocal_routes)
+        vocal_route_id = vocal_routes[route_index]
         candidate = {
             "candidate_id": candidate_id,
-            "route_family": "demucs_htdemucs_6s",
+            "route_family": f"target_specific_demucs_6s_{vocal_route_id}",
+            "vocal_route_id": vocal_route_id,
             "residual_correction_stem": residual_stem,
             "conservation_repair_stem": "other",
             "required_stems": list(STEMS),
-            "command_template": command_template,
+            "target_specific_commands": [
+                {
+                    "role": "six_stems",
+                    "route_id": "demucs_htdemucs_6s",
+                    "command_template": _demucs_six_stem_command_template(
+                        segment=segment,
+                        overlap=overlap,
+                        shifts=shifts,
+                        residual_stem=residual_stem,
+                    ),
+                },
+                {
+                    "role": "vocals",
+                    "route_id": vocal_route_id,
+                    "command_template": _vocal_route_command_template(vocal_route_id),
+                },
+            ],
         }
         if debleed_strength > 0.0:
             candidate["minus_vocal_debleed"] = {
@@ -154,6 +287,10 @@ def build_default_from_scratch_recipe(*, demucs_available: bool | None = None) -
         "schema": "stem_search_recipe.v1",
         "recipe_source": "from_scratch_default",
         "available": True,
+        "target_specific_routes": {
+            "six_stems": "demucs_htdemucs_6s",
+            "vocals": list(vocal_routes),
+        },
         "timeout_sec": 900,
         "candidates": [demucs_candidate(*spec) for spec in variant_specs],
     }

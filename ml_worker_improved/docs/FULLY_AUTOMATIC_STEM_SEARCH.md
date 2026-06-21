@@ -113,12 +113,26 @@ reference is provided through `foreign_references`, the scorer uses reference
 projection. If no reference is provided, the scorer may use a supported
 no-reference detector.
 
-The default from-scratch Demucs candidates do not declare a shortened
-`contamination_checks` list. They must satisfy the same full matrix delivery
-contract as custom recipes. With the current no-reference detector this means a
-default scratch search can block until the missing pair detectors or references
-exist; it must not publish a listen pack from a single `minus` / `vocals`
-sentinel.
+The default from-scratch candidates are target-specific, not a Demucs-only
+shortcut. Each default candidate starts with a Demucs `htdemucs_6s` six-stem
+route, then replaces `vocals` with a specialized vocal/instrumental model route
+when that route is available in the Docker image. `minus` is still rebuilt from
+the final non-vocal stems after all target-specific routes finish.
+
+The default candidate builder blocks as `missing_target_specific_vocal_route`
+when Demucs is present but no specialized vocal route is available. Available
+default vocal routes are tried in a bounded round-robin order:
+
+- `audio_separator_bs_roformer_vocals`
+- `mdx23c_vocals`
+- `melband_roformer_vocals`
+- `becruily_instrumental_vocals`
+
+Default candidates do not declare a shortened `contamination_checks` list. They
+must satisfy the same full matrix delivery contract as custom recipes. With the
+current no-reference coverage this means a default scratch search can block
+until the missing pair detectors or references exist; it must not publish a
+listen pack from a single `minus` / `vocals` sentinel.
 
 ## No-Reference Detector V1
 

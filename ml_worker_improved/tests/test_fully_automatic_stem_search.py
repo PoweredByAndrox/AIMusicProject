@@ -147,19 +147,41 @@ def test_no_artifact_rag_write_in_scratch_search(tmp_path: Path) -> None:
     assert "human" not in json.dumps(result)
 
 
-def test_default_from_scratch_recipe_uses_demucs_six_stem_route() -> None:
-    recipe = build_default_from_scratch_recipe(demucs_available=True)
+def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
+    recipe = build_default_from_scratch_recipe(
+        demucs_available=True,
+        available_vocal_routes=("audio_separator_bs_roformer_vocals", "mdx23c_vocals"),
+    )
 
     assert recipe["schema"] == "stem_search_recipe.v1"
     assert recipe["candidates"][0]["candidate_id"] == "c001"
-    assert recipe["candidates"][0]["route_family"] == "demucs_htdemucs_6s"
-    assert "run_demucs_six_stem_candidate.py" in " ".join(recipe["candidates"][0]["command_template"])
+    assert recipe["candidates"][0]["route_family"] == "target_specific_demucs_6s_audio_separator_bs_roformer_vocals"
     assert recipe["candidates"][0]["required_stems"] == list(STEMS)
+    assert [route["role"] for route in recipe["candidates"][0]["target_specific_commands"]] == ["six_stems", "vocals"]
+    first_commands = recipe["candidates"][0]["target_specific_commands"]
+    assert "run_demucs_six_stem_candidate.py" in " ".join(first_commands[0]["command_template"])
+    assert "export_audio_separator_vocal_full.py" in " ".join(first_commands[1]["command_template"])
+    assert [candidate["vocal_route_id"] for candidate in recipe["candidates"][:2]] == [
+        "audio_separator_bs_roformer_vocals",
+        "mdx23c_vocals",
+    ]
     assert all(candidate["conservation_repair_stem"] == "other" for candidate in recipe["candidates"])
     assert all("contamination_checks" not in candidate for candidate in recipe["candidates"])
     assert len(recipe["candidates"]) == 10
     assert any(candidate.get("minus_vocal_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
-    assert any("--residual-correction-stem" in candidate["command_template"] for candidate in recipe["candidates"])
+    assert any(
+        "--residual-correction-stem" in route["command_template"]
+        for candidate in recipe["candidates"]
+        for route in candidate["target_specific_commands"]
+    )
+
+
+def test_default_from_scratch_recipe_blocks_without_specialized_vocal_route() -> None:
+    recipe = build_default_from_scratch_recipe(demucs_available=True, available_vocal_routes=())
+
+    assert recipe["available"] is False
+    assert recipe["unavailable_reason"] == "missing_target_specific_vocal_route"
+    assert recipe["candidates"] == []
 
 
 def test_contamination_model_manifest_applies_to_full_matrix() -> None:
