@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+import tools.run_fully_automatic_stem_search as stem_search
 from tools.run_fully_automatic_stem_search import (
     _candidate_contamination_checks,
+    _copy_target_specific_outputs,
     build_candidate_manifest,
     build_default_from_scratch_recipe,
     choose_next_action,
@@ -552,6 +554,91 @@ def test_target_specific_missing_route_output_blocks(tmp_path: Path) -> None:
     assert result["verdict"] == "blocked_no_clean_candidate"
     assert candidate["verdict"] == "blocked_missing_stem"
     assert "missing_target_specific_output:vocals:vocals" in candidate["target_specific_composition"]["blocker_reasons"]
+
+
+def test_target_specific_output_is_normalized_to_window_shape(tmp_path: Path) -> None:
+    source_dir = tmp_path / "route" / "stems"
+    final_dir = tmp_path / "final"
+    low_rate = SAMPLE_RATE // 2
+    low_t = np.arange(int(low_rate * 0.5), dtype=np.float32) / float(low_rate)
+    low_rate_vocal = (0.04 * np.sin(2.0 * math.pi * 440.0 * low_t)).astype(np.float32)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    sf.write(source_dir / "vocals.flac", low_rate_vocal, low_rate)
+
+    blockers = _copy_target_specific_outputs(
+        role="vocals",
+        role_stems_dir=source_dir,
+        final_stems_dir=final_dir,
+        target_sample_rate=SAMPLE_RATE,
+        target_sample_count=int(SAMPLE_RATE * 0.5),
+    )
+
+    info = sf.info(final_dir / "vocals.flac")
+    assert blockers == []
+    assert int(info.samplerate) == SAMPLE_RATE
+    assert int(info.frames) == int(SAMPLE_RATE * 0.5)
+
+
+def test_listen_pack_build_failure_removes_partial_listen_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_audio = {
+        "vocals": sine(100.0, seconds=0.5, amp=0.03),
+        "drums": sine(200.0, seconds=0.5, amp=0.04),
+        "bass": sine(300.0, seconds=0.5, amp=0.05),
+        "guitar": sine(400.0, seconds=0.5, amp=0.02),
+        "piano": sine(500.0, seconds=0.5, amp=0.02),
+        "other": sine(600.0, seconds=0.5, amp=0.01),
+    }
+    mix = write_wav(tmp_path / "mix.wav", sum(source_audio.values()))
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-accepted", "{window_mix}"],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        for stem, audio in source_audio.items():
+            sf.write(stems_dir / f"{stem}.flac", audio[: len(window_audio)].astype(np.float32), mix_rate)
+
+    original_write_audio = stem_search._write_audio
+
+    def fail_on_listen_drums(path: Path, audio: np.ndarray, sample_rate: int) -> Path:
+        if path.name == "drums.flac" and "listen" in path.parts:
+            raise RuntimeError("forced listen pack write failure")
+        return original_write_audio(path, audio, sample_rate)
+
+    monkeypatch.setattr(stem_search, "_write_audio", fail_on_listen_drums)
+    out = tmp_path / "scratch" / "t001"
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=out,
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    assert result["verdict"] == "blocked_unknown"
+    assert result["delivery_status"] == "blocked"
+    assert result["presentation_status"] == "blocked_from_listen_pack"
+    assert result["listen_pack"] == {}
+    assert result["listen_pack_error"]["message"] == "forced listen pack write failure"
+    assert not (out / "listen").exists()
 
 
 def test_recipe_candidate_blocks_no_reference_vocal_leak_in_minus(tmp_path: Path) -> None:

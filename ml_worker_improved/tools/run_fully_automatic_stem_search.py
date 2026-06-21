@@ -74,6 +74,10 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
     return path
 
 
+def _remove_listen_pack(output_dir: Path) -> None:
+    shutil.rmtree(output_dir / "listen", ignore_errors=True)
+
+
 def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -89,6 +93,72 @@ def _write_audio(path: Path, audio: np.ndarray, sample_rate: int) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(path, audio.astype(np.float32), sample_rate)
     return path
+
+
+def _match_audio_shape(
+    audio: np.ndarray,
+    source_rate: int,
+    *,
+    target_sample_rate: int | None,
+    target_sample_count: int | None,
+    target_channel_count: int | None = None,
+) -> tuple[np.ndarray, int]:
+    output = np.asarray(audio, dtype=np.float32)
+    if output.ndim == 1:
+        output = output[:, None]
+    output_rate = int(source_rate)
+    if target_sample_rate and int(target_sample_rate) != output_rate and len(output) > 0:
+        old_x = np.linspace(0.0, 1.0, num=len(output), endpoint=False)
+        new_len = max(1, int(round(len(output) * float(target_sample_rate) / float(output_rate))))
+        new_x = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
+        output = np.stack(
+            [
+                np.interp(new_x, old_x, output[:, channel]).astype(np.float32)
+                for channel in range(output.shape[1])
+            ],
+            axis=1,
+        )
+        output_rate = int(target_sample_rate)
+    if target_sample_count is not None:
+        desired = int(target_sample_count)
+        if desired < 0:
+            raise ValueError("target_sample_count must be non-negative")
+        if len(output) > desired:
+            output = output[:desired]
+        elif len(output) < desired:
+            pad = np.zeros((desired - len(output), output.shape[1]), dtype=np.float32)
+            output = np.concatenate([output, pad], axis=0)
+    if target_channel_count is not None and int(target_channel_count) > 0 and output.shape[1] != int(target_channel_count):
+        desired_channels = int(target_channel_count)
+        if output.shape[1] == 1:
+            output = np.repeat(output, desired_channels, axis=1)
+        elif desired_channels == 1:
+            output = np.mean(output, axis=1, keepdims=True).astype(np.float32)
+        elif output.shape[1] > desired_channels:
+            output = output[:, :desired_channels]
+        else:
+            pad = np.zeros((output.shape[0], desired_channels - output.shape[1]), dtype=np.float32)
+            output = np.concatenate([output, pad], axis=1)
+    return output.astype(np.float32), output_rate
+
+
+def _copy_audio_to_match_shape(
+    source_path: Path,
+    output_path: Path,
+    *,
+    target_sample_rate: int | None,
+    target_sample_count: int | None,
+    target_channel_count: int | None = None,
+) -> Path:
+    audio, sample_rate = sf.read(source_path, dtype="float32", always_2d=True)
+    audio, sample_rate = _match_audio_shape(
+        audio,
+        int(sample_rate),
+        target_sample_rate=target_sample_rate,
+        target_sample_count=target_sample_count,
+        target_channel_count=target_channel_count,
+    )
+    return _write_audio(output_path, audio, sample_rate)
 
 
 def _render_template(value: str, replacements: Mapping[str, str]) -> str:
@@ -316,6 +386,7 @@ def split_audio_windows(mix_path: Path, output_dir: Path, window_sec: float) -> 
                 "end_sec": round(end / sample_rate, 6),
                 "sample_rate": sample_rate,
                 "sample_count": int(end - start),
+                "channel_count": int(audio.shape[1]),
             }
         )
     return windows
@@ -351,7 +422,15 @@ def _collect_stem_paths(stems_dir: Path) -> dict[str, str]:
     return {stem: str(stems_dir / f"{stem}.flac") for stem in STEMS if (stems_dir / f"{stem}.flac").is_file()}
 
 
-def _copy_target_specific_outputs(*, role: str, role_stems_dir: Path, final_stems_dir: Path) -> list[str]:
+def _copy_target_specific_outputs(
+    *,
+    role: str,
+    role_stems_dir: Path,
+    final_stems_dir: Path,
+    target_sample_rate: int | None = None,
+    target_sample_count: int | None = None,
+    target_channel_count: int | None = None,
+) -> list[str]:
     required_outputs = TARGET_SPECIFIC_ROLE_OUTPUTS.get(role)
     if required_outputs is None:
         return [f"unsupported_target_specific_role:{role}"]
@@ -362,7 +441,13 @@ def _copy_target_specific_outputs(*, role: str, role_stems_dir: Path, final_stem
             blockers.append(f"missing_target_specific_output:{role}:{stem}")
             continue
         final_stems_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, final_stems_dir / f"{stem}.flac")
+        _copy_audio_to_match_shape(
+            source_path,
+            final_stems_dir / f"{stem}.flac",
+            target_sample_rate=target_sample_rate,
+            target_sample_count=target_sample_count,
+            target_channel_count=target_channel_count,
+        )
     return blockers
 
 
@@ -412,7 +497,14 @@ def _run_target_specific_commands(
         route_stems_dir.mkdir(parents=True, exist_ok=True)
         setattr(command_runner, "stems_dir", route_stems_dir)
         command_runner(command, timeout_sec)
-        route_blockers = _copy_target_specific_outputs(role=role, role_stems_dir=route_stems_dir, final_stems_dir=stems_dir)
+        route_blockers = _copy_target_specific_outputs(
+            role=role,
+            role_stems_dir=route_stems_dir,
+            final_stems_dir=stems_dir,
+            target_sample_rate=int(window["sample_rate"]) if window.get("sample_rate") is not None else None,
+            target_sample_count=int(window["sample_count"]) if window.get("sample_count") is not None else None,
+            target_channel_count=int(window["channel_count"]) if window.get("channel_count") is not None else None,
+        )
         route_manifest["missing_outputs"] = [
             reason.split(":")[-1] for reason in route_blockers if reason.startswith("missing_target_specific_output:")
         ]
@@ -1293,6 +1385,9 @@ def run_fully_automatic_stem_search(
             delivery_status = "blocked"
             failed_checks = ["listen_pack_build_failed"]
             listen_pack_error = {"type": type(exc).__name__, "message": str(exc)}
+            _remove_listen_pack(output_dir)
+    else:
+        _remove_listen_pack(output_dir)
     run_manifest = {
         "schema": "fully_automatic_stem_search_run.v1",
         "mix_path": str(mix_path),

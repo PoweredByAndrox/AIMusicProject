@@ -266,3 +266,12 @@ Supported roles:
 If a declared route misses one of its required outputs, the candidate blocks as
 `blocked_missing_stem`. `minus` is still rebuilt from the final non-vocal stems,
 and the full forbidden-source matrix still decides delivery.
+
+Route outputs are normalized to the current window's sample rate, frame count,
+and channel count before they are copied into the final candidate stem set. This
+is a shape contract only; it does not relax reconstruction or contamination
+gates. Any remaining mismatch or conservation error still blocks the candidate.
+
+If listen-pack construction fails after any partial file has been written, the
+runner removes the entire `listen/` directory before writing the blocked
+`run.json`. A blocked run must not leave a partial listen surface behind.
