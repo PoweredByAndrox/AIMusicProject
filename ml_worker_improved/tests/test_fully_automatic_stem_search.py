@@ -176,6 +176,13 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
         "run_vocal_instrumental_demucs_candidate.py" in " ".join(candidate.get("command_template") or [])
         for candidate in recipe["candidates"]
     )
+    c009 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c009")
+    c010 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c010")
+    assert c009["vocal_route_id"] == "audio_separator_bs_roformer_vocals"
+    assert c010["vocal_route_id"] == "audio_separator_melband_roformer_vocals"
+    assert "--vocal-model-filename" in c010["command_template"]
+    assert "MelBandRoformer.ckpt" in c010["command_template"]
+    assert "/app/vendor/mel_band_roformer_vocal_model_weights" in c010["command_template"]
     assert any(
         "--residual-correction-stem" in route["command_template"]
         for candidate in recipe["candidates"]

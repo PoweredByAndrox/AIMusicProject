@@ -363,11 +363,15 @@ def build_default_from_scratch_recipe(
         overlap: str,
         shifts: str,
         debleed_strength: float,
+        vocal_model_filename: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+        vocal_model_file_dir: str = "/app/models/audio_separator",
+        vocal_model_id: str = "audio_separator_bs_roformer_vocals",
+        vocal_model_display_name: str = "Audio Separator BS-RoFormer vocal checkpoint",
     ) -> dict[str, Any]:
         candidate = {
             "candidate_id": candidate_id,
-            "route_family": "vocal_instrumental_demucs_6s_audio_separator_bs_roformer_vocals",
-            "vocal_route_id": "audio_separator_bs_roformer_vocals",
+            "route_family": f"vocal_instrumental_demucs_6s_{vocal_model_id}",
+            "vocal_route_id": vocal_model_id,
             "conservation_repair_stem": "other",
             "required_stems": list(STEMS),
             "command_template": [
@@ -381,6 +385,14 @@ def build_default_from_scratch_recipe(
                 "{output_dir}/work",
                 "--manifest",
                 "{output_dir}/vdemucs.json",
+                "--vocal-model-filename",
+                vocal_model_filename,
+                "--vocal-model-file-dir",
+                vocal_model_file_dir,
+                "--vocal-model-id",
+                vocal_model_id,
+                "--vocal-model-display-name",
+                vocal_model_display_name,
                 "--segment-sec",
                 segment,
                 "--overlap",
@@ -416,7 +428,23 @@ def build_default_from_scratch_recipe(
         },
         "timeout_sec": 900,
         "candidates": [
-            instrumental_demucs_candidate(spec[0], spec[1], spec[2], spec[3], spec[5])
+            instrumental_demucs_candidate(
+                spec[0],
+                spec[1],
+                spec[2],
+                spec[3],
+                spec[5],
+                *(
+                    (
+                        "MelBandRoformer.ckpt",
+                        "/app/vendor/mel_band_roformer_vocal_model_weights",
+                        "audio_separator_melband_roformer_vocals",
+                        "Audio Separator MelBand RoFormer vocal checkpoint",
+                    )
+                    if spec[0] == "c010"
+                    else ()
+                ),
+            )
             if spec[0] in {"c009", "c010"}
             else demucs_candidate(*spec)
             for spec in variant_specs

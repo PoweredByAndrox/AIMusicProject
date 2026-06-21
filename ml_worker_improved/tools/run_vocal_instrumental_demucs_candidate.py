@@ -64,6 +64,8 @@ def run_vocal_instrumental_demucs_candidate(
     timeout_sec: int = 900,
     vocal_model_filename: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
     vocal_model_file_dir: str = "/app/models/audio_separator",
+    vocal_model_id: str = "audio_separator_bs_roformer_vocals",
+    vocal_model_display_name: str = "Audio Separator BS-RoFormer vocal checkpoint",
     audio_separator_python: str = "/opt/audio-separator-venv/bin/python",
     demucs_model_name: str = "htdemucs_6s",
     demucs_segment_sec: str = "6",
@@ -89,9 +91,9 @@ def run_vocal_instrumental_demucs_candidate(
         "--audio-separator-python",
         audio_separator_python,
         "--manifest-model-id",
-        "audio_separator_bs_roformer_vocals",
+        vocal_model_id,
         "--manifest-model-display-name",
-        "Audio Separator BS-RoFormer vocal checkpoint",
+        vocal_model_display_name,
         "--require-cuda-provider",
     ]
     runner(pair_command, timeout_sec)
@@ -173,6 +175,10 @@ def run_vocal_instrumental_demucs_candidate(
         "generation_status": "completed" if not missing_stems else "failed_missing_stem",
         "input_audio": str(input_audio),
         "instrumental_path": str(instrumental_path),
+        "vocal_model_filename": vocal_model_filename,
+        "vocal_model_file_dir": vocal_model_file_dir,
+        "vocal_model_id": vocal_model_id,
+        "vocal_model_display_name": vocal_model_display_name,
         "vocal_pair_command": pair_command,
         "demucs_input_audio": str(instrumental_path),
         "demucs_command": demucs_command,
@@ -193,6 +199,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--vocal-model-filename", default="model_bs_roformer_ep_317_sdr_12.9755.ckpt")
     parser.add_argument("--vocal-model-file-dir", default="/app/models/audio_separator")
+    parser.add_argument("--vocal-model-id", default="audio_separator_bs_roformer_vocals")
+    parser.add_argument("--vocal-model-display-name", default="Audio Separator BS-RoFormer vocal checkpoint")
     parser.add_argument("--audio-separator-python", default="/opt/audio-separator-venv/bin/python")
     parser.add_argument("--demucs-model-name", default="htdemucs_6s")
     parser.add_argument("--segment-sec", default="6")
@@ -213,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
         timeout_sec=int(args.timeout_sec),
         vocal_model_filename=str(args.vocal_model_filename),
         vocal_model_file_dir=str(args.vocal_model_file_dir),
+        vocal_model_id=str(args.vocal_model_id),
+        vocal_model_display_name=str(args.vocal_model_display_name),
         audio_separator_python=str(args.audio_separator_python),
         demucs_model_name=str(args.demucs_model_name),
         demucs_segment_sec=str(args.segment_sec),
