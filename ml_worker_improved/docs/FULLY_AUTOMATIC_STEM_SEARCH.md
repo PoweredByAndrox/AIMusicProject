@@ -188,3 +188,34 @@ At runtime, a candidate may opt into this model through
 `contamination_probability`, `probability_threshold`, model provenance, and the
 same leak-audio reconstruction path for failed candidates. If the model is
 missing, mismatched, or unsupported, the check blocks as `blocked_unknown`.
+
+## Learning Cycle CLI
+
+`tools/run_stem_contamination_learning_cycle.py` wires the first automatic loop:
+
+```text
+clean-pairs manifest
+-> build synthetic contamination rows
+-> train pair-conditioned no-reference detector
+-> write enriched search recipe with contamination_model_manifest
+-> run fully automatic stem search
+```
+
+The cycle writes `dataset/`, `model/`, `recipe.json`, `search/run.json`, and
+`manifest.json` under the requested output directory. It is still fail-closed:
+if the trained detector does not cover every forbidden pair needed by the full
+matrix, the search blocks as `blocked_no_clean_candidate` and no `listen/` pack
+is published.
+
+Docker command shape:
+
+```powershell
+docker compose run --rm --no-deps -T ml-worker `
+  python tools/run_stem_contamination_learning_cycle.py `
+    --mix "/host_testing_stuff_music/input.mp3" `
+    --clean-pairs-manifest "/host_artifacts/stem_eval/cp001/manifest.json" `
+    --out "/host_artifacts/stem_eval/cycle001" `
+    --max-candidates 10 `
+    --require-gpu true `
+    --no-artifact-rag
+```
