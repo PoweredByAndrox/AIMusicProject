@@ -11,6 +11,7 @@ import soundfile as sf
 from tools.build_stem_contamination_dataset import validate_stem_contamination_row
 from tools.score_stem_contamination import score_stem_contamination
 from tools.stem_contamination_common import build_minus_from_non_vocal_stems
+from tools.train_stem_contamination_detector import train_stem_contamination_detector
 
 
 SAMPLE_RATE = 16_000
@@ -170,3 +171,76 @@ def test_no_reference_unsupported_pair_blocks_unknown(tmp_path: Path) -> None:
 
     assert result["verdict"] == "blocked_unknown"
     assert result["reason"] == "no_reference_detector_not_available"
+
+
+def _write_contamination_rows(tmp_path: Path) -> Path:
+    rows = []
+    for idx, freq in enumerate((820.0, 880.0, 960.0), start=1):
+        clean_minus = sine(110.0 + idx * 20.0, amp=0.18) + sine(220.0, amp=0.04)
+        leak = sine(freq, amp=0.045)
+        dirty = clean_minus + leak
+        row_id = f"d{idx:06d}"
+        input_path = write_wav(tmp_path / "audio" / f"{row_id}_in.flac", dirty)
+        leak_path = write_wav(tmp_path / "audio" / f"{row_id}_leak.flac", leak)
+        rows.append(
+            {
+                "row_id": row_id,
+                "input_stem": str(input_path),
+                "target_leak": str(leak_path),
+                "base_stem": "minus",
+                "foreign_source": "vocals",
+                "label_type": "synthetic_clean",
+                "is_ground_truth": True,
+                "split": "train",
+            }
+        )
+    rows_path = tmp_path / "rows.jsonl"
+    rows_path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    return rows_path
+
+
+def test_trainable_no_reference_detector_scores_dirty_and_clean_minus(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    rows_path = _write_contamination_rows(tmp_path)
+    model_dir = tmp_path / "model"
+
+    manifest = train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=120,
+        hidden_size=8,
+        min_positive_rows=2,
+    )
+
+    assert manifest["training_status"] == "trained"
+    assert manifest["detector_mode"] == "no_reference_neural_v1"
+    assert manifest["shadow_only"] is True
+    assert Path(manifest["model_file"]).exists()
+
+    dirty_minus = sine(110.0, amp=0.18) + sine(880.0, amp=0.05)
+    dirty_result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "dirty_minus.wav", dirty_minus),
+        tested_stem="minus",
+        foreign_source="vocals",
+        output_dir=tmp_path / "dirty_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    clean_minus = sine(110.0, amp=0.18) + sine(220.0, amp=0.04)
+    clean_result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "clean_minus.wav", clean_minus),
+        tested_stem="minus",
+        foreign_source="vocals",
+        output_dir=tmp_path / "clean_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    assert dirty_result["verdict"] == "fail"
+    assert dirty_result["detector_mode"] == "no_reference_neural_v1"
+    assert dirty_result["leak_audio"]
+    assert clean_result["verdict"] == "pass"
+    assert clean_result["detector_mode"] == "no_reference_neural_v1"
+    assert clean_result["leak_audio"] == ""

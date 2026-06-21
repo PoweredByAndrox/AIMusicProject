@@ -191,7 +191,11 @@ def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[
             tested_stem = str(item.get("tested_stem") or "").strip()
             foreign_source = str(item.get("foreign_source") or "").strip()
             if tested_stem and foreign_source:
-                normalized.append({"tested_stem": tested_stem, "foreign_source": foreign_source})
+                check = {"tested_stem": tested_stem, "foreign_source": foreign_source}
+                model_manifest = str(item.get("model_manifest") or "").strip()
+                if model_manifest:
+                    check["model_manifest"] = model_manifest
+                normalized.append(check)
         return normalized, True
 
     return [
@@ -279,6 +283,7 @@ def _score_candidate_contamination(
             foreign_source=foreign_source,
             output_dir=score_dir,
             foreign_reference_path=Path(str(reference_path)) if reference_path else None,
+            model_manifest_path=Path(str(check["model_manifest"])) if check.get("model_manifest") else None,
         )
         leak_results.append(result)
         if result.get("verdict") == "fail":

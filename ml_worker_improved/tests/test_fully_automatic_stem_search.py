@@ -22,6 +22,7 @@ from tools.stem_contamination_common import (
     missing_required_stems,
     validate_no_artifact_rag_output,
 )
+from tools.train_stem_contamination_detector import train_stem_contamination_detector
 
 
 SAMPLE_RATE = 16_000
@@ -281,6 +282,88 @@ def test_recipe_candidate_blocks_no_reference_vocal_leak_in_minus(tmp_path: Path
     assert leak_result["verdict"] == "fail"
     assert leak_result["leak_audio"]
     assert Path(candidate["output_dir"], "score", leak_result["leak_audio"]).exists()
+
+
+def test_recipe_candidate_uses_trainable_no_reference_model(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    rows = []
+    for idx, freq in enumerate((820.0, 880.0, 960.0), start=1):
+        clean = sine(110.0 + idx * 20.0, seconds=0.25, amp=0.18) + sine(220.0, seconds=0.25, amp=0.04)
+        leak = sine(freq, seconds=0.25, amp=0.045)
+        row_id = f"d{idx:06d}"
+        rows.append(
+            {
+                "row_id": row_id,
+                "input_stem": str(write_wav(tmp_path / "train" / f"{row_id}_in.flac", clean + leak)),
+                "target_leak": str(write_wav(tmp_path / "train" / f"{row_id}_leak.flac", leak)),
+                "base_stem": "minus",
+                "foreign_source": "vocals",
+                "label_type": "synthetic_clean",
+                "is_ground_truth": True,
+                "split": "train",
+            }
+        )
+    rows_jsonl = tmp_path / "rows.jsonl"
+    rows_jsonl.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    model_dir = tmp_path / "model"
+    train_stem_contamination_detector(
+        rows_jsonl=rows_jsonl,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=120,
+        hidden_size=8,
+        min_positive_rows=2,
+    )
+
+    vocal = sine(880.0, seconds=0.25, amp=0.04)
+    drums = sine(110.0, seconds=0.25, amp=0.12)
+    mix = write_wav(tmp_path / "mix.wav", vocal + drums)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-model-clean", "{window_mix}"],
+                        "contamination_checks": [
+                            {
+                                "tested_stem": "minus",
+                                "foreign_source": "vocals",
+                                "model_manifest": str(model_dir / "manifest.json"),
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        write_wav(stems_dir / "vocals.flac", vocal[: len(window_audio)])
+        write_wav(stems_dir / "drums.flac", drums[: len(window_audio)])
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    leak_result = result["candidates"][0]["contamination_score"]["leak_results"][0]
+    assert result["verdict"] == "auto_accept"
+    assert leak_result["detector_mode"] == "no_reference_neural_v1"
+    assert leak_result["model_manifest"] == str(model_dir / "manifest.json")
 
 
 def test_recipe_candidate_missing_stem_blocks_candidate(tmp_path: Path) -> None:

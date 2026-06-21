@@ -21,7 +21,11 @@ Candidates may declare explicit checks:
 ```json
 {
   "contamination_checks": [
-    {"tested_stem": "minus", "foreign_source": "vocals"}
+    {
+      "tested_stem": "minus",
+      "foreign_source": "vocals",
+      "model_manifest": "artifacts/scd/m001/manifest.json"
+    }
   ]
 }
 ```
@@ -55,3 +59,36 @@ Unsupported no-reference pairs return `blocked_unknown` with
 This detector is not the learned production audio critic. It is a bounded
 automatic sentinel used to make the scratch loop observable and testable before
 neural contamination models are trained and promoted.
+
+## Trainable Detector V1
+
+`tools/train_stem_contamination_detector.py` trains a torch no-reference model
+from synthetic contamination rows produced by
+`tools/build_stem_contamination_dataset.py` or equivalent rows with:
+
+- `base_stem=minus`
+- `foreign_source=vocals`
+- `label_type=synthetic_clean`
+- `is_ground_truth=true`
+- `input_stem`: clean minus plus injected vocal leak
+- `target_leak`: the injected leak signal
+
+For each safe row, training derives a positive example from `input_stem` and a
+negative example from `input_stem - target_leak`. Generated separator output,
+dirty references, pseudo labels, and non-ground-truth rows cannot become
+training ground truth.
+
+The trained manifest remains shadow evidence:
+
+- `detector_mode=no_reference_neural_v1`
+- `shadow_only=true`
+- `promotion_allowed=false`
+- `delivery_allowed=false`
+- `release_ready=false`
+- `can_publish_as_result=false`
+
+At runtime, a candidate may opt into this model by setting
+`contamination_checks[].model_manifest`. The scorer then reports
+`contamination_probability`, `probability_threshold`, model provenance, and the
+same leak-audio reconstruction path for failed candidates. If the model is
+missing, mismatched, or unsupported, the check blocks as `blocked_unknown`.
