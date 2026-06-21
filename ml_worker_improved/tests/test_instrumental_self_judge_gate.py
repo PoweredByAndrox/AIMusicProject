@@ -160,6 +160,37 @@ class TestInstrumentalSelfJudgeGate(unittest.TestCase):
             self.assertEqual(manifest["overall"]["segment_count"], 2)
             self.assertTrue((temp_path / "judge" / "instrumental_self_judge_manifest.json").exists())
 
+    def test_can_write_short_output_names(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sample_rate = 8000
+            source_path = temp_path / "source.wav"
+            candidate_path = temp_path / "candidate.flac"
+            _write_audio(source_path, np.full(sample_rate, 0.8, dtype=np.float32), sample_rate)
+            _write_audio(candidate_path, np.full(sample_rate, 0.72, dtype=np.float32), sample_rate)
+            output_dir = temp_path / "judge"
+
+            manifest = module.judge_instrumental(
+                source_audio_path=source_path,
+                candidate_instrumental_path=candidate_path,
+                output_dir=output_dir,
+                candidate_label="candidate",
+                segment_sec=0.5,
+                short_output_names=True,
+            )
+
+            self.assertTrue((output_dir / "manifest.json").exists())
+            self.assertTrue((output_dir / "rows.jsonl").exists())
+            self.assertTrue((output_dir / "progress.jsonl").exists())
+            self.assertFalse((output_dir / "instrumental_self_judge_manifest.json").exists())
+            self.assertFalse((output_dir / "instrumental_self_judge_segments.jsonl").exists())
+            self.assertEqual(manifest["manifest_path"], str(output_dir / "manifest.json"))
+            self.assertEqual(manifest["segments_jsonl"], str(output_dir / "rows.jsonl"))
+            self.assertTrue(manifest["short_output_names"])
+            self.assertEqual(manifest["artifact_name_policy"]["path_segment_limit"], 32)
+
     def test_blocks_full_mix_passthrough_even_when_candidate_is_slightly_quieter(self) -> None:
         module = _load_module()
 

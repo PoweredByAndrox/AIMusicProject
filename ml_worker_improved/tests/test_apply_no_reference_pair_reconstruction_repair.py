@@ -151,3 +151,48 @@ def test_run_build_writes_candidate_row_and_manifest(tmp_path: Path) -> None:
     assert manifest_path.exists()
     assert row["candidate_id"] == "candidate-a__pair_reconstruction_repair"
     assert row["delivery_allowed"] is False
+
+
+def test_run_build_can_write_short_output_names(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    times = np.arange(sample_rate, dtype=np.float32) / float(sample_rate)
+    vocal = _stereo(0.15 * np.sin(2.0 * np.pi * 440.0 * times))
+    music = _stereo(0.35 * np.sin(2.0 * np.pi * 120.0 * times))
+    raw = vocal + music
+    raw_path = tmp_path / "raw.flac"
+    vocal_path = tmp_path / "vocal.flac"
+    output_dir = tmp_path / "out"
+    _write_audio(raw_path, raw, sample_rate)
+    _write_audio(vocal_path, vocal, sample_rate)
+
+    manifest = module.run_build(
+        Namespace(
+            raw_audio_path=raw_path,
+            selected_vocal_path=vocal_path,
+            output_dir=output_dir,
+            base_minus_path=None,
+            windowed_pair_judge_jsonl=None,
+            candidate_id="candidate-a",
+            track_id="track-a",
+            residual_strength=1.0,
+            max_peak=0.999,
+            short_output_names=True,
+        )
+    )
+
+    output_path = output_dir / "m001.flac"
+    candidate_row_path = output_dir / "rows.jsonl"
+    manifest_path = output_dir / "manifest.json"
+    row = json.loads(candidate_row_path.read_text(encoding="utf-8").strip())
+
+    assert output_path.exists()
+    assert manifest_path.exists()
+    assert not (output_dir / "pair_reconstruction_repair_manifest.json").exists()
+    assert not (output_dir / "candidate_pair.jsonl").exists()
+    assert manifest["manifest_path"] == str(manifest_path)
+    assert manifest["candidate_row_jsonl"] == str(candidate_row_path)
+    assert manifest["artifacts"]["pair_reconstruction_minus_flac"] == str(output_path)
+    assert manifest["short_output_names"] is True
+    assert manifest["artifact_name_policy"]["path_segment_limit"] == 32
+    assert row["instrumental_path"] == str(output_path)

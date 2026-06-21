@@ -18,6 +18,9 @@ SCHEMA_VERSION = 1
 MANIFEST_NAME = "instrumental_self_judge_manifest.json"
 SEGMENTS_NAME = "instrumental_self_judge_segments.jsonl"
 PROGRESS_NAME = "instrumental_self_judge_progress.jsonl"
+SHORT_MANIFEST_NAME = "manifest.json"
+SHORT_SEGMENTS_NAME = "rows.jsonl"
+SHORT_PROGRESS_NAME = "progress.jsonl"
 
 
 class ProgressWriter:
@@ -344,9 +347,16 @@ def judge_instrumental(
     selector_manifest_path: Path | None = None,
     candidate_label: str = "candidate",
     segment_sec: float = 5.0,
+    short_output_names: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    progress = ProgressWriter(output_dir / PROGRESS_NAME)
+    manifest_name = SHORT_MANIFEST_NAME if short_output_names else MANIFEST_NAME
+    segments_name = SHORT_SEGMENTS_NAME if short_output_names else SEGMENTS_NAME
+    progress_name = SHORT_PROGRESS_NAME if short_output_names else PROGRESS_NAME
+    manifest_path = output_dir / manifest_name
+    segments_path = output_dir / segments_name
+    progress_path = output_dir / progress_name
+    progress = ProgressWriter(progress_path)
     progress.mark(
         "start",
         source_audio_path=str(source_audio_path),
@@ -434,8 +444,15 @@ def judge_instrumental(
         "selector_manifest_path": str(selector_manifest_path) if selector_manifest_path is not None else None,
         "overall": overall,
         "segments": records,
-        "segments_jsonl": str(output_dir / SEGMENTS_NAME),
-        "progress_log_path": str(output_dir / PROGRESS_NAME),
+        "manifest_path": str(manifest_path),
+        "segments_jsonl": str(segments_path),
+        "progress_log_path": str(progress_path),
+        "short_output_names": bool(short_output_names),
+        "artifact_name_policy": {
+            "path_segment_limit": 32,
+            "raw_ids_in_paths": False,
+            "provenance_in_manifest": True,
+        },
         "delivery_contract": {
             "delivery_allowed": False,
             "delivery_status": "not_a_delivery_artifact",
@@ -455,12 +472,12 @@ def judge_instrumental(
             "proxy_only_scoring": True,
         },
     }
-    write_jsonl(output_dir / SEGMENTS_NAME, records)
-    write_json(output_dir / MANIFEST_NAME, manifest)
+    write_jsonl(segments_path, records)
+    write_json(manifest_path, manifest)
     progress.mark(
         "finish",
         status=status,
-        manifest_path=str(output_dir / MANIFEST_NAME),
+        manifest_path=str(manifest_path),
         blocker_count=len(blockers),
         segment_count=len(records),
     )
@@ -477,6 +494,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--selector-manifest")
     parser.add_argument("--candidate-label", default="candidate")
     parser.add_argument("--segment-sec", type=float, default=5.0)
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -491,11 +509,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         selector_manifest_path=Path(args.selector_manifest) if args.selector_manifest else None,
         candidate_label=str(args.candidate_label),
         segment_sec=float(args.segment_sec),
+        short_output_names=bool(args.short_output_names),
     )
     print(
         json.dumps(
             {
-                "manifest_path": str(Path(args.output_dir) / MANIFEST_NAME),
+                "manifest_path": str(manifest["manifest_path"]),
                 "status": manifest["overall"]["status"],
                 "blocker_count": manifest["overall"]["blocker_count"],
                 "segment_count": manifest["overall"]["segment_count"],

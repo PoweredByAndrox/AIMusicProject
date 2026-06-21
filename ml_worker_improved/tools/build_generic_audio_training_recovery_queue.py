@@ -20,6 +20,10 @@ QUEUE_NAME = "generic_audio_training_recovery_queue.jsonl"
 DECISION_TEMPLATE_NAME = "generic_audio_training_recovery_decision_template.jsonl"
 MANIFEST_NAME = "generic_audio_training_recovery_manifest.json"
 PROGRESS_NAME = "generic_audio_training_recovery_progress.jsonl"
+SHORT_QUEUE_NAME = "queue.jsonl"
+SHORT_DECISION_TEMPLATE_NAME = "tpl.jsonl"
+SHORT_MANIFEST_NAME = "rec.json"
+SHORT_PROGRESS_NAME = "progress.jsonl"
 
 POSITIVE_RATINGS = {"ideal", "good", "accepted", "accept", "pass", "approved", "better", "prefer", "preferred"}
 NEGATIVE_RATINGS = {"bad", "reject", "rejected", "fail", "failed", "poor", "worse"}
@@ -45,8 +49,33 @@ MANIFEST_TARGET_KEYS_BY_STEM = {
     "vocal": ("selected_vocal_path", "vocal_path", "listen_vocals_flac", "listen_selected_vocals_flac"),
     "minus": ("selected_minus_path", "minus_path", "instrumental_path", "listen_minus_flac", "listen_instrumental_flac"),
 }
+FULL_PACK_UNSAFE_TRUE_FLAGS = (
+    "delivery_allowed",
+    "release_ready",
+    "can_publish_as_result",
+    "training_started",
+    "fine_tune_started",
+    "models_changed",
+    "model_registry_edited",
+)
 
 START_TIME = time.monotonic()
+
+
+def output_names(short_output_names: bool) -> dict[str, str]:
+    if short_output_names:
+        return {
+            "queue": SHORT_QUEUE_NAME,
+            "decision_template": SHORT_DECISION_TEMPLATE_NAME,
+            "manifest": SHORT_MANIFEST_NAME,
+            "progress": SHORT_PROGRESS_NAME,
+        }
+    return {
+        "queue": QUEUE_NAME,
+        "decision_template": DECISION_TEMPLATE_NAME,
+        "manifest": MANIFEST_NAME,
+        "progress": PROGRESS_NAME,
+    }
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -101,6 +130,17 @@ def progress(path: Path, event: str, **fields: Any) -> None:
 def stable_hash(payload: Any) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def stable_unique(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 def first_text(row: dict[str, Any], keys: Sequence[str]) -> str:
@@ -311,6 +351,8 @@ def recommended_actions(blockers: Sequence[str]) -> list[str]:
     if "synthetic_fixture_not_for_production_training" in blockers:
         return ["mark_synthetic_training_allowed_or_keep_as_fixture"]
     actions: list[str] = []
+    if "missing_verified_reference_candidate" in blockers:
+        actions.extend(["collect_verified_reference_stem", "rerun_generic_audio_finetune_job_plan"])
     if "missing_permission_status" in blockers or "permission_not_trainable" in blockers:
         actions.append("attach_trainable_permission_status_or_exclude")
     if "missing_human_or_reference_verification" in blockers or "rating_not_positive" in blockers:
@@ -353,6 +395,8 @@ def recovery_priority(row: dict[str, Any]) -> str:
         return "P1_permission_only_verified_music_gt"
     if "missing_source_audio_path" in blockers or "missing_target_audio_path" in blockers:
         return "P3_recover_audio_paths"
+    if "missing_verified_reference_candidate" in blockers:
+        return "P0_full_pack_verified_reference_needed"
     return "P2_review_blockers"
 
 
@@ -523,16 +567,161 @@ def feedback_paths_from_corpus_manifest(corpus_manifest_json: Path) -> list[Path
     return result
 
 
+def resolved_manifest_path(raw_path: Any, *, base_dir: Path) -> Path:
+    text = str(raw_path or "").strip()
+    if not text:
+        return Path("")
+    path = Path(text)
+    if not path.is_absolute():
+        path = base_dir / path
+    return path
+
+
+def unsafe_true_flags(prefix: str, payload: dict[str, Any]) -> list[str]:
+    failed: list[str] = []
+    for key in FULL_PACK_UNSAFE_TRUE_FLAGS:
+        if payload.get(key) is True:
+            failed.append(f"{prefix}_{key}_true")
+    for nested_key in ("safety", "contract"):
+        nested = payload.get(nested_key)
+        if not isinstance(nested, dict):
+            continue
+        for key in FULL_PACK_UNSAFE_TRUE_FLAGS:
+            if nested.get(key) is True:
+                failed.append(f"{prefix}_{nested_key}_{key}_true")
+    return failed
+
+
+def load_full_pack_loop_action_rows(full_pack_loop_plan_json: Path | None) -> tuple[list[dict[str, Any]], list[str]]:
+    if full_pack_loop_plan_json is None:
+        return [], []
+    payload = read_json(full_pack_loop_plan_json)
+    if payload is None:
+        return [], ["full_pack_loop_plan_unreadable"]
+    failed = unsafe_true_flags("full_pack_loop_plan", payload)
+    if payload.get("schema") != "full_pack_loop_iteration_plan.v1":
+        failed.append("full_pack_loop_plan_schema_unexpected")
+    if payload.get("failed_checks") not in ([], None):
+        failed.append("full_pack_loop_plan_failed_checks_not_empty")
+    rows_path_text = str(payload.get("rows_jsonl") or "").strip()
+    rows_path = resolved_manifest_path(rows_path_text, base_dir=full_pack_loop_plan_json.parent)
+    if not rows_path_text or not rows_path.exists():
+        failed.append("full_pack_loop_plan_rows_jsonl_missing")
+        return [], stable_unique(failed)
+    if failed:
+        return [], stable_unique(failed)
+
+    action_rows: list[dict[str, Any]] = []
+    for row in iter_jsonl(rows_path):
+        if row.get("schema") != "full_pack_loop_iteration_action.v1":
+            failed.append("full_pack_loop_action_schema_unexpected")
+            continue
+        stem_type = normalized_stem(row.get("stem_type"))
+        if not stem_type or stem_type == "unknown":
+            continue
+        required_actions = [str(action) for action in row.get("required_next_actions") or [] if str(action)]
+        route_intent = str(row.get("route_intent") or "")
+        if "verified_reference_corpus_expand" not in required_actions and route_intent not in {
+            "stem_training_coverage_gap",
+            "minus_repair",
+        }:
+            continue
+        action_rows.append({**row, "stem_type": stem_type, "required_next_actions": stable_unique(required_actions)})
+    if failed:
+        return [], stable_unique(failed)
+    return action_rows, stable_unique(failed)
+
+
+def annotate_full_pack_rows(rows: Sequence[dict[str, Any]], action_rows: Sequence[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    action_by_stem: dict[str, dict[str, Any]] = {}
+    required_stems: list[str] = []
+    for action in action_rows:
+        stem_type = normalized_stem(action.get("stem_type"))
+        if not stem_type or stem_type == "unknown" or stem_type in action_by_stem:
+            continue
+        action_by_stem[stem_type] = action
+        required_stems.append(stem_type)
+
+    candidate_stems: list[str] = []
+    for row in rows:
+        stem_type = normalized_stem(row.get("stem_type"))
+        action = action_by_stem.get(stem_type)
+        if action is None:
+            continue
+        row["full_pack_required_stem"] = True
+        row["full_pack_queue_item_id"] = str(action.get("queue_item_id") or "")
+        row["full_pack_route_intent"] = str(action.get("route_intent") or "")
+        row["full_pack_action_status"] = str(action.get("action_status") or "")
+        row["full_pack_required_next_actions"] = [
+            str(action_name) for action_name in action.get("required_next_actions") or [] if str(action_name)
+        ]
+        row["full_pack_unique_track_count"] = action.get("unique_track_count")
+        row["full_pack_min_unique_tracks"] = action.get("min_unique_tracks")
+        candidate_stems.append(stem_type)
+    return required_stems, stable_unique(candidate_stems)
+
+
+def full_pack_missing_candidate_row(
+    *,
+    full_pack_loop_plan_json: Path,
+    action: dict[str, Any],
+    source_row_index: int,
+) -> dict[str, Any]:
+    stem_type = normalized_stem(action.get("stem_type"))
+    blockers = ["missing_verified_reference_candidate"]
+    candidate = {
+        "schema": "generic_audio_training_recovery_queue_row.v1",
+        "id": stable_hash(["full_pack_loop_plan_missing_stem", str(full_pack_loop_plan_json), stem_type])[:16],
+        "source_type": "full_pack_loop_plan_missing_stem",
+        "source_file": str(full_pack_loop_plan_json),
+        "source_row_index": source_row_index,
+        "track_id": "full_pack_required_reference",
+        "stem_type": stem_type,
+        "source_audio_path": "",
+        "target_audio_path": "",
+        "source_audio_exists": False,
+        "target_audio_exists": False,
+        "rating": "",
+        "human_verified": False,
+        "reference_verified": False,
+        "permission_status": "",
+        "blockers": blockers,
+        "ready_for_audio_training": False,
+        "notes": f"full_pack_action_status={action.get('action_status') or ''}",
+        "source_domain": "full_pack_loop_plan",
+        "full_pack_required_stem": True,
+        "full_pack_queue_item_id": str(action.get("queue_item_id") or ""),
+        "full_pack_route_intent": str(action.get("route_intent") or ""),
+        "full_pack_action_status": str(action.get("action_status") or ""),
+        "full_pack_required_next_actions": [
+            str(action_name) for action_name in action.get("required_next_actions") or [] if str(action_name)
+        ],
+        "full_pack_unique_track_count": action.get("unique_track_count"),
+        "full_pack_min_unique_tracks": action.get("min_unique_tracks"),
+        "full_pack_source_audio_path": str(action.get("source_audio_path") or ""),
+    }
+    candidate["recovery_priority"] = recovery_priority(candidate)
+    candidate["recommended_actions"] = recommended_actions(candidate["blockers"])
+    return candidate
+
+
 def build_generic_audio_training_recovery_queue(
     *,
     artifact_root: Path,
     output_dir: Path,
     corpus_manifest_json: Path | None = None,
     feedback_jsonls: Sequence[Path] = (),
+    full_pack_loop_plan_json: Path | None = None,
+    short_output_names: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    progress_path = output_dir / PROGRESS_NAME
+    names = output_names(short_output_names)
+    queue_path = output_dir / names["queue"]
+    decision_template_path = output_dir / names["decision_template"]
+    manifest_path = output_dir / names["manifest"]
+    progress_path = output_dir / names["progress"]
     progress(progress_path, "start", artifact_root=str(artifact_root))
+    full_pack_action_rows, full_pack_failed_checks = load_full_pack_loop_action_rows(full_pack_loop_plan_json)
     manifest_feedback_paths = feedback_paths_from_corpus_manifest(corpus_manifest_json) if corpus_manifest_json else []
     feedback_paths = sorted({path for path in [*manifest_feedback_paths, *feedback_jsonls]})
 
@@ -553,6 +742,23 @@ def build_generic_audio_training_recovery_queue(
         if payload is not None:
             rows.extend(ground_truth_recovery_rows(path, payload))
 
+    full_pack_required_stems, full_pack_candidate_stems = annotate_full_pack_rows(rows, full_pack_action_rows)
+    full_pack_candidate_set = set(full_pack_candidate_stems)
+    full_pack_missing_stems: list[str] = []
+    for index, action in enumerate(full_pack_action_rows, start=1):
+        stem_type = normalized_stem(action.get("stem_type"))
+        if not stem_type or stem_type in full_pack_candidate_set:
+            continue
+        rows.append(
+            full_pack_missing_candidate_row(
+                full_pack_loop_plan_json=full_pack_loop_plan_json or Path(""),
+                action=action,
+                source_row_index=index,
+            )
+        )
+        full_pack_missing_stems.append(stem_type)
+        full_pack_candidate_set.add(stem_type)
+
     rows.sort(key=lambda item: (item["ready_for_audio_training"] is False, item["source_type"], item["track_id"], item["stem_type"], item["id"]))
     decision_template_rows = [decision_template_row(row) for row in rows if not row["ready_for_audio_training"]]
     decision_template_rows.sort(key=decision_template_sort_key)
@@ -571,12 +777,19 @@ def build_generic_audio_training_recovery_queue(
         "target_audio_not_found": sum(1 for row in rows if "target_audio_not_found" in row["blockers"]),
         "source_domain_counts": dict(Counter(str(row["source_domain"]) for row in rows)),
         "recovery_priority_counts": dict(Counter(str(row["recovery_priority"]) for row in rows)),
+        "full_pack_loop_plan_json": str(full_pack_loop_plan_json) if full_pack_loop_plan_json else "",
+        "full_pack_failed_checks": full_pack_failed_checks,
+        "full_pack_required_stems": full_pack_required_stems,
+        "full_pack_candidate_stems": full_pack_candidate_stems,
+        "full_pack_missing_candidate_stems": full_pack_missing_stems,
+        "full_pack_action_status_counts": dict(Counter(str(row.get("action_status") or "unknown") for row in full_pack_action_rows)),
     }
     manifest = {
         "schema": "generic_audio_training_recovery_manifest.v1",
         "manifest_type": "generic_audio_training_recovery_queue",
         "artifact_root": str(artifact_root),
         "output_dir": str(output_dir),
+        "short_output_names": bool(short_output_names),
         "fingerprint": stable_hash(
             [
                 {
@@ -600,11 +813,12 @@ def build_generic_audio_training_recovery_queue(
             "corpus_manifest_json": str(corpus_manifest_json) if corpus_manifest_json else "",
             "feedback_jsonls": [str(path) for path in feedback_jsonls],
             "all_feedback_jsonls": [str(path) for path in feedback_paths],
+            "full_pack_loop_plan_json": str(full_pack_loop_plan_json) if full_pack_loop_plan_json else "",
         },
         "outputs": {
-            "queue_jsonl": str(output_dir / QUEUE_NAME),
-            "decision_template_jsonl": str(output_dir / DECISION_TEMPLATE_NAME),
-            "manifest_json": str(output_dir / MANIFEST_NAME),
+            "queue_jsonl": str(queue_path),
+            "decision_template_jsonl": str(decision_template_path),
+            "manifest_json": str(manifest_path),
             "progress_jsonl": str(progress_path),
         },
         "safety": {
@@ -614,9 +828,9 @@ def build_generic_audio_training_recovery_queue(
             "requires_permission_before_training": True,
         },
     }
-    write_jsonl(output_dir / QUEUE_NAME, rows)
-    write_jsonl(output_dir / DECISION_TEMPLATE_NAME, decision_template_rows)
-    write_json(output_dir / MANIFEST_NAME, manifest)
+    write_jsonl(queue_path, rows)
+    write_jsonl(decision_template_path, decision_template_rows)
+    write_json(manifest_path, manifest)
     progress(progress_path, "finish", **summary)
     return manifest
 
@@ -627,6 +841,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--corpus-manifest-json", type=Path)
     parser.add_argument("--feedback-jsonl", type=Path, action="append", default=[])
+    parser.add_argument("--full-pack-loop-plan-json", type=Path)
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -641,6 +857,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         corpus_manifest_json=args.corpus_manifest_json,
         feedback_jsonls=args.feedback_jsonl,
+        full_pack_loop_plan_json=args.full_pack_loop_plan_json,
+        short_output_names=bool(args.short_output_names),
     )
     print(json.dumps({"summary": manifest["summary"], "fingerprint": manifest["fingerprint"]}, ensure_ascii=False, sort_keys=True))
     return 0

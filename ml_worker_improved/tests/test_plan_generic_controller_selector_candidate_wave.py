@@ -11,6 +11,9 @@ from tools.plan_generic_controller_selector_candidate_wave import (
 )
 
 
+LONG_TRACK_ID = "baby_me_here_comes_the_hotstepper_evian_version_radio_record_baby_me_here_comes_the_hotstepper_e"
+
+
 def write_json(path: Path, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
@@ -161,3 +164,33 @@ def test_plans_candidate_wave_jobs_from_route_gap_plan(tmp_path: Path) -> None:
         "write_outputs",
         "finish",
     ]
+
+
+def test_candidate_wave_job_output_dirs_use_short_aliases_and_keep_provenance(tmp_path: Path) -> None:
+    gap_manifest = build_shadow_and_gap_plan(tmp_path)
+    selector_path = tmp_path / "shadow" / "single_cases" / "case-a" / "generic_finetuning_controller_selector_decisions.jsonl"
+    rows = read_jsonl(selector_path)
+    rows[0]["track_id"] = LONG_TRACK_ID
+    write_jsonl(selector_path, rows)
+
+    manifest = plan_candidate_wave(
+        route_gap_plan_manifest_json=gap_manifest,
+        output_dir=tmp_path / "candidate_wave",
+        device="cuda",
+        resurrection_device="cuda:0",
+        max_sources_per_route=1,
+    )
+
+    jobs = read_jsonl(tmp_path / "candidate_wave" / CANDIDATE_WAVE_JOBS_NAME)
+    assert manifest["summary"]["planned_job_count"] == 3
+    assert all(len(path.name) <= 32 for path in (tmp_path / "candidate_wave").iterdir() if path.is_file())
+    for index, row in enumerate(jobs, start=1):
+        output_dir = Path(row["output_dir"])
+        assert output_dir.parent.name == "candidate_jobs"
+        assert output_dir.name == f"j{index:03d}"
+        assert len(output_dir.name) <= 32
+        assert LONG_TRACK_ID not in str(output_dir)
+        assert row["route_id"] not in output_dir.name
+        assert row["job_alias"] == f"j{index:03d}"
+        assert row["track_id"] == LONG_TRACK_ID
+        assert row["source_ref"]["track_id"] == LONG_TRACK_ID

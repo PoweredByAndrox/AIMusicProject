@@ -383,3 +383,35 @@ def test_matrix_marks_candidate_ready_only_when_result_self_and_selector_accept(
     assert (output_dir / "no_reference_minus_candidate_score_matrix.jsonl").exists()
     assert (output_dir / "no_reference_minus_candidate_score_matrix_summary.md").exists()
     assert not list(output_dir.rglob("*.wav"))
+
+
+def test_matrix_preserves_result_judge_route_provenance_without_manifest(tmp_path: Path) -> None:
+    result_jsonl = tmp_path / "judge.jsonl"
+    minus_path = tmp_path / "minus.flac"
+    row = result_row(
+        "candidate-a",
+        manifest=tmp_path / "missing_manifest.json",
+        minus_path=minus_path,
+        minus_score=0.92,
+        confidence=0.7,
+        decision="blocked_hard_case",
+        reasons=["severe_phase_collapse"],
+    )
+    row["candidate_manifest"] = ""
+    row["route_id"] = "local_registered__becruily_instrumental_vocals__both__minus_hard_case"
+    row["route_family"] = "other_existing"
+    row["candidate_config_id"] = "local_registered__becruily_instrumental_vocals__both__minus_hard_case"
+    write_jsonl(result_jsonl, [row])
+
+    matrix = build_minus_candidate_score_matrix(
+        result_judge_jsonls=[result_jsonl],
+        self_judge_manifests=[],
+        selector_jsonls=[],
+        listen_manifests=[],
+    )
+
+    matrix_row = matrix["rows"][0]
+    assert matrix_row["model_name"] == "becruily_instrumental_vocals"
+    assert matrix_row["route_id"] == "local_registered__becruily_instrumental_vocals__both__minus_hard_case"
+    assert matrix_row["route_family"] == "other_existing"
+    assert matrix_row["candidate_config_id"] == "local_registered__becruily_instrumental_vocals__both__minus_hard_case"

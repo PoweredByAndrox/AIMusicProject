@@ -47,6 +47,163 @@ def test_select_device_fails_fast_when_cuda_requested_but_unavailable(monkeypatc
     assert module._select_device("cpu").type == "cpu"
 
 
+def test_cuda_memory_guard_fails_fast_with_progress_when_gpu_memory_is_too_low(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+    progress_path = tmp_path / "progress.jsonl"
+    monkeypatch.setattr(module.torch.cuda, "mem_get_info", lambda: (512 * 1024 * 1024, 12 * 1024 * 1024 * 1024))
+
+    with pytest.raises(RuntimeError, match="CUDA free memory is below required minimum"):
+        module._require_cuda_memory_available(
+            module.torch.device("cuda"),
+            min_free_memory_mb=4096,
+            progress_path=progress_path,
+            progress_context={"scope": "memory_guard_test"},
+            phase="unit_test",
+        )
+
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert progress_rows[-1]["event"] == "cuda_memory_guard_blocked"
+    assert progress_rows[-1]["free_memory_mb"] == 512
+    assert progress_rows[-1]["required_free_memory_mb"] == 4096
+    assert progress_rows[-1]["scope"] == "memory_guard_test"
+
+
+def test_cuda_phase_sync_writes_start_and_finish_progress(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+    progress_path = tmp_path / "progress.jsonl"
+    calls: list[str] = []
+    monkeypatch.setattr(module.torch.cuda, "synchronize", lambda device=None: calls.append(str(device)))
+
+    module._synchronize_cuda_phase(
+        progress_path,
+        {"scope": "sync_test"},
+        event_prefix="unit_phase",
+        device=module.torch.device("cuda"),
+        frame_count=123,
+    )
+
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert calls == ["cuda"]
+    assert [row["event"] for row in progress_rows] == [
+        "unit_phase_cuda_sync_start",
+        "unit_phase_cuda_sync_finish",
+    ]
+    assert progress_rows[-1]["frame_count"] == 123
+    assert progress_rows[-1]["scope"] == "sync_test"
+
+
+def test_magnitude_network_can_emit_masks_above_one_when_ceiling_allows() -> None:
+    module = _load_module()
+    model = module.TeacherMaskNetwork(
+        input_features=3,
+        frequency_bins=2,
+        hidden_size=4,
+        mask_output_mode=module.MASK_OUTPUT_MODE_MAGNITUDE,
+        mask_ceiling=1.7,
+    )
+    for parameter in model.parameters():
+        parameter.data.zero_()
+    model.layers[-1].bias.data.fill_(4.0)
+
+    prediction = model(module.torch.zeros((1, 3), dtype=module.torch.float32))
+
+    assert float(prediction.max()) > 1.0
+    assert float(prediction.max()) <= 1.70001
+
+
+def test_magnitude_residual_mask_mode_is_identity_centered_and_bounded() -> None:
+    module = _load_module()
+    model = module.TeacherMaskNetwork(
+        input_features=3,
+        frequency_bins=2,
+        hidden_size=4,
+        mask_output_mode=module.MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL,
+        mask_ceiling=1.2,
+    )
+    for parameter in model.parameters():
+        parameter.data.zero_()
+
+    prediction = model(module.torch.zeros((1, 3), dtype=module.torch.float32))
+    assert module.validate_mask_output_mode("magnitude_residual") == module.MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL
+    assert module.torch.allclose(prediction, module.torch.ones((1, 2)))
+
+    model.layers[-1].bias.data.fill_(10.0)
+    high_prediction = model(module.torch.zeros((1, 3), dtype=module.torch.float32))
+    assert float(high_prediction.max()) <= 1.20001
+
+    model.layers[-1].bias.data.fill_(-10.0)
+    low_prediction = model(module.torch.zeros((1, 3), dtype=module.torch.float32))
+    assert float(low_prediction.min()) >= 0.79999
+
+
+def test_magnitude_residual_mask_mode_requires_ceiling_above_identity() -> None:
+    module = _load_module()
+
+    with pytest.raises(ValueError, match="requires mask_ceiling > 1.0"):
+        module.TeacherMaskNetwork(
+            input_features=3,
+            frequency_bins=2,
+            hidden_size=4,
+            mask_output_mode=module.MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL,
+            mask_ceiling=1.0,
+        )
+
+
+def test_config_payload_records_source_preservation_weight() -> None:
+    module = _load_module()
+
+    payload = module._config_payload(
+        module.TeacherMaskTrainConfig(
+            source_preservation_weight=2.5,
+            device="cpu",
+        )
+    )
+
+    assert payload["source_preservation_weight"] == 2.5
+
+
+def test_source_feature_memory_projection_accepts_half_feature_storage() -> None:
+    module = _load_module()
+    model_features = module.torch.ones((3, 4), dtype=module.torch.float16)
+    projection_matrix = module.torch.full((4, 2), 0.5, dtype=module.torch.float32)
+
+    projected = module._project_source_feature_memory_features(model_features, projection_matrix)
+
+    assert projected.dtype == module.torch.float32
+    assert projected.shape == (3, 2)
+    assert module.torch.allclose(projected, module.torch.full((3, 2), 2.0))
+
+
+def test_safe_quantile_large_cuda_tensor_uses_in_bounds_sampling() -> None:
+    module = _load_module()
+    if not module.torch.cuda.is_available():
+        pytest.skip("CUDA quantile regression requires GPU Docker runtime")
+    length = 19_823_500
+    sample_count = 1_000_000
+
+    indices = module._evenly_spaced_long_indices(
+        length=length,
+        count=sample_count,
+        device=module.torch.device("cuda"),
+    )
+
+    assert int(indices.min().detach().cpu()) == 0
+    assert int(indices.max().detach().cpu()) == length - 1
+    assert not bool(((indices < 0) | (indices >= length)).any().detach().cpu())
+    values = module.torch.zeros(length, dtype=module.torch.float32, device="cuda")
+    quantile = module.safe_quantile(values, 0.90, max_values=sample_count)
+    module.torch.cuda.synchronize()
+    assert float(quantile.detach().cpu()) == 0.0
+
+
 def test_teacher_mask_training_is_reference_free_at_application_and_improves_synthetic_mix(tmp_path: Path) -> None:
     module = _load_module()
     sample_rate = 8_000
@@ -97,7 +254,26 @@ def test_teacher_mask_training_is_reference_free_at_application_and_improves_syn
     ]
     assert progress_rows[0]["event"] == "start"
     assert progress_rows[0]["expected_acceleration_mode"] == "cpu_test_training"
-    assert any(row["event"] == "train_epoch" for row in progress_rows)
+    events = [row["event"] for row in progress_rows]
+    assert "train_loop_start" in events
+    assert "train_epoch_start" in events
+    assert "train_permutation_start" in events
+    assert "train_permutation_finish" in events
+    assert "train_batch_index_select_start" in events
+    assert "train_batch_index_select_finish" in events
+    assert "train_batch_start" in events
+    assert "train_batch_feature_gather_start" in events
+    assert "train_batch_feature_gather_finish" in events
+    assert "train_batch_forward_start" in events
+    assert "train_batch_forward_finish" in events
+    assert "train_batch_loss_start" in events
+    assert "train_batch_loss_finish" in events
+    assert "train_batch_backward_start" in events
+    assert "train_batch_backward_finish" in events
+    assert "train_batch_optimizer_step_start" in events
+    assert "train_batch_optimizer_step_finish" in events
+    train_epoch_rows = [row for row in progress_rows if row["event"] == "train_epoch"]
+    assert [row["epoch"] for row in train_epoch_rows] == list(range(1, 81))
     assert progress_rows[-1]["event"] == "finish"
 
 
@@ -230,6 +406,269 @@ def test_teacher_mask_dataset_training_generalizes_to_held_out_synthetic_pair(tm
     assert diagnostics["device_used"] == 0.0
     assert metadata["input_features"] > 0
     assert apply_diagnostics["device"] == "cpu"
+
+
+def test_teacher_mask_dataset_progress_logs_every_epoch_for_observability(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 4_000
+    time = np.arange(sample_rate // 4, dtype=np.float64) / float(sample_rate)
+    target = _stereo(0.18 * np.sin(2.0 * np.pi * 520.0 * time))
+    source = target + _stereo(0.11 * np.sin(2.0 * np.pi * 130.0 * time))
+    progress_path = tmp_path / "progress.jsonl"
+
+    module.train_teacher_mask_dataset(
+        [(source, target)],
+        config=module.TeacherMaskTrainConfig(
+            n_fft=128,
+            hop_length=64,
+            hidden_size=24,
+            epochs=24,
+            batch_size=16,
+            learning_rate=0.01,
+            seed=917,
+            device="cpu",
+        ),
+        progress_path=progress_path,
+        progress_context={"scope": "observability_test"},
+        max_frames_per_pair=16,
+    )
+
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    train_epoch_rows = [row for row in progress_rows if row["event"] == "dataset_train_epoch"]
+    assert [row["epoch"] for row in train_epoch_rows] == list(range(1, 25))
+    assert all(row["scope"] == "observability_test" for row in train_epoch_rows)
+
+
+def test_teacher_mask_dataset_progress_logs_batch_heartbeat_inside_epoch(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 4_000
+    time = np.arange(sample_rate // 3, dtype=np.float64) / float(sample_rate)
+    target = _stereo(0.16 * np.sin(2.0 * np.pi * 480.0 * time))
+    source = target + _stereo(0.12 * np.sin(2.0 * np.pi * 150.0 * time))
+    progress_path = tmp_path / "progress.jsonl"
+
+    module.train_teacher_mask_dataset(
+        [(source, target)],
+        config=module.TeacherMaskTrainConfig(
+            n_fft=128,
+            hop_length=32,
+            hidden_size=16,
+            epochs=2,
+            batch_size=5,
+            learning_rate=0.01,
+            seed=918,
+            device="cpu",
+        ),
+        progress_path=progress_path,
+        progress_context={"scope": "batch_observability_test"},
+        max_frames_per_pair=24,
+    )
+
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    events = [row["event"] for row in progress_rows]
+    assert "dataset_feature_stack_start" in events
+    assert "dataset_feature_stack_finish" in events
+    assert "dataset_feature_chunks_released" in events
+    assert "dataset_model_init_start" in events
+    assert "dataset_network_construct_start" in events
+    assert "dataset_network_construct_finish" in events
+    assert "dataset_model_to_device_start" in events
+    assert "dataset_model_to_device_finish" in events
+    assert "dataset_optimizer_init_start" in events
+    assert "dataset_optimizer_init_finish" in events
+    assert "dataset_model_init_finish" in events
+    assert "dataset_training_tensor_stack_start" in events
+    assert "dataset_training_tensor_stack_finish" in events
+    assert "dataset_training_chunks_released" in events
+    assert "dataset_training_indices_start" in events
+    assert "dataset_training_indices_finish" in events
+    assert "dataset_train_loop_start" in events
+    assert "dataset_train_epoch_start" in events
+    assert "dataset_train_permutation_start" in events
+    assert "dataset_train_permutation_finish" in events
+    assert "dataset_feature_stats_start" in events
+    assert "dataset_feature_stats_finish" in events
+    assert "dataset_feature_normalize_start" in events
+    assert "dataset_feature_normalize_finish" in events
+    assert "dataset_train_batch_index_select_start" in events
+    assert "dataset_train_batch_index_select_finish" in events
+    assert "dataset_train_batch_start" in events
+    assert "dataset_train_batch_feature_gather_start" in events
+    assert "dataset_train_batch_feature_gather_finish" in events
+    assert "dataset_train_batch_forward_start" in events
+    assert "dataset_train_batch_forward_finish" in events
+    assert "dataset_train_batch_loss_start" in events
+    assert "dataset_train_batch_loss_finish" in events
+    assert "dataset_train_batch_backward_start" in events
+    assert "dataset_train_batch_backward_finish" in events
+    assert "dataset_train_batch_optimizer_step_start" in events
+    assert "dataset_train_batch_optimizer_step_finish" in events
+    permutation_rows = [row for row in progress_rows if row["event"] == "dataset_train_permutation_finish"]
+    assert {row["epoch"] for row in permutation_rows} == {1, 2}
+    assert all(row["training_device"] == "cpu" for row in permutation_rows)
+    batch_start_rows = [row for row in progress_rows if row["event"] == "dataset_train_batch_start"]
+    assert batch_start_rows[0]["epoch"] == 1
+    assert batch_start_rows[0]["batch_index"] == 1
+    select_start_rows = [
+        row for row in progress_rows if row["event"] == "dataset_train_batch_index_select_start"
+    ]
+    assert select_start_rows[0]["epoch"] == 1
+    assert select_start_rows[0]["batch_index"] == 1
+    heartbeat_rows = [row for row in progress_rows if row["event"] == "dataset_train_batch_heartbeat"]
+    assert heartbeat_rows
+    assert {row["epoch"] for row in heartbeat_rows} == {1, 2}
+    assert all(row["batch_count"] >= row["batch_index"] >= 1 for row in heartbeat_rows)
+    last_batch_rows = [row for row in heartbeat_rows if row["batch_index"] == row["batch_count"]]
+    assert {row["epoch"] for row in last_batch_rows} == {1, 2}
+    assert all(row["scope"] == "batch_observability_test" for row in heartbeat_rows)
+    feature_stack_finish = next(row for row in progress_rows if row["event"] == "dataset_feature_stack_finish")
+    feature_normalize_finish = next(row for row in progress_rows if row["event"] == "dataset_feature_normalize_finish")
+    assert feature_stack_finish["normalization_strategy"] == "chunked_cpu_low_peak"
+    assert feature_normalize_finish["normalization_strategy"] == "chunked_cpu_low_peak"
+
+
+def test_teacher_mask_dataset_cuda_keeps_precomputed_tensors_cpu_resident(tmp_path: Path) -> None:
+    module = _load_module()
+    if not module.torch.cuda.is_available():
+        pytest.skip("CUDA dataset residency test requires GPU Docker runtime")
+    sample_rate = 4_000
+    time = np.arange(sample_rate // 4, dtype=np.float64) / float(sample_rate)
+    target = _stereo(0.14 * np.sin(2.0 * np.pi * 420.0 * time))
+    source = target + _stereo(0.08 * np.sin(2.0 * np.pi * 120.0 * time))
+    progress_path = tmp_path / "progress.jsonl"
+
+    module.train_teacher_mask_dataset(
+        [(source, target)],
+        config=module.TeacherMaskTrainConfig(
+            n_fft=256,
+            hop_length=64,
+            hidden_size=8,
+            epochs=1,
+            batch_size=8,
+            learning_rate=0.01,
+            seed=919,
+            device="cuda",
+        ),
+        progress_path=progress_path,
+        progress_context={"scope": "cuda_residency_test"},
+        max_frames_per_pair=16,
+    )
+
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    events = [row["event"] for row in progress_rows]
+    stack_finish = next(row for row in progress_rows if row["event"] == "dataset_training_tensor_stack_finish")
+    transfer_finish = next(row for row in progress_rows if row["event"] == "dataset_train_batch_to_device_finish")
+
+    assert stack_finish["training_tensor_storage_device"] == "cpu"
+    assert stack_finish["training_tensor_storage_dtype"] == "torch.float16"
+    assert stack_finish["complex_training_tensor_stored"] is False
+    assert "dataset_train_batch_to_device_start" in events
+    assert "dataset_train_batch_to_device_finish" in events
+    assert transfer_finish["training_tensor_storage_device"] == "cpu"
+    assert transfer_finish["training_device"] == "cuda"
+
+
+def test_teacher_mask_dataset_complex_output_mode_applies_complex_mask(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    time = np.arange(sample_rate, dtype=np.float64) / float(sample_rate)
+    train_target = _stereo(0.16 * np.sin(2.0 * np.pi * 720.0 * time + 0.45))
+    train_source = train_target + _stereo(0.20 * np.sin(2.0 * np.pi * 180.0 * time))
+    holdout_target = _stereo(0.16 * np.sin(2.0 * np.pi * 720.0 * time + 0.45))
+    holdout_source = holdout_target + _stereo(0.18 * np.sin(2.0 * np.pi * 210.0 * time))
+    config = module.TeacherMaskTrainConfig(
+        n_fft=256,
+        hop_length=64,
+        hidden_size=64,
+        epochs=18,
+        batch_size=64,
+        learning_rate=0.01,
+        mask_output_mode="complex",
+        complex_mask_ceiling=2.5,
+        seed=918,
+        device="cpu",
+    )
+
+    model, metadata, diagnostics = module.train_teacher_mask_dataset(
+        [(train_source, train_target)],
+        config=config,
+        max_frames_per_pair=96,
+    )
+    output_audio, apply_diagnostics = module.apply_teacher_mask(
+        holdout_source,
+        model=model,
+        metadata=metadata,
+        config=config,
+    )
+
+    assert output_audio.shape == holdout_source.shape
+    assert np.isfinite(output_audio).all()
+    assert float(np.max(np.abs(output_audio))) > 1.0e-6
+    assert metadata["mask_output_mode"] == "complex"
+    assert diagnostics["mask_output_mode"] == "complex"
+    assert apply_diagnostics["mask_output_mode"] == "complex"
+    assert apply_diagnostics["complex_mask_used"] is True
+    assert apply_diagnostics["complex_mask_ceiling"] == 2.5
+
+
+def test_teacher_mask_dataset_complex_output_mode_uses_source_feature_memory(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    time = np.arange(sample_rate, dtype=np.float64) / float(sample_rate)
+    train_target = _stereo(0.11 * np.sin(2.0 * np.pi * 620.0 * time + 0.2))
+    train_source = train_target + _stereo(0.14 * np.sin(2.0 * np.pi * 170.0 * time))
+    holdout_target = _stereo(0.11 * np.sin(2.0 * np.pi * 620.0 * time + 0.2))
+    holdout_source = holdout_target + _stereo(0.12 * np.sin(2.0 * np.pi * 190.0 * time))
+    config = module.TeacherMaskTrainConfig(
+        n_fft=256,
+        hop_length=64,
+        hidden_size=48,
+        epochs=8,
+        batch_size=64,
+        mask_output_mode="complex",
+        complex_mask_ceiling=2.0,
+        source_feature_memory_neighbors=1,
+        source_feature_memory_chunk_size=32,
+        source_feature_memory_projection_dim=8,
+        source_feature_memory_max_frames=48,
+        seed=2424,
+        device="cpu",
+    )
+
+    model, metadata, diagnostics = module.train_teacher_mask_dataset(
+        [(train_source, train_target)],
+        config=config,
+        max_frames_per_pair=96,
+    )
+    output_audio, apply_diagnostics = module.apply_teacher_mask(
+        holdout_source,
+        model=model,
+        metadata=metadata,
+        config=config,
+    )
+
+    assert output_audio.shape == holdout_source.shape
+    assert metadata["mask_output_mode"] == "complex"
+    assert "source_feature_memory_complex_frame_mask_real" in metadata
+    assert "source_feature_memory_complex_frame_mask_imag" in metadata
+    assert diagnostics["source_feature_memory_frame_count"] == 48.0
+    assert apply_diagnostics["source_feature_memory_used"] is True
+    assert apply_diagnostics["source_feature_memory_complex_frame_mask_available"] is True
+    assert apply_diagnostics["source_feature_memory_complex_frame_mask_used"] is True
+    assert apply_diagnostics["complex_mask_used"] is False
+    assert _sdr(holdout_target, output_audio) > _sdr(holdout_target, holdout_source) + 3.0
 
 
 def test_teacher_mask_training_balances_sparse_target_frames(tmp_path: Path) -> None:
@@ -618,6 +1057,124 @@ def test_teacher_mask_checkpoint_application_uses_no_teacher_target(tmp_path: Pa
     assert applied_manifest["contract"]["target_reference_used_at_application"] is False
     assert applied_manifest["contract"]["application_reference_free"] is True
     assert applied_manifest["contract"]["delivery_allowed_without_reference"] is False
+
+
+def test_teacher_mask_checkpoint_application_blocks_excessive_source_memory_search(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    time = np.arange(sample_rate // 2, dtype=np.float64) / float(sample_rate)
+    target = _stereo(0.025 * np.sin(2.0 * np.pi * 920.0 * time))
+    source_mix = target + _stereo(0.34 * np.sin(2.0 * np.pi * 190.0 * time))
+    holdout_mix = _stereo(
+        0.31 * np.sin(2.0 * np.pi * 310.0 * time)
+        + 0.18 * np.sin(2.0 * np.pi * 1240.0 * time)
+    )
+    source_path = tmp_path / "source_mix.flac"
+    target_path = tmp_path / "teacher_target.flac"
+    holdout_path = tmp_path / "holdout_mix.flac"
+    _write_audio(source_path, source_mix, sample_rate)
+    _write_audio(target_path, target, sample_rate)
+    _write_audio(holdout_path, holdout_mix, sample_rate)
+
+    trained_manifest = module.train_and_apply_teacher_mask_separator(
+        source_mix_path=source_path,
+        teacher_target_path=target_path,
+        output_dir=tmp_path / "trained",
+        stem_name="strings_orchestra",
+        train_config=module.TeacherMaskTrainConfig(
+            n_fft=256,
+            hop_length=64,
+            hidden_size=64,
+            epochs=4,
+            batch_size=64,
+            source_feature_memory_neighbors=1,
+            source_feature_memory_chunk_size=64,
+            device="cpu",
+        ),
+        command_args=[],
+    )
+    progress_path = tmp_path / "applied" / "checkpoint_application_progress.jsonl"
+
+    with pytest.raises(RuntimeError, match="source_feature_memory_cost_guard"):
+        module.apply_teacher_mask_checkpoint_to_source(
+            source_mix_path=holdout_path,
+            checkpoint_path=Path(trained_manifest["training"]["checkpoint_path"]),
+            output_dir=tmp_path / "applied",
+            stem_name="strings_orchestra",
+            device="cpu",
+            command_args=[],
+            progress_path=progress_path,
+            max_source_feature_memory_distance_ops=1,
+        )
+
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    events = [row["event"] for row in progress_rows]
+    assert "checkpoint_application_start" in events
+    assert "apply_feature_extraction_finish" in events
+    assert "source_feature_memory_search_start" in events
+    assert "source_feature_memory_search_blocked" in events
+    assert not (tmp_path / "applied" / "01_teacher_mask_checkpoint_strings_orchestra.flac").exists()
+
+
+def test_teacher_mask_source_feature_memory_projection_and_frame_cap_are_persisted(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    time = np.arange(sample_rate, dtype=np.float64) / float(sample_rate)
+    target = _stereo(0.03 * np.sin(2.0 * np.pi * 910.0 * time))
+    source_mix = target + _stereo(0.32 * np.sin(2.0 * np.pi * 170.0 * time))
+    holdout_mix = target + _stereo(0.28 * np.sin(2.0 * np.pi * 230.0 * time))
+    source_path = tmp_path / "source_mix.flac"
+    target_path = tmp_path / "teacher_target.flac"
+    holdout_path = tmp_path / "holdout_mix.flac"
+    _write_audio(source_path, source_mix, sample_rate)
+    _write_audio(target_path, target, sample_rate)
+    _write_audio(holdout_path, holdout_mix, sample_rate)
+
+    manifest = module.train_and_apply_teacher_mask_separator(
+        source_mix_path=source_path,
+        teacher_target_path=target_path,
+        output_dir=tmp_path / "trained",
+        stem_name="vocal",
+        train_config=module.TeacherMaskTrainConfig(
+            n_fft=256,
+            hop_length=64,
+            hidden_size=64,
+            epochs=4,
+            batch_size=64,
+            source_feature_memory_neighbors=2,
+            source_feature_memory_chunk_size=32,
+            source_feature_memory_projection_dim=8,
+            source_feature_memory_max_frames=5,
+            device="cpu",
+        ),
+        command_args=[],
+    )
+    checkpoint = module.torch.load(manifest["training"]["checkpoint_path"], map_location="cpu", weights_only=False)
+    metadata = checkpoint["metadata"]
+    assert checkpoint["config"]["source_feature_memory_projection_dim"] == 8
+    assert checkpoint["config"]["source_feature_memory_max_frames"] == 5
+    assert metadata["source_feature_memory_features"].shape == (5, 8)
+    assert metadata["source_feature_memory_masks"].shape[0] == 5
+    assert metadata["source_feature_memory_projection_matrix"].shape[1] == 8
+    assert metadata["source_feature_memory_selected_indices"].shape[0] == 5
+
+    applied_manifest = module.apply_teacher_mask_checkpoint_to_source(
+        source_mix_path=holdout_path,
+        checkpoint_path=Path(manifest["training"]["checkpoint_path"]),
+        output_dir=tmp_path / "applied",
+        stem_name="vocal",
+        device="cpu",
+        command_args=[],
+    )
+    diagnostics = applied_manifest["application"]["diagnostics"]
+    assert diagnostics["source_feature_memory_used"] is True
+    assert diagnostics["source_feature_memory_frame_count"] == 5
+    assert diagnostics["source_feature_memory_projection_dim"] == 8
+    assert diagnostics["source_feature_memory_max_frames"] == 5
 
 
 def test_teacher_mask_checkpoint_skips_complex_memory_on_non_matching_source(tmp_path: Path) -> None:

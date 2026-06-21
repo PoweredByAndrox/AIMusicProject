@@ -11,6 +11,7 @@ from tools.run_no_reference_windowed_judge import (
     aggregate_metrics,
     judge_candidate_rows_windowed,
     select_windows,
+    window_metric_summary,
     write_outputs,
     write_outputs_streaming,
 )
@@ -369,6 +370,34 @@ def test_aggregate_metrics_adds_minus_score_mode_fields() -> None:
     assert result["decision"] == "blocked_hard_case"
 
 
+def test_aggregate_minus_detail_gate_blocker_overrides_accept_decision() -> None:
+    result = aggregate_metrics(
+        [
+            {
+                "mixture_consistency_score": 0.60,
+                "vocal_leakage_in_minus_score": 0.03,
+                "instrumental_leakage_in_vocal_score": 0.05,
+                "vocal_activity_confidence": 0.86,
+                "silence_hallucination_score": 0.04,
+                "robotic_artifact_score": 0.04,
+                "thin_vocal_score": 0.08,
+                "transient_damage_score": 0.06,
+                "phase_consistency_score": 0.92,
+                "instrumental_phase_consistency_score": 0.92,
+                "confidence": 0.82,
+                "reasons": ["no_reference_proxy_passed"],
+            }
+        ],
+        score_mode="minus",
+    )
+
+    assert result["minus_musical_detail_preservation_gate"]["status"] == "proxy_blocked"
+    assert result["minus_decision"] == "blocked_hard_case"
+    assert result["decision"] == "blocked_hard_case"
+    assert "minus_detail_gate_blocked" in result["minus_blockers"]
+    assert "minus_detail_gate_blocked" in result["reasons"]
+
+
 def test_aggregate_minus_mode_uses_instrumental_phase_not_pair_phase() -> None:
     result = aggregate_metrics(
         [
@@ -429,12 +458,10 @@ def test_aggregate_both_mode_accepts_pair_compatible_without_shared_score_cutoff
 
 
 def test_window_metric_summary_uses_mode_specific_fitness() -> None:
-    from tools.run_no_reference_windowed_judge import window_metric_summary
-
     window = {"kind": "middle", "start_sec": 0.0, "duration_sec": 12.0}
     metrics = {
         "mixture_consistency_score": 0.92,
-        "vocal_leakage_in_minus_score": 0.88,
+        "vocal_leakage_in_minus_score": 0.45,
         "instrumental_leakage_in_vocal_score": 0.05,
         "vocal_activity_confidence": 0.86,
         "silence_hallucination_score": 0.04,
@@ -452,6 +479,33 @@ def test_window_metric_summary_uses_mode_specific_fitness() -> None:
     assert vocal["window_fitness"] == vocal["vocal_score"]
     assert minus["window_fitness"] == minus["minus_score"]
     assert vocal["window_fitness"] > minus["window_fitness"]
+
+
+def test_window_metric_summary_minus_detail_gate_blocks_window() -> None:
+    window = {"kind": "middle", "start_sec": 0.0, "duration_sec": 12.0}
+    metrics = {
+        "mixture_consistency_score": 0.60,
+        "vocal_leakage_in_minus_score": 0.03,
+        "instrumental_leakage_in_vocal_score": 0.05,
+        "vocal_activity_confidence": 0.86,
+        "silence_hallucination_score": 0.04,
+        "robotic_artifact_score": 0.04,
+        "thin_vocal_score": 0.08,
+        "transient_damage_score": 0.06,
+        "phase_consistency_score": 0.92,
+        "instrumental_phase_consistency_score": 0.92,
+        "confidence": 0.82,
+        "decision": "accept_candidate",
+        "reasons": ["no_reference_proxy_passed"],
+    }
+
+    minus = window_metric_summary(window, metrics, score_mode="minus")
+
+    assert minus["minus_musical_detail_preservation_gate"]["status"] == "proxy_blocked"
+    assert minus["minus_decision"] == "blocked_hard_case"
+    assert minus["decision"] == "blocked_hard_case"
+    assert minus["window_fitness"] == 0.0
+    assert "minus_detail_gate_blocked" in minus["reasons"]
 
 
 def test_streaming_checkpoint_key_depends_on_score_mode(tmp_path: Path) -> None:

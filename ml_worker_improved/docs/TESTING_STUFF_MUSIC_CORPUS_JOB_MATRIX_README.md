@@ -181,12 +181,11 @@ collapsing into one matrix record when they share the same source pool.
 
 Executor outputs:
 
-- `testing_stuff_music_corpus_job_execution_results.jsonl`
-- `testing_stuff_music_corpus_job_execution_manifest.json`
-- `testing_stuff_music_corpus_job_execution_summary.md`
-- `testing_stuff_music_corpus_job_execution_progress.jsonl`
-- `testing_stuff_music_corpus_job_execution_skipped.jsonl` when blocked jobs are
-  encountered
+- `rows.jsonl`
+- `manifest.json`
+- `summary.md`
+- `progress.jsonl`
+- `skipped.jsonl` when blocked jobs are encountered
 
 Diagnostic-only status:
 

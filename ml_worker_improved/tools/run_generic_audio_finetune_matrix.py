@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import re
@@ -19,7 +20,7 @@ from tools.train_generic_audio_teacher_mask_adapter import (
     RUN_ROWS_NAME,
     train_generic_audio_teacher_mask_adapter,
 )
-from tools.train_teacher_mask_separator import TeacherMaskTrainConfig
+from tools.train_teacher_mask_separator import DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS, TeacherMaskTrainConfig
 from tools.validate_generic_audio_finetune_holdout import (
     validate_generic_audio_finetune_holdout,
 )
@@ -45,17 +46,26 @@ INT_CONFIG_FIELDS = {
     "context_frame_radius",
     "source_feature_memory_neighbors",
     "source_feature_memory_chunk_size",
+    "source_feature_memory_projection_dim",
+    "source_feature_memory_max_frames",
+    "min_cuda_free_memory_mb",
     "seed",
 }
 FLOAT_CONFIG_FIELDS = {
     "learning_rate",
     "mask_ceiling",
+    "complex_mask_ceiling",
     "activity_weight",
     "leakage_suppression_weight",
     "magnitude_loss_weight",
+    "source_preservation_weight",
     "max_peak",
 }
-TRAIN_CONFIG_FIELDS = INT_CONFIG_FIELDS | FLOAT_CONFIG_FIELDS
+STR_CONFIG_FIELDS = {
+    "mask_output_mode",
+    "source_candidate_family_filter",
+}
+TRAIN_CONFIG_FIELDS = INT_CONFIG_FIELDS | FLOAT_CONFIG_FIELDS | STR_CONFIG_FIELDS
 
 
 def read_json(path: Path) -> Any:
@@ -108,6 +118,84 @@ def progress(path: Path, event: str, *, device: str, require_gpu: bool, **fields
         handle.flush()
 
 
+def _release_cuda_between_matrix_phases(
+    *,
+    progress_path: Path,
+    device: str,
+    require_gpu: bool,
+    cleanup_phase: str,
+    config_index: int,
+    config_id: str,
+) -> None:
+    progress(
+        progress_path,
+        "cuda_phase_cleanup_start",
+        device=device,
+        require_gpu=require_gpu,
+        cleanup_phase=cleanup_phase,
+        config_index=config_index,
+        config_id=config_id,
+    )
+    if str(device) != "cuda":
+        progress(
+            progress_path,
+            "cuda_phase_cleanup_finish",
+            device=device,
+            require_gpu=require_gpu,
+            cleanup_phase=cleanup_phase,
+            config_index=config_index,
+            config_id=config_id,
+            cleanup_performed=False,
+            cuda_available=False,
+            skip_reason="device_not_cuda",
+        )
+        return
+    try:
+        import torch
+
+        gc.collect()
+        cuda_available = bool(torch.cuda.is_available())
+        if cuda_available:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+            torch.cuda.synchronize()
+            free_memory, total_memory = torch.cuda.mem_get_info()
+            free_memory_mb = int(free_memory // (1024 * 1024))
+            total_memory_mb = int(total_memory // (1024 * 1024))
+        else:
+            free_memory_mb = None
+            total_memory_mb = None
+        gc.collect()
+        progress(
+            progress_path,
+            "cuda_phase_cleanup_finish",
+            device=device,
+            require_gpu=require_gpu,
+            cleanup_phase=cleanup_phase,
+            config_index=config_index,
+            config_id=config_id,
+            cleanup_performed=cuda_available,
+            cuda_available=cuda_available,
+            free_memory_mb=free_memory_mb,
+            total_memory_mb=total_memory_mb,
+        )
+    except Exception as exc:
+        progress(
+            progress_path,
+            "cuda_phase_cleanup_failed",
+            device=device,
+            require_gpu=require_gpu,
+            cleanup_phase=cleanup_phase,
+            config_index=config_index,
+            config_id=config_id,
+            error=str(exc),
+        )
+        if require_gpu:
+            raise
+
+
 def resolve_existing_file(path: Path, *, label: str) -> Path:
     resolved = path if path.is_absolute() else Path.cwd() / path
     if not resolved.exists() or not resolved.is_file():
@@ -157,6 +245,10 @@ def _int_config(config: dict[str, Any], field: str, default: int) -> int:
 
 def _float_config(config: dict[str, Any], field: str, default: float) -> float:
     return float(config.get(field, default))
+
+
+def _str_config(config: dict[str, Any], field: str, default: str) -> str:
+    return str(config.get(field, default))
 
 
 def _unknown_config_fields(config: dict[str, Any]) -> list[str]:
@@ -267,6 +359,7 @@ def _nested_train_command_args(
     config_id: str,
     config_scope: str,
     audio_training_examples_jsonl: Path,
+    pseudo_teacher_examples_jsonl: Path | None,
     train_dir: Path,
     stem: str,
     device: str,
@@ -286,6 +379,8 @@ def _nested_train_command_args(
         "--device",
         device,
     ]
+    if pseudo_teacher_examples_jsonl is not None:
+        args.extend(["--pseudo-teacher-examples-jsonl", str(pseudo_teacher_examples_jsonl)])
     for key in sorted(config):
         if key in {"id", "config_id", "label", "notes"}:
             continue
@@ -307,6 +402,8 @@ def _nested_holdout_command_args(
     min_improvement_db: float,
     min_checkpoint_pass_rate: float,
     max_holdouts_per_checkpoint: int,
+    max_source_feature_memory_distance_ops: int,
+    source_candidate_family_filter: str,
 ) -> list[str]:
     args = [
         "--matrix-config-id",
@@ -331,7 +428,11 @@ def _nested_holdout_command_args(
         str(min_checkpoint_pass_rate),
         "--max-holdouts-per-checkpoint",
         str(max_holdouts_per_checkpoint),
+        "--max-source-feature-memory-distance-ops",
+        str(max_source_feature_memory_distance_ops),
     ]
+    if source_candidate_family_filter:
+        args.extend(["--source-candidate-family-filter", str(source_candidate_family_filter)])
     if not require_gpu:
         args.append("--allow-non-gpu")
     return args
@@ -341,6 +442,7 @@ def run_generic_audio_finetune_matrix(
     *,
     audio_training_examples_jsonl: Path,
     config_matrix_json: Path,
+    pseudo_teacher_examples_jsonl: Path | None = None,
     output_dir: Path,
     stem: str,
     scope: str,
@@ -352,12 +454,18 @@ def run_generic_audio_finetune_matrix(
     min_improvement_db: float = 0.5,
     min_checkpoint_pass_rate: float = 1.0,
     max_holdouts_per_checkpoint: int = 2,
+    max_source_feature_memory_distance_ops: int = DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     stem = validate_stem_name(stem)
     if require_gpu and str(device) != "cuda":
         raise ValueError("require_gpu=true requires --device cuda for production matrix runs")
     audio_training_examples_jsonl = resolve_existing_file(audio_training_examples_jsonl, label="audio_training_examples_jsonl")
+    if pseudo_teacher_examples_jsonl is not None:
+        pseudo_teacher_examples_jsonl = resolve_existing_file(
+            pseudo_teacher_examples_jsonl,
+            label="pseudo_teacher_examples_jsonl",
+        )
     config_matrix_json = resolve_existing_file(config_matrix_json, label="config_matrix_json")
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
@@ -371,6 +479,7 @@ def run_generic_audio_finetune_matrix(
         device=device,
         require_gpu=require_gpu,
         audio_training_examples_jsonl=str(audio_training_examples_jsonl),
+        pseudo_teacher_examples_jsonl=str(pseudo_teacher_examples_jsonl or ""),
         config_matrix_json=str(config_matrix_json),
         stem=stem,
         scope=scope,
@@ -398,6 +507,15 @@ def run_generic_audio_finetune_matrix(
             scope=config_scope,
         )
         try:
+            if config_index > 1:
+                _release_cuda_between_matrix_phases(
+                    progress_path=progress_path,
+                    device=device,
+                    require_gpu=require_gpu,
+                    cleanup_phase="before_next_config_training",
+                    config_index=config_index,
+                    config_id=config_id,
+                )
             if unknown_fields:
                 raise ValueError(f"unknown matrix config fields for {config_id}: {', '.join(unknown_fields)}")
             training_attempt_count += 1
@@ -405,6 +523,7 @@ def run_generic_audio_finetune_matrix(
                 config_id=config_id,
                 config_scope=config_scope,
                 audio_training_examples_jsonl=audio_training_examples_jsonl,
+                pseudo_teacher_examples_jsonl=pseudo_teacher_examples_jsonl,
                 train_dir=train_dir,
                 stem=stem,
                 device=device,
@@ -412,6 +531,7 @@ def run_generic_audio_finetune_matrix(
             )
             train_manifest = train_generic_audio_teacher_mask_adapter(
                 audio_training_examples_jsonl=audio_training_examples_jsonl,
+                pseudo_teacher_examples_jsonl=pseudo_teacher_examples_jsonl,
                 output_dir=train_dir,
                 stem=stem,
                 scope=config_scope,
@@ -426,6 +546,12 @@ def run_generic_audio_finetune_matrix(
                 batch_size=_int_config(config, "batch_size", TeacherMaskTrainConfig.batch_size),
                 learning_rate=_float_config(config, "learning_rate", TeacherMaskTrainConfig.learning_rate),
                 mask_ceiling=_float_config(config, "mask_ceiling", TeacherMaskTrainConfig.mask_ceiling),
+                mask_output_mode=_str_config(config, "mask_output_mode", TeacherMaskTrainConfig.mask_output_mode),
+                complex_mask_ceiling=_float_config(
+                    config,
+                    "complex_mask_ceiling",
+                    TeacherMaskTrainConfig.complex_mask_ceiling,
+                ),
                 activity_weight=_float_config(config, "activity_weight", TeacherMaskTrainConfig.activity_weight),
                 leakage_suppression_weight=_float_config(
                     config,
@@ -436,6 +562,11 @@ def run_generic_audio_finetune_matrix(
                     config,
                     "magnitude_loss_weight",
                     TeacherMaskTrainConfig.magnitude_loss_weight,
+                ),
+                source_preservation_weight=_float_config(
+                    config,
+                    "source_preservation_weight",
+                    TeacherMaskTrainConfig.source_preservation_weight,
                 ),
                 active_frame_oversample=_int_config(
                     config,
@@ -453,12 +584,36 @@ def run_generic_audio_finetune_matrix(
                     "source_feature_memory_chunk_size",
                     TeacherMaskTrainConfig.source_feature_memory_chunk_size,
                 ),
+                source_feature_memory_projection_dim=_int_config(
+                    config,
+                    "source_feature_memory_projection_dim",
+                    TeacherMaskTrainConfig.source_feature_memory_projection_dim,
+                ),
+                source_feature_memory_max_frames=_int_config(
+                    config,
+                    "source_feature_memory_max_frames",
+                    TeacherMaskTrainConfig.source_feature_memory_max_frames,
+                ),
+                min_cuda_free_memory_mb=_int_config(
+                    config,
+                    "min_cuda_free_memory_mb",
+                    TeacherMaskTrainConfig.min_cuda_free_memory_mb,
+                ),
                 max_peak=_float_config(config, "max_peak", TeacherMaskTrainConfig.max_peak),
+                source_candidate_family_filter=_str_config(config, "source_candidate_family_filter", ""),
                 seed=_int_config(config, "seed", TeacherMaskTrainConfig.seed),
                 device=device,
                 command_args=train_command_args,
             )
             successful_training_count += 1
+            _release_cuda_between_matrix_phases(
+                progress_path=progress_path,
+                device=device,
+                require_gpu=require_gpu,
+                cleanup_phase="after_training_before_holdout",
+                config_index=config_index,
+                config_id=config_id,
+            )
         except Exception as exc:
             row = _matrix_row_from_failure(config=config, config_scope=config_scope, error=exc, phase="training")
             rows.append(row)
@@ -490,6 +645,8 @@ def run_generic_audio_finetune_matrix(
                 min_improvement_db=min_improvement_db,
                 min_checkpoint_pass_rate=min_checkpoint_pass_rate,
                 max_holdouts_per_checkpoint=max_holdouts_per_checkpoint,
+                max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
+                source_candidate_family_filter=_str_config(config, "source_candidate_family_filter", ""),
             )
             holdout_manifest = validate_generic_audio_finetune_holdout(
                 run_rows_jsonl=run_rows_jsonl,
@@ -504,6 +661,8 @@ def run_generic_audio_finetune_matrix(
                 min_checkpoint_pass_rate=min_checkpoint_pass_rate,
                 max_checkpoints=0,
                 max_holdouts_per_checkpoint=max_holdouts_per_checkpoint,
+                max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
+                source_candidate_family_filter=_str_config(config, "source_candidate_family_filter", ""),
                 command_args=holdout_command_args,
             )
             holdout_rows = read_jsonl(Path(str(holdout_manifest.get("holdout_rows_jsonl") or "")))
@@ -550,8 +709,24 @@ def run_generic_audio_finetune_matrix(
                 "delivery_allowed": False,
                 "release_ready": False,
             }
+            _release_cuda_between_matrix_phases(
+                progress_path=progress_path,
+                device=device,
+                require_gpu=require_gpu,
+                cleanup_phase="after_holdout_before_next_config",
+                config_index=config_index,
+                config_id=config_id,
+            )
         except Exception as exc:
             row = _matrix_row_from_failure(config=config, config_scope=config_scope, error=exc, phase="holdout")
+            _release_cuda_between_matrix_phases(
+                progress_path=progress_path,
+                device=device,
+                require_gpu=require_gpu,
+                cleanup_phase="after_holdout_failure_before_next_config",
+                config_index=config_index,
+                config_id=config_id,
+            )
         rows.append(row)
         progress(
             progress_path,
@@ -572,6 +747,7 @@ def run_generic_audio_finetune_matrix(
         "schema": "generic_audio_finetune_matrix_manifest.v1",
         "manifest_type": "generic_audio_finetune_matrix",
         "audio_training_examples_jsonl": str(audio_training_examples_jsonl),
+        "pseudo_teacher_examples_jsonl": str(pseudo_teacher_examples_jsonl or ""),
         "config_matrix_json": str(config_matrix_json),
         "output_dir": str(output_dir),
         "stem": stem,
@@ -592,6 +768,7 @@ def run_generic_audio_finetune_matrix(
             "min_improvement_db": float(min_improvement_db),
             "min_checkpoint_pass_rate": float(min_checkpoint_pass_rate),
             "max_holdouts_per_checkpoint": int(max_holdouts_per_checkpoint),
+            "max_source_feature_memory_distance_ops": int(max_source_feature_memory_distance_ops),
         },
         "training_started": training_attempt_count > 0,
         "fine_tune_started": training_attempt_count > 0,
@@ -601,6 +778,12 @@ def run_generic_audio_finetune_matrix(
         "presentation_status": "training_matrix_artifact_not_for_listen_pack",
         "release_status": "blocked_until_holdout_and_promotion_gates",
         "release_ready": False,
+        "contract": {
+            "pseudo_teacher_rows_allowed_for_training": pseudo_teacher_examples_jsonl is not None,
+            "pseudo_teacher_rows_not_used_for_holdout": True,
+            "holdout_uses_verified_examples_only": True,
+            "dirty_stems_never_ground_truth": True,
+        },
         "matrix_rows_jsonl": str(rows_path),
         "progress_jsonl": str(progress_path),
         "provenance": {
@@ -628,6 +811,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Run a reproducible shared teacher-mask adapter config matrix and holdout gate."
     )
     parser.add_argument("--audio-training-examples-jsonl", type=Path, required=True)
+    parser.add_argument("--pseudo-teacher-examples-jsonl", type=Path)
     parser.add_argument("--config-matrix-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--stem", required=True)
@@ -640,6 +824,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-improvement-db", type=float, default=0.5)
     parser.add_argument("--min-checkpoint-pass-rate", type=float, default=1.0)
     parser.add_argument("--max-holdouts-per-checkpoint", type=int, default=2)
+    parser.add_argument(
+        "--max-source-feature-memory-distance-ops",
+        type=int,
+        default=DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
+    )
     parser.add_argument("--fail-on-no-passing-config", action="store_true")
     return parser
 
@@ -655,6 +844,7 @@ def main(argv: list[str] | None = None) -> int:
     scope = str(args.scope or f"{args.stem}_shared_teacher_mask_adapter_matrix")
     manifest = run_generic_audio_finetune_matrix(
         audio_training_examples_jsonl=args.audio_training_examples_jsonl,
+        pseudo_teacher_examples_jsonl=args.pseudo_teacher_examples_jsonl,
         config_matrix_json=args.config_matrix_json,
         output_dir=args.output_dir,
         stem=str(args.stem),
@@ -667,6 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         min_improvement_db=float(args.min_improvement_db),
         min_checkpoint_pass_rate=float(args.min_checkpoint_pass_rate),
         max_holdouts_per_checkpoint=int(args.max_holdouts_per_checkpoint),
+        max_source_feature_memory_distance_ops=int(args.max_source_feature_memory_distance_ops),
         command_args=command_args,
     )
     print(

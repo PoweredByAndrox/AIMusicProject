@@ -35,6 +35,12 @@ SAFETY_FLAGS = {
     "thresholds_relaxed": False,
     "release_ready": False,
 }
+MANIFEST_NAME = "pair_reconstruction_repair_manifest.json"
+CANDIDATE_ROW_NAME = "candidate_pair.jsonl"
+MINUS_AUDIO_NAME = "pair_reconstruction_minus.flac"
+SHORT_MANIFEST_NAME = "manifest.json"
+SHORT_CANDIDATE_ROW_NAME = "rows.jsonl"
+SHORT_MINUS_AUDIO_NAME = "m001.flac"
 
 
 def progress(phase: str, **fields: Any) -> None:
@@ -248,6 +254,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--track-id")
     parser.add_argument("--residual-strength", type=float, default=1.0)
     parser.add_argument("--max-peak", type=float, default=0.999)
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -259,9 +266,10 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
     windowed_pair_judge_jsonl = (
         Path(args.windowed_pair_judge_jsonl) if args.windowed_pair_judge_jsonl else None
     )
-    manifest_path = output_dir / "pair_reconstruction_repair_manifest.json"
-    candidate_row_jsonl = output_dir / "candidate_pair.jsonl"
-    output_path = output_dir / "pair_reconstruction_minus.flac"
+    short_output_names = bool(getattr(args, "short_output_names", False))
+    manifest_path = output_dir / (SHORT_MANIFEST_NAME if short_output_names else MANIFEST_NAME)
+    candidate_row_jsonl = output_dir / (SHORT_CANDIDATE_ROW_NAME if short_output_names else CANDIDATE_ROW_NAME)
+    output_path = output_dir / (SHORT_MINUS_AUDIO_NAME if short_output_names else MINUS_AUDIO_NAME)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     progress(
@@ -323,6 +331,13 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
         base_minus_path=base_minus_path,
         windowed_pair_judge_jsonl=windowed_pair_judge_jsonl,
     )
+    manifest["manifest_path"] = str(manifest_path)
+    manifest["short_output_names"] = short_output_names
+    manifest["artifact_name_policy"] = {
+        "path_segment_limit": 32,
+        "raw_ids_in_paths": False,
+        "provenance_in_manifest": True,
+    }
     write_jsonl(candidate_row_jsonl, [manifest["candidate_row"]])
     write_json(manifest_path, manifest)
     progress(
@@ -346,7 +361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "manifest_path": str(Path(args.output_dir) / "pair_reconstruction_repair_manifest.json"),
+                "manifest_path": str(manifest["manifest_path"]),
                 "candidate_audio_path": manifest["artifacts"]["pair_reconstruction_minus_flac"],
                 "candidate_row_jsonl": manifest["candidate_row_jsonl"],
                 "delivery_status": manifest["delivery_status"],

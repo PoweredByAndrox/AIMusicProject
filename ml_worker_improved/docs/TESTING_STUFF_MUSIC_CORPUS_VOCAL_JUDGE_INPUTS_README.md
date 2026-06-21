@@ -6,8 +6,8 @@ rows.
 
 The bridge is diagnostic and fail-closed:
 
-- consumes one or more `testing_stuff_music_corpus_job_execution_results.jsonl`
-  files;
+- consumes one or more execution `rows.jsonl` files from
+  `run_testing_stuff_music_corpus_job_matrix.py`;
 - uses only rows with `execution_status=completed`;
 - pairs completed `vocal` and `minus` candidates by `track_id`;
 - writes no audio and runs no inference;

@@ -20,9 +20,9 @@ from tools.train_generic_finetuning_controller_model import stable_hash  # noqa:
 from worker.model_registry import ModelRegistry, default_model_registry  # noqa: E402
 
 
-CANDIDATE_WAVE_JOBS_NAME = "generic_controller_selector_candidate_wave_jobs.jsonl"
-CANDIDATE_WAVE_MANIFEST_NAME = "generic_controller_selector_candidate_wave_manifest.json"
-CANDIDATE_WAVE_PROGRESS_NAME = "generic_controller_selector_candidate_wave_progress.jsonl"
+CANDIDATE_WAVE_JOBS_NAME = "jobs.jsonl"
+CANDIDATE_WAVE_MANIFEST_NAME = "plan.json"
+CANDIDATE_WAVE_PROGRESS_NAME = "progress.jsonl"
 
 REGISTERED_MODEL_ENTRYPOINT = "/app/tools/run_registered_model_candidate.py"
 DIRECT_INSTRUMENTAL_RESURRECTION_ENTRYPOINT = "/app/tools/export_instrumental_resurrection_minus.py"
@@ -193,7 +193,8 @@ def registered_entry_or_none(registry: ModelRegistry, route_id: str) -> Any | No
 
 
 def job_output_dir(*, output_dir: Path, index: int, route_id: str, track_id: str) -> Path:
-    return output_dir / "candidate_jobs" / safe_slug(f"{index:04d}__{track_id}__{route_id}", fallback=f"job_{index:04d}")
+    _ = (route_id, track_id)
+    return output_dir / "candidate_jobs" / f"j{index:03d}"
 
 
 def expected_manifest_for_job(*, output_dir: Path) -> Path:
@@ -306,9 +307,11 @@ def build_candidate_wave_job(
 
     status, blockers = job_status_and_blockers(source_ref=source_ref, execution_backend=backend)
     expected_manifest = expected_manifest_for_job(output_dir=row_output_dir)
+    job_alias = row_output_dir.name
     job = {
         "schema": "generic_controller_selector_candidate_wave_job.v1",
         "job_id": stable_hash(["controller_selector_candidate_wave", index, route_gap, source_ref])[:16],
+        "job_alias": job_alias,
         "job_index": index,
         "job_status": status,
         "blockers": blockers,

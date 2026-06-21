@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import tools.run_testing_stuff_music_corpus_vocal_minus_master_plan as runner
+from tools.run_testing_stuff_music_corpus_job_matrix import EXECUTION_MANIFEST_NAME
 
 
 def write_json(path: Path, payload: dict) -> Path:
@@ -426,3 +427,42 @@ def test_nonvocal_score_matrix_step_blocks_when_semantic_batch_omits_matrix(tmp_
     assert summary["steps"][0]["dominant_failure_reason"] == "semantic_batch_missing_matrix_json"
     assert summary["steps"][0]["execution_started"] is True
     assert summary["release_ready"] is False
+
+
+def test_generation_step_uses_short_job_execution_manifest_name(tmp_path: Path) -> None:
+    plan_path = plan_json(tmp_path, track_row("track_h", "run_corpus_job_matrix_for_track"))
+    calls: list[dict] = []
+
+    def fake_job_matrix_executor(**kwargs):
+        calls.append(kwargs)
+        output_root = Path(kwargs["output_root"])
+        return {
+            "summary": {
+                "completed_jobs": 1,
+                "execution_started": True,
+                "release_ready": False,
+            },
+            "manifest": {
+                "output_files": {
+                    "manifest_json": str(output_root / EXECUTION_MANIFEST_NAME),
+                },
+                "delivery_allowed": False,
+                "release_ready": False,
+            },
+            "rows": [],
+        }
+
+    summary = runner.run_plan(
+        plan_json=plan_path,
+        output_root=tmp_path / "out",
+        max_steps=1,
+        execute=True,
+        job_matrix_jsonl=tmp_path / "jobs.jsonl",
+        job_matrix_executor=fake_job_matrix_executor,
+    )
+
+    assert len(calls) == 1
+    step = summary["steps"][0]
+    assert step["step_status"] == "completed"
+    assert Path(step["output_manifest_json"]).name == EXECUTION_MANIFEST_NAME
+    assert len(Path(step["output_manifest_json"]).name) <= 32

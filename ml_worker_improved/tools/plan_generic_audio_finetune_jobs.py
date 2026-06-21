@@ -17,6 +17,10 @@ from tools.docker_runtime import require_docker_runtime  # noqa: E402
 
 PLAN_NAME = "generic_audio_finetune_job_plan.json"
 PROGRESS_NAME = "generic_audio_finetune_job_plan_progress.jsonl"
+SHORT_NAMES = {
+    "plan": "plan.json",
+    "progress": "progress.jsonl",
+}
 
 TRAINABLE_PERMISSION_STATUSES = {"owned", "licensed", "cleared", "project_owned"}
 VOCAL_STEMS = {"vocal", "vocals"}
@@ -57,6 +61,15 @@ def progress(path: Path, event: str, **fields: Any) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         handle.flush()
+
+
+def output_names(*, short_output_names: bool) -> dict[str, str]:
+    if short_output_names:
+        return dict(SHORT_NAMES)
+    return {
+        "plan": PLAN_NAME,
+        "progress": PROGRESS_NAME,
+    }
 
 
 def stable_hash(payload: Any) -> str:
@@ -158,11 +171,13 @@ def plan_generic_audio_finetune_jobs(
     output_dir: Path,
     min_unique_tracks: int = 3,
     training_output_root: str = "/app/lab_artifacts/generic_finetuning_playbook_20260613/audio_finetune_runs",
+    short_output_names: bool = False,
 ) -> dict[str, Any]:
     if min_unique_tracks <= 0:
         raise ValueError("min_unique_tracks must be > 0")
     output_dir.mkdir(parents=True, exist_ok=True)
-    progress_path = output_dir / PROGRESS_NAME
+    names = output_names(short_output_names=short_output_names)
+    progress_path = output_dir / names["progress"]
     progress(progress_path, "start", audio_training_examples_jsonl=str(audio_training_examples_jsonl))
     rows = [row for row in iter_jsonl(audio_training_examples_jsonl) if row_is_trainable_audio(row)]
     progress(progress_path, "examples_loaded", trainable_audio_examples=len(rows))
@@ -213,6 +228,7 @@ def plan_generic_audio_finetune_jobs(
         "presentation_status": "audio_finetune_plan_not_for_listen_pack",
         "release_status": "planning_artifact_only",
         "release_ready": False,
+        "short_output_names": short_output_names,
         "safety": {
             "gpu_training_required_for_ready_jobs": True,
             "fail_closed_when_insufficient_unique_tracks": True,
@@ -220,12 +236,12 @@ def plan_generic_audio_finetune_jobs(
             "not_release_artifact": True,
         },
         "outputs": {
-            "plan_json": str(output_dir / PLAN_NAME),
+            "plan_json": str(output_dir / names["plan"]),
             "progress_jsonl": str(progress_path),
         },
     }
-    write_json(output_dir / PLAN_NAME, manifest)
-    progress(progress_path, "finish", plan_json=str(output_dir / PLAN_NAME), **manifest["summary"])
+    write_json(output_dir / names["plan"], manifest)
+    progress(progress_path, "finish", plan_json=str(output_dir / names["plan"]), **manifest["summary"])
     return manifest
 
 
@@ -238,6 +254,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--training-output-root",
         default="/app/lab_artifacts/generic_finetuning_playbook_20260613/audio_finetune_runs",
     )
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -252,6 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         min_unique_tracks=int(args.min_unique_tracks),
         training_output_root=str(args.training_output_root),
+        short_output_names=bool(args.short_output_names),
     )
     print(json.dumps({"summary": manifest["summary"], "fingerprint": manifest["fingerprint"]}, ensure_ascii=False, sort_keys=True))
     return 0

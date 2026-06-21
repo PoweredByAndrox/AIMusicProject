@@ -162,6 +162,86 @@ def test_recovery_queue_blocks_feedback_without_permission(tmp_path: Path) -> No
     ]
 
 
+def test_recovery_queue_links_full_pack_loop_plan_stem_gaps(tmp_path: Path) -> None:
+    root = tmp_path / "lab" / "gt_music"
+    (root / "stems").mkdir(parents=True)
+    (root / "source_mix.flac").write_bytes(b"mix")
+    (root / "stems" / "drums.flac").write_bytes(b"drums")
+    write_json(
+        root / "ground_truth_manifest.json",
+        {
+            "track_name": "music-track",
+            "ground_truth_contract": {
+                "verified": True,
+                "source": "FL Studio split mixer tracks plus full mix supplied by user",
+            },
+            "mix": {"path": "source_mix.flac"},
+            "stems": {"drums": {"path": "stems/drums.flac"}},
+            "report_alignment_contract": {"rights_status": "user_owned"},
+        },
+    )
+    plan_rows = write_jsonl(
+        tmp_path / "plan" / "rows.jsonl",
+        [
+            {
+                "schema": "full_pack_loop_iteration_action.v1",
+                "queue_item_id": "q002",
+                "stem_type": "drums",
+                "route_intent": "stem_training_coverage_gap",
+                "action_status": "blocked_insufficient_unique_tracks",
+                "unique_track_count": 1,
+                "min_unique_tracks": 3,
+                "required_next_actions": ["verified_reference_corpus_expand"],
+                "release_ready": False,
+                "can_publish_as_result": False,
+            },
+            {
+                "schema": "full_pack_loop_iteration_action.v1",
+                "queue_item_id": "q005",
+                "stem_type": "guitar",
+                "route_intent": "stem_training_coverage_gap",
+                "action_status": "blocked_missing_training_job",
+                "required_next_actions": ["verified_reference_corpus_expand", "rerun_generic_audio_finetune_job_plan"],
+                "release_ready": False,
+                "can_publish_as_result": False,
+            },
+        ],
+    )
+    plan = write_json(
+        tmp_path / "plan" / "plan.json",
+        {
+            "schema": "full_pack_loop_iteration_plan.v1",
+            "plan_status": "blocked_waiting_for_verified_reference_corpus",
+            "action_count": 2,
+            "rows_jsonl": str(plan_rows),
+            "delivery_allowed": False,
+            "release_ready": False,
+            "training_started": False,
+            "failed_checks": [],
+        },
+    )
+
+    manifest = build_generic_audio_training_recovery_queue(
+        artifact_root=tmp_path / "lab",
+        output_dir=tmp_path / "out",
+        full_pack_loop_plan_json=plan,
+    )
+
+    assert manifest["summary"]["full_pack_required_stems"] == ["drums", "guitar"]
+    assert manifest["summary"]["full_pack_missing_candidate_stems"] == ["guitar"]
+    rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
+    by_stem = {row["stem_type"]: row for row in rows}
+    assert by_stem["drums"]["full_pack_required_stem"] is True
+    assert by_stem["drums"]["full_pack_action_status"] == "blocked_insufficient_unique_tracks"
+    assert by_stem["drums"]["ready_for_audio_training"] is True
+    assert by_stem["guitar"]["source_type"] == "full_pack_loop_plan_missing_stem"
+    assert by_stem["guitar"]["ready_for_audio_training"] is False
+    assert by_stem["guitar"]["blockers"] == ["missing_verified_reference_candidate"]
+    assert "collect_verified_reference_stem" in by_stem["guitar"]["recommended_actions"]
+    template_rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_decision_template.jsonl")
+    assert any(row["stem_type"] == "guitar" for row in template_rows)
+
+
 def test_recovery_queue_recovers_feedback_audio_paths_from_listen_manifest(tmp_path: Path) -> None:
     source = tmp_path / "mix.mp3"
     target = tmp_path / "vocals.flac"
@@ -419,6 +499,42 @@ def test_recovery_queue_blocks_missing_target_audio(tmp_path: Path) -> None:
     assert rows[0]["blockers"] == ["target_audio_not_found"]
 
 
+def test_recovery_queue_can_write_short_output_names(tmp_path: Path) -> None:
+    source = tmp_path / "source.flac"
+    target = tmp_path / "target.flac"
+    source.write_bytes(b"source")
+    target.write_bytes(b"target")
+    feedback = write_jsonl(
+        tmp_path / "feedback.jsonl",
+        [
+            {
+                "source_audio_path": str(source),
+                "candidate_audio_path": str(target),
+                "target_stem": "vocal",
+                "rating": "ideal",
+                "human_verified": True,
+                "permission_status": "owned",
+            }
+        ],
+    )
+
+    manifest = build_generic_audio_training_recovery_queue(
+        artifact_root=tmp_path,
+        output_dir=tmp_path / "out",
+        feedback_jsonls=[feedback],
+        short_output_names=True,
+    )
+
+    assert manifest["short_output_names"] is True
+    assert Path(manifest["outputs"]["queue_jsonl"]).name == "queue.jsonl"
+    assert Path(manifest["outputs"]["decision_template_jsonl"]).name == "tpl.jsonl"
+    assert Path(manifest["outputs"]["manifest_json"]).name == "rec.json"
+    assert Path(manifest["outputs"]["progress_jsonl"]).name == "progress.jsonl"
+    assert all(len(Path(path).name) <= 32 for path in manifest["outputs"].values())
+    assert (tmp_path / "out" / "queue.jsonl").exists()
+    assert not (tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl").exists()
+
+
 def test_cli_writes_recovery_manifest(tmp_path: Path) -> None:
     feedback = write_jsonl(tmp_path / "feedback.jsonl", [{"rating": "accept", "human_verified": True}])
 
@@ -439,3 +555,26 @@ def test_cli_writes_recovery_manifest(tmp_path: Path) -> None:
     manifest = read_json(tmp_path / "out" / "generic_audio_training_recovery_manifest.json")
     assert manifest["summary"]["recovery_rows"] == 1
     assert manifest["training_started"] is False
+
+
+def test_cli_can_write_short_recovery_outputs(tmp_path: Path) -> None:
+    feedback = write_jsonl(tmp_path / "feedback.jsonl", [{"rating": "accept", "human_verified": True}])
+
+    assert (
+        main(
+            [
+                "--artifact-root",
+                str(tmp_path),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--feedback-jsonl",
+                str(feedback),
+                "--short-output-names",
+            ]
+        )
+        == 0
+    )
+
+    manifest = read_json(tmp_path / "out" / "rec.json")
+    assert manifest["short_output_names"] is True
+    assert Path(manifest["outputs"]["queue_jsonl"]).name == "queue.jsonl"

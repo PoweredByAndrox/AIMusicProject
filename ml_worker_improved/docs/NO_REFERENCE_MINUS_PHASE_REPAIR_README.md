@@ -11,8 +11,16 @@ Contract:
   chain, or threshold relaxation.
 - Outputs are candidate variants plus `candidate_pair.jsonl`; they are not
   listen-pack or release artifacts.
+- If the source mix and stems use different sample rates, the route resamples
+  the mix/vocal context to the source minus sample rate and records
+  `sample_rate_alignment` in the manifest. This is alignment provenance, not a
+  quality acceptance gate.
 - Downstream `run_no_reference_windowed_judge.py --score-mode minus` must accept
   a variant before any later preview/listen contract can consider it.
+- `tools/build_short_minus_phase_repair_selection_pack.py` is fail-closed:
+  variants with `pair_decision` other than `pair_compatible`, or any judge
+  reason other than `no_reference_proxy_passed`, are excluded even if the
+  top-level decision says `accept_candidate`.
 
 Generated variants:
 

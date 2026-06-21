@@ -189,6 +189,26 @@ def test_route_expansion_writes_candidate_pool_and_preserves_release_ready_false
     assert rows[0]["accepted_minus"] is True
     assert rows[0]["release_ready"] is False
     assert Path(result["manifest_path"]).exists()
+    progress_rows = [
+        json.loads(line)
+        for line in (tmp_path / "out" / "minus_route_expansion_progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["event"] for row in progress_rows] == [
+        "start",
+        "route_start",
+        "route_finish",
+        "judge_start",
+        "judge_finish",
+        "finish",
+    ]
+    assert progress_rows[0]["expected_acceleration_mode"] == "gpu_registered_model_inference_route_expansion"
+    assert progress_rows[0]["gpu_inference_required"] is True
+    assert progress_rows[3]["expected_acceleration_mode"] == "external_only_cpu_dsp_scoring"
+    assert progress_rows[3]["gpu_inference_skipped"] is True
+    assert progress_rows[3]["gpu_inference_skip_reason"] == "minus_route_judge_reads_existing_audio_only"
+    assert progress_rows[4]["expected_acceleration_mode"] == "external_only_cpu_dsp_scoring"
+    assert progress_rows[4]["gpu_inference_skipped"] is True
+    assert progress_rows[-1]["release_ready"] is False
 
 
 def test_severe_vocal_bleed_in_minus_still_blocks_unsafe_minus(tmp_path: Path) -> None:

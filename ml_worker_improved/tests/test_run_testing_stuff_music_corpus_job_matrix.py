@@ -7,6 +7,9 @@ import tools.run_testing_stuff_music_corpus_job_matrix as executor
 from worker.model_registry import ModelRegistry, ModelRegistryEntry
 
 
+LONG_TRACK_ID = "baby_me_here_comes_the_hotstepper_evian_version_radio_record_baby_me_here_comes_the_hotstepper_e"
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
@@ -162,7 +165,7 @@ def test_bounded_selection_covers_requested_stems_before_extra_models(tmp_path: 
 
 
 def test_executes_ready_job_writes_logs_progress_and_keeps_downstream_gate_closed(tmp_path: Path) -> None:
-    row = job_row(tmp_path, target_stem="vocal", model_id="vocal_a")
+    row = job_row(tmp_path, track_id=LONG_TRACK_ID, target_stem="vocal", model_id="vocal_a")
     jobs_path = write_jsonl(tmp_path / "jobs.jsonl", [row])
     calls = []
 
@@ -191,11 +194,26 @@ def test_executes_ready_job_writes_logs_progress_and_keeps_downstream_gate_close
     assert result["manifest"]["delivery_allowed"] is False
     assert result["manifest"]["presentation_status"] == "diagnostic_execution_not_for_listen_pack"
     assert result["rows"][0]["execution_status"] == "completed"
+    assert result["rows"][0]["execution_job_key"] == "j001"
+    assert result["rows"][0]["track_id"] == LONG_TRACK_ID
     assert result["rows"][0]["candidate_manifest"]["exists"] is True
-    assert Path(result["rows"][0]["logs"]["stdout_path"]).read_text(encoding="utf-8") == "stdout ok\n"
-    assert (tmp_path / "execution" / "testing_stuff_music_corpus_job_execution_results.jsonl").exists()
-    assert (tmp_path / "execution" / "testing_stuff_music_corpus_job_execution_manifest.json").exists()
-    assert (tmp_path / "execution" / "testing_stuff_music_corpus_job_execution_progress.jsonl").exists()
+    stdout_path = Path(result["rows"][0]["logs"]["stdout_path"])
+    assert stdout_path.read_text(encoding="utf-8") == "stdout ok\n"
+    assert stdout_path.parent.name == "j001"
+    assert len(stdout_path.parent.name) <= 32
+    assert LONG_TRACK_ID not in str(stdout_path)
+
+    top_level_files = {path.name for path in (tmp_path / "execution").iterdir() if path.is_file()}
+    assert top_level_files == {
+        executor.EXECUTION_RESULTS_NAME,
+        executor.EXECUTION_MANIFEST_NAME,
+        executor.EXECUTION_SUMMARY_NAME,
+        executor.EXECUTION_PROGRESS_NAME,
+    }
+    assert all(len(name) <= 32 for name in top_level_files)
+    assert (tmp_path / "execution" / executor.EXECUTION_RESULTS_NAME).exists()
+    assert (tmp_path / "execution" / executor.EXECUTION_MANIFEST_NAME).exists()
+    assert (tmp_path / "execution" / executor.EXECUTION_PROGRESS_NAME).exists()
 
 
 def test_blocks_real_gpu_job_when_cuda_is_unavailable(tmp_path: Path, monkeypatch) -> None:

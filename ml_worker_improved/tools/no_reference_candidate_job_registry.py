@@ -49,7 +49,7 @@ def route_family_for_model(model_id: str) -> str:
         return "uvr_like_existing"
     if "spleeter" in normalized:
         return "spleeter_like_existing"
-    if "roformer" in normalized or "scnet" in normalized:
+    if "roformer" in normalized or "scnet" in normalized or "becruily" in normalized:
         return "other_existing"
     return "unknown_existing"
 
@@ -298,6 +298,21 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "family": "vocal_focused_default",
             "profiles": ("exploration",),
             "timeout_sec": 1200,
+        },
+        {
+            "model_id": "becruily_instrumental_vocals",
+            "target_mode": "both",
+            "target_stem": "minus",
+            "family": "minus_focused_existing_model",
+            "profiles": ("exploration",),
+            "timeout_sec": 1200,
+            "variant_suffix": "minus_hard_case",
+            "shared_execution_group_id": "local_registered__becruily_instrumental__hard_case",
+            "produces_vocal": True,
+            "produces_minus": True,
+            "materialized_candidate_modes": ("vocal", "minus", "both"),
+            "reuse_outputs_across_modes": True,
+            "hard_case_routes": ("generate_minus_focused_variants",),
         },
         {
             "model_id": "htdemucs_ft",

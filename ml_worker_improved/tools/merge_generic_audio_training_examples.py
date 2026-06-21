@@ -21,6 +21,13 @@ REJECTED_NAME = "rejected_audio_training_examples.jsonl"
 DUPLICATE_NAME = "duplicate_audio_training_examples.jsonl"
 MANIFEST_NAME = "merged_audio_training_examples_manifest.json"
 PROGRESS_NAME = "merge_generic_audio_training_examples_progress.jsonl"
+SHORT_NAMES = {
+    "merged": "rows.jsonl",
+    "rejected": "rej.jsonl",
+    "duplicate": "dup.jsonl",
+    "manifest": "merge.json",
+    "progress": "progress.jsonl",
+}
 START_TIME = time.monotonic()
 
 TRAINABLE_PERMISSION_STATUSES = {"owned", "licensed", "cleared", "project_owned"}
@@ -93,6 +100,18 @@ def normalize_stem(stem: Any) -> str:
 
 def input_sha256(paths: Sequence[Path]) -> dict[str, str]:
     return {str(path): sha256_file(path) for path in paths}
+
+
+def output_names(*, short_output_names: bool) -> dict[str, str]:
+    if short_output_names:
+        return dict(SHORT_NAMES)
+    return {
+        "merged": MERGED_NAME,
+        "rejected": REJECTED_NAME,
+        "duplicate": DUPLICATE_NAME,
+        "manifest": MANIFEST_NAME,
+        "progress": PROGRESS_NAME,
+    }
 
 
 def rejection_reasons(row: dict[str, Any]) -> list[str]:
@@ -200,9 +219,11 @@ def merge_generic_audio_training_examples(
     base_audio_training_examples_jsonls: Sequence[Path],
     approved_audio_training_examples_jsonls: Sequence[Path],
     output_dir: Path,
+    short_output_names: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    progress_path = output_dir / PROGRESS_NAME
+    names = output_names(short_output_names=short_output_names)
+    progress_path = output_dir / names["progress"]
     input_paths = [*base_audio_training_examples_jsonls, *approved_audio_training_examples_jsonls]
     progress(
         progress_path,
@@ -286,23 +307,25 @@ def merge_generic_audio_training_examples(
         "presentation_status": "merged_training_dataset_not_for_listen_pack",
         "release_status": "training_dataset_artifact_only",
         "release_ready": False,
+        "short_output_names": short_output_names,
         "inputs": {
             "base_audio_training_examples_jsonls": [str(path) for path in base_audio_training_examples_jsonls],
             "approved_audio_training_examples_jsonls": [str(path) for path in approved_audio_training_examples_jsonls],
             "input_sha256": input_sha256(input_paths),
         },
         "outputs": {
-            "merged_audio_training_examples_jsonl": str(output_dir / MERGED_NAME),
-            "rejected_audio_training_examples_jsonl": str(output_dir / REJECTED_NAME),
-            "duplicate_audio_training_examples_jsonl": str(output_dir / DUPLICATE_NAME),
-            "manifest_json": str(output_dir / MANIFEST_NAME),
+            "merged_audio_training_examples_jsonl": str(output_dir / names["merged"]),
+            "rejected_audio_training_examples_jsonl": str(output_dir / names["rejected"]),
+            "duplicate_audio_training_examples_jsonl": str(output_dir / names["duplicate"]),
+            "manifest_json": str(output_dir / names["manifest"]),
             "progress_jsonl": str(progress_path),
         },
         "recommended_next_command": (
             "python /app/tools/plan_generic_audio_finetune_jobs.py "
-            f"--audio-training-examples-jsonl {output_dir / MERGED_NAME} "
+            f"--audio-training-examples-jsonl {output_dir / names['merged']} "
             f"--output-dir {output_dir / 'audio_finetune_plan'} "
             "--min-unique-tracks 3"
+            + (" --short-output-names" if short_output_names else "")
         ),
         "safety": {
             "metadata_only": True,
@@ -312,10 +335,10 @@ def merge_generic_audio_training_examples(
             "fail_closed_on_untrainable_or_missing_audio": True,
         },
     }
-    write_jsonl(output_dir / MERGED_NAME, merged_rows)
-    write_jsonl(output_dir / REJECTED_NAME, rejected_rows)
-    write_jsonl(output_dir / DUPLICATE_NAME, duplicates)
-    write_json(output_dir / MANIFEST_NAME, manifest)
+    write_jsonl(output_dir / names["merged"], merged_rows)
+    write_jsonl(output_dir / names["rejected"], rejected_rows)
+    write_jsonl(output_dir / names["duplicate"], duplicates)
+    write_json(output_dir / names["manifest"], manifest)
     progress(progress_path, "finish", **summary)
     return manifest
 
@@ -325,6 +348,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-audio-training-examples-jsonl", type=Path, action="append", default=[])
     parser.add_argument("--approved-audio-training-examples-jsonl", type=Path, action="append", default=[])
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -338,6 +362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_audio_training_examples_jsonls=args.base_audio_training_examples_jsonl,
         approved_audio_training_examples_jsonls=args.approved_audio_training_examples_jsonl,
         output_dir=args.output_dir,
+        short_output_names=bool(args.short_output_names),
     )
     print(json.dumps({"summary": manifest["summary"], "fingerprint": manifest["fingerprint"]}, ensure_ascii=False, sort_keys=True))
     return 0

@@ -71,8 +71,6 @@ def build_vocal_companion_map(candidates: Sequence[dict[str, Any]]) -> dict[str,
     companions: dict[str, str] = {}
     for candidate in sorted(candidates, key=candidate_sort_key):
         target_stem = str(candidate.get("target_stem") or "").lower()
-        if target_stem not in VOCAL_TARGET_STEMS:
-            continue
         track_id = str(candidate.get("track_id") or "")
         if not track_id:
             continue
@@ -80,7 +78,9 @@ def build_vocal_companion_map(candidates: Sequence[dict[str, Any]]) -> dict[str,
         stem_paths: dict[str, str] = {}
         if manifest_path.exists():
             stem_paths = manifest_stem_paths(read_json(manifest_path))
-        vocal_path = explicit_vocal_path(stem_paths) or str(candidate.get("audio_path") or "")
+        vocal_path = explicit_vocal_path(stem_paths)
+        if not vocal_path and target_stem in VOCAL_TARGET_STEMS:
+            vocal_path = str(candidate.get("audio_path") or "")
         if vocal_path:
             companions.setdefault(track_id, vocal_path)
     return companions

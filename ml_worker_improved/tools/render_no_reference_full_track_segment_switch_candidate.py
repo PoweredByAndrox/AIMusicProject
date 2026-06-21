@@ -137,6 +137,10 @@ def render_full_track_stem(
     return sample_rate, int(rendered.shape[0]), overlays
 
 
+def candidate_source_minus_path(row: dict[str, Any]) -> str:
+    return str(row.get("source_minus_path") or row.get("base_minus_path") or "")
+
+
 def base_manifest(candidate_rows: list[dict[str, Any]], base_candidate_id: str, output_dir: Path) -> dict[str, Any]:
     return {
         "manifest_type": "no_reference_full_track_segment_switch_candidate",
@@ -156,7 +160,7 @@ def base_manifest(candidate_rows: list[dict[str, Any]], base_candidate_id: str, 
         "blocked_windows": [],
         "rendered_vocal_candidate_path": "",
         "rendered_minus_candidate_path": "",
-        "candidate_row_jsonl": str(output_dir / "full_track_segment_switch_candidate_row.jsonl"),
+        "candidate_row_jsonl": str(output_dir / "fts_row.jsonl"),
         "safety_flags": dict(SAFETY_FLAGS),
         "forbidden_actions": list(BASE_FORBIDDEN_ACTIONS),
         "audio_copied": False,
@@ -191,6 +195,13 @@ def build_full_track_segment_switch_candidate(
             **manifest,
             "render_status": "blocked_missing_base_candidate",
             "dominant_failure_reason": "missing_base_candidate",
+        }
+    source_minus_path = candidate_source_minus_path(base_row)
+    if not source_minus_path:
+        return {
+            **manifest,
+            "render_status": "blocked_missing_base_minus_provenance",
+            "dominant_failure_reason": "missing_base_minus_provenance",
         }
 
     selected, missing = best_safe_windows_for_score(
@@ -228,8 +239,8 @@ def build_full_track_segment_switch_candidate(
         }
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    vocal_output = output_dir / "full_track_segment_switch_vocal_candidate.wav"
-    minus_output = output_dir / "full_track_segment_switch_minus_candidate.wav"
+    vocal_output = output_dir / "fts_voc.wav"
+    minus_output = output_dir / "fts_min.wav"
     vocal_rate, vocal_frames, vocal_overlays = render_full_track_stem(
         base_path=candidate_vocal_path(base_row),
         selected_windows=alternate_selected,
@@ -258,6 +269,8 @@ def build_full_track_segment_switch_candidate(
         "minus_path": str(minus_output),
         "selected_vocal_path": str(vocal_output),
         "selected_minus_path": str(minus_output),
+        "source_minus_path": source_minus_path,
+        "base_minus_path": source_minus_path,
         "candidate_family": "full_track_segment_switch",
         "candidate_origin": "existing_candidates_full_track_window_overlay",
         "base_candidate_id": base_candidate_id,
@@ -274,7 +287,7 @@ def build_full_track_segment_switch_candidate(
         "forbidden_actions": list(BASE_FORBIDDEN_ACTIONS),
         "is_complete_pair": True,
     }
-    candidate_row_jsonl = output_dir / "full_track_segment_switch_candidate_row.jsonl"
+    candidate_row_jsonl = output_dir / "fts_row.jsonl"
     write_jsonl(candidate_row_jsonl, [candidate_row])
     base_vocal_info = sf.info(candidate_vocal_path(base_row))
     base_minus_info = sf.info(candidate_minus_path(base_row))
@@ -283,6 +296,8 @@ def build_full_track_segment_switch_candidate(
         "render_status": "rendered_full_track_candidate",
         "dominant_failure_reason": "",
         "audio_exported": True,
+        "source_minus_path": source_minus_path,
+        "base_minus_path": source_minus_path,
         "rendered_vocal_candidate_path": str(vocal_output),
         "rendered_minus_candidate_path": str(minus_output),
         "sample_rate": vocal_rate,

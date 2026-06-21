@@ -97,6 +97,35 @@ def test_job_registry_references_supported_configs_or_marks_unavailable() -> Non
             assert config.safety_notes
 
 
+def test_becruily_instrumental_minus_route_is_hard_case_only() -> None:
+    safe_ids = {config.candidate_config_id for config in build_candidate_job_registry(profile="safe")}
+    exploration = {
+        config.candidate_config_id: config
+        for config in build_candidate_job_registry(profile="exploration")
+    }
+
+    config = exploration["local_registered__becruily_instrumental_vocals__both__minus_hard_case"]
+
+    assert config.candidate_config_id not in safe_ids
+    assert config.target_mode == "both"
+    assert config.target_stem == "minus"
+    assert config.source_model_id == "becruily_instrumental_vocals"
+    assert config.candidate_family == "minus_focused_existing_model"
+    assert config.route_family == "other_existing"
+    assert config.produces_vocal is True
+    assert config.produces_minus is True
+    assert config.produces_both is True
+    assert config.materialized_candidate_modes == ("vocal", "minus", "both")
+    assert config.entrypoint_type == "python_script"
+    assert config.available is True
+    assert config.can_run_without_download is True
+    assert config.can_run_without_registry_edit is True
+    assert config.forbidden_reason == ""
+    assert config.source_tool == "tools/run_registered_model_candidate.py"
+    assert "no_model_download" in config.safety_notes
+    assert "no_training" in config.safety_notes
+
+
 def test_unavailable_job_is_skipped_not_faked(tmp_path: Path) -> None:
     input_audio = Path(write_wav(tmp_path / "input.wav", sine(220, 1.0)))
     output_dir = tmp_path / "candidate"

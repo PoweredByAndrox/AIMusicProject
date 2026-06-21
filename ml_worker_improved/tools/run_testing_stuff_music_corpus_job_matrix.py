@@ -22,10 +22,10 @@ from worker.model_registry import ModelRegistry, default_model_registry  # noqa:
 
 
 CommandRunner = Callable[[list[str]], Any]
-EXECUTION_RESULTS_NAME = "testing_stuff_music_corpus_job_execution_results.jsonl"
-EXECUTION_MANIFEST_NAME = "testing_stuff_music_corpus_job_execution_manifest.json"
-EXECUTION_SUMMARY_NAME = "testing_stuff_music_corpus_job_execution_summary.md"
-EXECUTION_PROGRESS_NAME = "testing_stuff_music_corpus_job_execution_progress.jsonl"
+EXECUTION_RESULTS_NAME = "rows.jsonl"
+EXECUTION_MANIFEST_NAME = "manifest.json"
+EXECUTION_SUMMARY_NAME = "summary.md"
+EXECUTION_PROGRESS_NAME = "progress.jsonl"
 EXPECTED_ACCELERATION_MODE = "gpu_inference_then_cpu_dsp_scoring"
 REGISTERED_MODEL_ENTRYPOINT = "/app/tools/run_registered_model_candidate.py"
 DIRECT_MINUS_ENTRYPOINT = "/app/tools/export_instrumental_resurrection_minus.py"
@@ -75,15 +75,8 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 
 
 def safe_job_key(row: dict[str, Any], index: int) -> str:
-    raw = "__".join(
-        [
-            str(row.get("track_index") or index),
-            str(row.get("track_id") or "track"),
-            str(row.get("target_stem") or "stem"),
-            str(row.get("model_id") or row.get("route_name") or "route"),
-        ]
-    )
-    return "".join(char if char.isalnum() or char in "._-" else "_" for char in raw)[:180] or f"job_{index}"
+    _ = row
+    return f"j{index:03d}"
 
 
 class ProgressWriter:
@@ -593,7 +586,7 @@ def write_outputs(output_root: Path, result: dict[str, Any]) -> None:
     write_json(output_root / EXECUTION_MANIFEST_NAME, result["manifest"])
     write_summary_md(output_root / EXECUTION_SUMMARY_NAME, result["summary"])
     if result["skipped_rows"]:
-        write_jsonl(output_root / "testing_stuff_music_corpus_job_execution_skipped.jsonl", result["skipped_rows"])
+        write_jsonl(output_root / "skipped.jsonl", result["skipped_rows"])
 
 
 def execute_job_matrix(

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tools.run_generic_audio_finetune_matrix import run_generic_audio_finetune_matrix
+from tools.train_teacher_mask_separator import TeacherMaskTrainConfig
 
 
 def _write_json(path: Path, payload: dict | list) -> Path:
@@ -42,12 +43,21 @@ def test_direct_script_help_runs_inside_docker() -> None:
 
 def test_matrix_trains_all_configs_validates_holdout_and_selects_best_without_release(tmp_path: Path, monkeypatch) -> None:
     examples = _write_json(tmp_path / "examples.jsonl", [])
+    pseudo_examples = _write_json(tmp_path / "pseudo_examples.jsonl", [])
     matrix = _write_json(
         tmp_path / "matrix.json",
         {
             "configs": [
                 {"id": "baseline", "epochs": 2, "activity_weight": 4.0},
-                {"id": "knn_memory", "epochs": 2, "activity_weight": 8.0, "source_feature_memory_neighbors": 3},
+                {
+                    "id": "knn_memory",
+                    "epochs": 2,
+                    "activity_weight": 8.0,
+                    "source_preservation_weight": 2.0,
+                    "source_feature_memory_neighbors": 3,
+                    "source_candidate_family_filter": "scnet",
+                },
+                {"id": "complex_mask", "epochs": 2, "mask_output_mode": "complex", "complex_mask_ceiling": 2.5},
             ]
         },
     )
@@ -135,6 +145,7 @@ def test_matrix_trains_all_configs_validates_holdout_and_selects_best_without_re
 
     manifest = run_generic_audio_finetune_matrix(
         audio_training_examples_jsonl=examples,
+        pseudo_teacher_examples_jsonl=pseudo_examples,
         config_matrix_json=matrix,
         output_dir=tmp_path / "matrix_run",
         stem="vocal",
@@ -149,37 +160,152 @@ def test_matrix_trains_all_configs_validates_holdout_and_selects_best_without_re
         max_holdouts_per_checkpoint=2,
     )
 
-    assert [call["scope"] for call in train_calls] == ["vocal_matrix__baseline", "vocal_matrix__knn_memory"]
-    assert [call["source_feature_memory_neighbors"] for call in train_calls] == [0, 3]
+    assert [call["scope"] for call in train_calls] == [
+        "vocal_matrix__baseline",
+        "vocal_matrix__knn_memory",
+        "vocal_matrix__complex_mask",
+    ]
+    assert all(call["audio_training_examples_jsonl"] == examples for call in train_calls)
+    assert all(call["pseudo_teacher_examples_jsonl"] == pseudo_examples for call in train_calls)
+    assert all(call["audio_training_examples_jsonl"] == examples for call in holdout_calls)
+    assert [call["source_feature_memory_neighbors"] for call in train_calls] == [0, 3, 0]
+    assert [call["source_preservation_weight"] for call in train_calls] == [
+        TeacherMaskTrainConfig.source_preservation_weight,
+        2.0,
+        TeacherMaskTrainConfig.source_preservation_weight,
+    ]
+    assert [call["source_candidate_family_filter"] for call in train_calls] == ["", "scnet", ""]
+    assert [call["source_candidate_family_filter"] for call in holdout_calls] == ["", "scnet", ""]
+    assert train_calls[2]["mask_output_mode"] == "complex"
+    assert train_calls[2]["complex_mask_ceiling"] == 2.5
     assert all(call["device"] == "cuda" for call in train_calls)
     assert train_calls[0]["command_args"][:4] == ["--matrix-config-id", "baseline", "--scope", "vocal_matrix__baseline"]
     assert holdout_calls[0]["command_args"][:4] == ["--matrix-config-id", "baseline", "--scope", "vocal_matrix__baseline"]
+    assert "--source-candidate-family-filter" in holdout_calls[1]["command_args"]
     assert all(call["require_gpu"] is True for call in holdout_calls)
     assert manifest["matrix_validation_status"] == "passed"
     assert manifest["best_config_id"] == "knn_memory"
     assert manifest["passed_config_count"] == 1
-    assert manifest["failed_config_count"] == 1
+    assert manifest["failed_config_count"] == 2
     assert manifest["delivery_allowed"] is False
     assert manifest["release_ready"] is False
     assert manifest["presentation_status"] == "training_matrix_artifact_not_for_listen_pack"
+    assert manifest["pseudo_teacher_examples_jsonl"] == str(pseudo_examples)
+    assert manifest["contract"]["holdout_uses_verified_examples_only"] is True
+    assert manifest["contract"]["pseudo_teacher_rows_not_used_for_holdout"] is True
 
     rows = _read_jsonl(Path(manifest["matrix_rows_jsonl"]))
-    assert [row["config_id"] for row in rows] == ["baseline", "knn_memory"]
+    assert [row["config_id"] for row in rows] == ["baseline", "knn_memory", "complex_mask"]
     assert rows[0]["status"] == "failed"
     assert rows[1]["status"] == "passed"
+    assert rows[2]["status"] == "failed"
     assert rows[1]["metrics"]["min_candidate_sdr_db"] == 4.5
 
     progress_rows = _read_jsonl(Path(manifest["progress_jsonl"]))
-    assert [row["event"] for row in progress_rows] == [
-        "start",
-        "config_start",
-        "config_finish",
-        "config_start",
-        "config_finish",
-        "finish",
-    ]
+    progress_events = [row["event"] for row in progress_rows]
+    assert progress_events[0] == "start"
+    assert progress_events[-1] == "finish"
+    assert progress_events.count("config_start") == 3
+    assert progress_events.count("config_finish") == 3
     assert progress_rows[0]["expected_acceleration_mode"] == "gpu_training_and_holdout"
     assert progress_rows[0]["gpu_training_required"] is True
+
+
+def test_matrix_releases_cuda_between_training_holdout_and_configs(tmp_path: Path, monkeypatch) -> None:
+    examples = _write_json(tmp_path / "examples.jsonl", [])
+    matrix = _write_json(tmp_path / "matrix.json", [{"id": "first"}, {"id": "second"}])
+
+    def fake_train(**kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = output_dir / "adapter.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        run_rows = output_dir / "generic_audio_finetune_run_rows.jsonl"
+        run_rows.write_text(
+            json.dumps(
+                {
+                    "scope": kwargs["scope"],
+                    "status": "executed",
+                    "example_id": f"{kwargs['scope']}-adapter",
+                    "track_id": f"{kwargs['scope']}-adapter",
+                    "checkpoint_path": str(checkpoint),
+                    "checkpoint_sha256": kwargs["scope"],
+                    "device_used": 1.0,
+                    "progress_first_event": "start",
+                    "progress_last_event": "finish",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "adapter_id": f"{kwargs['scope']}-adapter",
+            "checkpoint_path": str(checkpoint),
+            "checkpoint_sha256": kwargs["scope"],
+            "run_rows_jsonl": str(run_rows),
+            "delivery_allowed": False,
+            "release_ready": False,
+        }
+
+    def fake_holdout(**kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        rows_path = output_dir / "generic_audio_finetune_holdout_rows.jsonl"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        rows_path.write_text(
+            json.dumps(
+                {
+                    "status": "passed",
+                    "failed_checks": [],
+                    "metrics": {"candidate_sdr_db": 4.0, "improvement_db": 1.0},
+                    "application_device_used": 1.0,
+                    "delivery_allowed": False,
+                    "release_ready": False,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "holdout_validation_status": "passed",
+            "holdout_eval_count": 1,
+            "passed_eval_count": 1,
+            "failed_eval_count": 0,
+            "holdout_rows_jsonl": str(rows_path),
+            "delivery_allowed": False,
+            "release_ready": False,
+        }
+
+    import tools.run_generic_audio_finetune_matrix as module
+
+    monkeypatch.setattr(module, "train_generic_audio_teacher_mask_adapter", fake_train)
+    monkeypatch.setattr(module, "validate_generic_audio_finetune_holdout", fake_holdout)
+
+    manifest = run_generic_audio_finetune_matrix(
+        audio_training_examples_jsonl=examples,
+        config_matrix_json=matrix,
+        output_dir=tmp_path / "matrix_run",
+        stem="vocal",
+        scope="vocal_matrix",
+        device="cuda",
+        require_gpu=True,
+    )
+
+    progress_rows = _read_jsonl(Path(manifest["progress_jsonl"]))
+    cleanup_rows = [row for row in progress_rows if row["event"] == "cuda_phase_cleanup_finish"]
+    cleanup_phases = [row["cleanup_phase"] for row in cleanup_rows]
+
+    assert cleanup_phases == [
+        "after_training_before_holdout",
+        "after_holdout_before_next_config",
+        "before_next_config_training",
+        "after_training_before_holdout",
+        "after_holdout_before_next_config",
+    ]
+    assert all(row["gpu_training_required"] is True for row in cleanup_rows)
+    assert all(row["gpu_inference_required"] is True for row in cleanup_rows)
 
 
 def test_matrix_fails_closed_when_no_config_passes_and_never_promotes(tmp_path: Path, monkeypatch) -> None:

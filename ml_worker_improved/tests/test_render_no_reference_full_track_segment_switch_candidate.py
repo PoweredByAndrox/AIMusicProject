@@ -31,13 +31,16 @@ def write_jsonl(path: Path, rows: list[dict]) -> Path:
 
 
 def candidate_row(tmp_path: Path, candidate_id: str, *, vocal_value: float, minus_value: float, seconds: float = 4.0) -> dict:
+    minus_path = write_wav(tmp_path / candidate_id / "minus.wav", minus_value, seconds=seconds)
     return {
         "track_id": "track-a",
         "candidate_id": candidate_id,
         "mix_path": write_wav(tmp_path / "mix.wav", 0.5, seconds=seconds),
         "vocal_path": write_wav(tmp_path / candidate_id / "vocal.wav", vocal_value, seconds=seconds),
-        "instrumental_path": write_wav(tmp_path / candidate_id / "minus.wav", minus_value, seconds=seconds),
-        "minus_path": str(tmp_path / candidate_id / "minus.wav"),
+        "instrumental_path": minus_path,
+        "minus_path": minus_path,
+        "source_minus_path": minus_path,
+        "base_minus_path": minus_path,
         "is_complete_pair": True,
     }
 
@@ -80,6 +83,16 @@ def test_full_track_segment_switch_preserves_base_duration_and_overlays_selected
     assert result["requires_dense_post_reconciliation_judge"] is True
     assert result["candidate_row"]["final_decision"] == "pair_reconciliation_candidate"
     assert result["candidate_row"]["requires_dense_post_reconciliation_judge"] is True
+    assert result["base_minus_path"] == base["minus_path"]
+    assert result["source_minus_path"] == base["minus_path"]
+    assert result["candidate_row"]["base_minus_path"] == base["minus_path"]
+    assert result["candidate_row"]["source_minus_path"] == base["minus_path"]
+    assert Path(result["rendered_vocal_candidate_path"]).name == "fts_voc.wav"
+    assert Path(result["rendered_minus_candidate_path"]).name == "fts_min.wav"
+    assert Path(result["candidate_row_jsonl"]).name == "fts_row.jsonl"
+    assert len(Path(result["rendered_vocal_candidate_path"]).name) <= 32
+    assert len(Path(result["rendered_minus_candidate_path"]).name) <= 32
+    assert len(Path(result["candidate_row_jsonl"]).name) <= 32
 
     vocal, vocal_rate = sf.read(result["rendered_vocal_candidate_path"], always_2d=True)
     minus, minus_rate = sf.read(result["rendered_minus_candidate_path"], always_2d=True)
@@ -107,6 +120,28 @@ def test_full_track_segment_switch_blocks_missing_base_candidate(tmp_path: Path)
     )
 
     assert result["render_status"] == "blocked_missing_base_candidate"
+    assert result["audio_exported"] is False
+    assert result["rendered_vocal_candidate_path"] == ""
+    assert result["rendered_minus_candidate_path"] == ""
+
+
+def test_full_track_segment_switch_blocks_missing_base_minus_provenance(tmp_path: Path) -> None:
+    base = candidate_row(tmp_path, "base", vocal_value=0.1, minus_value=0.2)
+    base.pop("source_minus_path", None)
+    base.pop("base_minus_path", None)
+    alt = candidate_row(tmp_path, "alt", vocal_value=0.7, minus_value=0.8)
+
+    result = build_full_track_segment_switch_candidate(
+        [base, alt],
+        [judge_row("base", [0.8, 0.1]), judge_row("alt", [0.1, 0.95])],
+        output_dir=tmp_path / "out",
+        base_candidate_id="base",
+        min_window_score=0.72,
+        crossfade_ms=0,
+    )
+
+    assert result["render_status"] == "blocked_missing_base_minus_provenance"
+    assert result["dominant_failure_reason"] == "missing_base_minus_provenance"
     assert result["audio_exported"] is False
     assert result["rendered_vocal_candidate_path"] == ""
     assert result["rendered_minus_candidate_path"] == ""
@@ -143,4 +178,9 @@ def test_full_track_segment_switch_cli_writes_deterministic_manifest(tmp_path: P
     assert manifest_json.read_text(encoding="utf-8") == first_manifest
     payload = json.loads(first_manifest)
     assert payload["render_status"] == "rendered_full_track_candidate"
+    assert payload["base_minus_path"] == base["minus_path"]
+    assert payload["source_minus_path"] == base["minus_path"]
+    assert Path(payload["rendered_vocal_candidate_path"]).name == "fts_voc.wav"
+    assert Path(payload["rendered_minus_candidate_path"]).name == "fts_min.wav"
+    assert Path(payload["candidate_row_jsonl"]).name == "fts_row.jsonl"
     assert "- render_status: rendered_full_track_candidate" in summary_md.read_text(encoding="utf-8")

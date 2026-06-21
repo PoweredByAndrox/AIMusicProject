@@ -31,8 +31,8 @@ model registry, and never marks artifacts `release_ready`.
 ```bash
 python /app/tools/build_testing_stuff_music_corpus_gate_report.py \
   --corpus-plan-jsonl /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/plan/testing_stuff_music_corpus_plan.jsonl \
-  --execution-results-jsonl /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/execution_nine_vocal_htdemucs6s_v1/testing_stuff_music_corpus_job_execution_results.jsonl \
-  --execution-results-jsonl /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/execution_nine_minus_instrumental_resurrection_v1/testing_stuff_music_corpus_job_execution_results.jsonl \
+  --execution-results-jsonl /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/execution_nine_vocal_htdemucs6s_v1/rows.jsonl \
+  --execution-results-jsonl /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/execution_nine_minus_instrumental_resurrection_v1/rows.jsonl \
   --score-matrix-json /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/nine_melody_score_matrix_v1/no_reference_stem_candidate_score_matrix.json \
   --output-manifest-json /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/corpus_gate_report_v1/testing_stuff_music_corpus_gate_report_manifest.json \
   --summary-md /app/lab_artifacts/testing_stuff_music_corpus_wave_20260613_v1/corpus_gate_report_v1/testing_stuff_music_corpus_gate_report_summary.md

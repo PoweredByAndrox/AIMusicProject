@@ -177,6 +177,27 @@ def test_pairs_minus_candidate_with_separate_vocal_companion(tmp_path: Path) -> 
     assert row["candidate_manifest"].endswith("minus/ir_minus/stem_manifest.json")
 
 
+def test_pairs_minus_candidate_with_all_stems_companion_manifest(tmp_path: Path) -> None:
+    execution_jsonl = write_jsonl(
+        tmp_path / "execution.jsonl",
+        [
+            execution_row(tmp_path, target_stem="minus", model_id="ir_minus", include_vocal_companion=False),
+            execution_row(tmp_path, target_stem="minus", model_id="htdemucs_6s", include_vocal_companion=True),
+        ],
+    )
+
+    result = build_inputs(execution_results_jsonls=[execution_jsonl])
+
+    candidate_ids = [row["candidate_id"] for row in result["rows"]]
+    assert "track_a__minus__ir_minus" in candidate_ids
+    ir_row = next(row for row in result["rows"] if row["candidate_id"] == "track_a__minus__ir_minus")
+    assert ir_row["minus_path"].endswith("minus/ir_minus/minus.flac")
+    assert ir_row["vocal_path"].endswith("minus/htdemucs_6s/vocals.flac")
+    assert ir_row["minus_path"] != ir_row["vocal_path"]
+    assert result["summary"]["delivery_allowed"] is False
+    assert result["summary"]["release_ready"] is False
+
+
 def test_pairs_minus_candidate_with_deterministic_vocal_companion(tmp_path: Path) -> None:
     execution_jsonl = write_jsonl(
         tmp_path / "execution.jsonl",

@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -26,13 +27,41 @@ CommandRunner = Callable[[list[str]], Any]
 EXECUTION_MANIFEST_NAME = "registry_candidate_execution_manifest.json"
 STDOUT_LOG_NAME = "registered_candidate_stdout.log"
 STDERR_LOG_NAME = "registered_candidate_stderr.log"
+PROGRESS_LOG_NAME = "registered_candidate_progress.jsonl"
 VOCAL_STEM_ALIASES = {"vocal", "vocals", "voice"}
 MINUS_STEM_ALIASES = {"minus", "instrumental", "instrumentals"}
+START_TIME = time.monotonic()
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def progress(path: Path, event: str, *, device: str, **fields: Any) -> None:
+    uses_gpu = str(device).strip().lower() == "cuda"
+    payload = {
+        "event": event,
+        "elapsed_sec": round(time.monotonic() - START_TIME, 3),
+        "expected_acceleration_mode": (
+            "gpu_registered_model_inference" if uses_gpu else "cpu_registered_model_inference"
+        ),
+        "gpu_inference_required": uses_gpu,
+        "gpu_inference_skipped": not uses_gpu,
+    }
+    if not uses_gpu:
+        payload["gpu_skip_reason"] = "registered_candidate_device_not_cuda"
+    payload.update(fields)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.flush()
+
+
+def output_artifact_count(output_dir: Path) -> int:
+    if not output_dir.exists():
+        return 0
+    return sum(1 for child in output_dir.iterdir() if child.is_file())
 
 
 def expected_manifest_path(
@@ -131,7 +160,8 @@ def normalize_target_stem(stem: str | None) -> str | None:
 
 
 def command_with_target_stem_runtime_flags(command: list[str], target_stem: str | None) -> list[str]:
-    if normalize_target_stem(target_stem) != "minus":
+    normalized_target = normalize_target_stem(target_stem)
+    if normalized_target not in {"minus", "vocal"}:
         return command
     if "--no-melody-stem" in command:
         return command
@@ -322,6 +352,16 @@ def run_registered_model_candidate(
     )
     command = command_with_target_stem_runtime_flags(command, target_stem)
     execution_manifest_path = output_dir / EXECUTION_MANIFEST_NAME
+    progress_path = output_dir / PROGRESS_LOG_NAME
+    if progress_path.exists():
+        progress_path.unlink()
+    candidate_manifest_path = expected_manifest_path(
+        expected_manifest_template=entry.expected_manifest,
+        source_audio_path=source_audio_path,
+        output_dir=output_dir,
+        listen_dir=listen_dir,
+        device=device,
+    )
     manifest = build_base_execution_manifest(
         model_id=model_id,
         source_audio_path=source_audio_path,
@@ -329,6 +369,20 @@ def run_registered_model_candidate(
         device=device,
         command=command,
         registry=registry,
+    )
+    manifest["progress_jsonl"] = str(progress_path)
+    progress(
+        progress_path,
+        "start",
+        device=device,
+        phase="input_validation",
+        model_id=model_id,
+        target_stem=normalize_target_stem(target_stem),
+        source_audio_path=str(source_audio_path),
+        output_dir=str(output_dir),
+        execution_manifest_path=str(execution_manifest_path),
+        expected_candidate_manifest_path=str(candidate_manifest_path),
+        output_artifact_count=output_artifact_count(output_dir),
     )
 
     if not source_audio_path.exists():
@@ -339,9 +393,30 @@ def run_registered_model_candidate(
                 "candidate_manifest": None,
             }
         )
+        progress(
+            progress_path,
+            "failed",
+            device=device,
+            phase="input_validation",
+            model_id=model_id,
+            reason="source_audio_missing",
+            source_audio_path=str(source_audio_path),
+            output_artifact_count=output_artifact_count(output_dir),
+        )
         write_json(execution_manifest_path, manifest)
         raise FileNotFoundError(f"Source audio is missing: {source_audio_path}")
 
+    progress(
+        progress_path,
+        "availability_checked",
+        device=device,
+        phase="availability",
+        model_id=model_id,
+        availability_status=manifest["availability"]["status"],
+        missing_paths=list(manifest["availability"].get("missing_paths") or []),
+        missing_python_modules=list(manifest["availability"].get("missing_python_modules") or []),
+        output_artifact_count=output_artifact_count(output_dir),
+    )
     if manifest["availability"]["status"] != "available":
         manifest.update(
             {
@@ -350,24 +425,46 @@ def run_registered_model_candidate(
                 "candidate_manifest": None,
             }
         )
+        progress(
+            progress_path,
+            "failed",
+            device=device,
+            phase="availability",
+            model_id=model_id,
+            reason=manifest["reason"],
+            output_artifact_count=output_artifact_count(output_dir),
+        )
         write_json(execution_manifest_path, manifest)
         if fail_on_unavailable:
             raise RuntimeError(f"Registered model is unavailable: {model_id}")
         return manifest
 
-    candidate_manifest_path = expected_manifest_path(
-        expected_manifest_template=entry.expected_manifest,
-        source_audio_path=source_audio_path,
-        output_dir=output_dir,
-        listen_dir=listen_dir,
-        device=device,
-    )
     log_paths = command_log_paths(output_dir)
     if command_runner is None:
         manifest["logs"] = log_manifest_entry(log_paths)
     runner = command_runner or (lambda rendered_command: run_command_with_logs(rendered_command, log_paths))
     try:
+        progress(
+            progress_path,
+            "command_start",
+            device=device,
+            phase="registered_model_inference",
+            model_id=model_id,
+            command=list(command),
+            stdout_path=str(log_paths["stdout_path"]),
+            stderr_path=str(log_paths["stderr_path"]),
+            output_artifact_count=output_artifact_count(output_dir),
+        )
         runner(command)
+        progress(
+            progress_path,
+            "command_finish",
+            device=device,
+            phase="registered_model_inference",
+            model_id=model_id,
+            candidate_manifest_exists=candidate_manifest_path.exists(),
+            output_artifact_count=output_artifact_count(output_dir),
+        )
     except Exception as exc:
         if command_runner is not None:
             existing_log_paths = {
@@ -389,6 +486,18 @@ def run_registered_model_candidate(
                 },
             }
         )
+        progress(
+            progress_path,
+            "failed",
+            device=device,
+            phase="registered_model_inference",
+            model_id=model_id,
+            reason="execution_failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            candidate_manifest_exists=candidate_manifest_path.exists(),
+            output_artifact_count=output_artifact_count(output_dir),
+        )
         write_json(execution_manifest_path, manifest)
         raise
 
@@ -403,6 +512,16 @@ def run_registered_model_candidate(
                 },
             }
         )
+        progress(
+            progress_path,
+            "failed",
+            device=device,
+            phase="candidate_manifest_validation",
+            model_id=model_id,
+            reason="expected_manifest_missing",
+            expected_candidate_manifest_path=str(candidate_manifest_path),
+            output_artifact_count=output_artifact_count(output_dir),
+        )
         write_json(execution_manifest_path, manifest)
         raise RuntimeError(f"expected candidate manifest was not created: {candidate_manifest_path}")
 
@@ -411,6 +530,16 @@ def run_registered_model_candidate(
         "exists": True,
     }
     try:
+        progress(
+            progress_path,
+            "target_stem_materialization_start",
+            device=device,
+            phase="target_stem_materialization",
+            model_id=model_id,
+            target_stem=normalize_target_stem(target_stem),
+            candidate_manifest_path=str(candidate_manifest_path),
+            output_artifact_count=output_artifact_count(output_dir),
+        )
         target_artifact = ensure_target_stem_artifact(
             candidate_manifest_path=candidate_manifest_path,
             target_stem=target_stem,
@@ -428,6 +557,18 @@ def run_registered_model_candidate(
                 },
             }
         )
+        progress(
+            progress_path,
+            "failed",
+            device=device,
+            phase="target_stem_materialization",
+            model_id=model_id,
+            reason="target_stem_materialization_failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            candidate_manifest_path=str(candidate_manifest_path),
+            output_artifact_count=output_artifact_count(output_dir),
+        )
         write_json(execution_manifest_path, manifest)
         raise
     if target_artifact is not None:
@@ -440,6 +581,16 @@ def run_registered_model_candidate(
             }
         )
         manifest["inputs"]["target_stem"] = str(target_artifact["target_stem"])
+    progress(
+        progress_path,
+        "target_stem_materialization_finish",
+        device=device,
+        phase="target_stem_materialization",
+        model_id=model_id,
+        target_stem=normalize_target_stem(target_stem),
+        target_audio_path=str(target_artifact["path"]) if target_artifact is not None else None,
+        output_artifact_count=output_artifact_count(output_dir),
+    )
 
     manifest.update(
         {
@@ -447,6 +598,18 @@ def run_registered_model_candidate(
             "reason": "candidate_manifest_created",
             "candidate_manifest": candidate_manifest_entry,
         }
+    )
+    progress(
+        progress_path,
+        "finish",
+        device=device,
+        phase="execution_manifest_write",
+        model_id=model_id,
+        status="completed",
+        reason="candidate_manifest_created",
+        execution_manifest_path=str(execution_manifest_path),
+        candidate_manifest_path=str(candidate_manifest_path),
+        output_artifact_count=output_artifact_count(output_dir),
     )
     write_json(execution_manifest_path, manifest)
     return manifest

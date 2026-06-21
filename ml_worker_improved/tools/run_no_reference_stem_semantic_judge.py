@@ -17,6 +17,10 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.artifact_status_contract import sha256_file, status_view_from_manifest  # noqa: E402
+from tools.run_no_reference_result_judge import (  # noqa: E402
+    judge_candidate_row as judge_no_reference_candidate_row,
+    resolve_path as resolve_no_reference_path,
+)
 
 
 JUDGE_JSONL_NAME = "no_reference_stem_semantic_judge.jsonl"
@@ -24,7 +28,8 @@ SUMMARY_JSON_NAME = "no_reference_stem_semantic_judge_summary.json"
 SUMMARY_MD_NAME = "no_reference_stem_semantic_judge_summary.md"
 PROGRESS_JSONL_NAME = "no_reference_stem_semantic_judge_progress.jsonl"
 
-SUPPORTED_STEMS = {"melody", "drums", "bass", "other"}
+SUPPORTED_STEMS = {"melody", "drums", "bass", "other", "guitar", "piano"}
+MODE_SPECIFIC_STEMS = {"vocal", "minus"}
 MELODY_MIN_DOMINANT_FREQUENCY_HZ = 80.0
 MELODY_BASS_DOMINANT_LOW_BAND_RATIO = 0.70
 MELODY_BASS_DOMINANT_MAX_MID_BAND_RATIO = 0.35
@@ -260,6 +265,26 @@ def stem_semantic_result(stem_type: str, metrics: dict[str, Any]) -> tuple[float
         if low_band_ratio < 0.35:
             blockers.append("bass_low_band_energy_ratio")
         score = 0.25 + 0.50 * low_band_ratio + 0.15 * clip01(rms / 0.01) + 0.10 * clip01(peak / 0.2)
+    elif stem_type in {"guitar", "piano"}:
+        transient_support = max(transient_density, clip01((crest_factor - 4.0) / 8.0))
+        tonal_support = max(
+            pitch_confidence,
+            clip01(0.48 * (1.0 - flatness) + 0.34 * mid_band_ratio + 0.18 * transient_support),
+        )
+        if tonal_support < 0.58 or flatness > 0.55:
+            blockers.append(f"{stem_type}_low_tonal_confidence")
+        if mid_band_ratio < 0.25:
+            blockers.append(f"{stem_type}_low_mid_band_energy_ratio")
+        if low_band_ratio > 0.82 and mid_band_ratio < 0.35:
+            blockers.append(f"{stem_type}_bass_dominant")
+        score = (
+            0.25
+            + 0.34 * tonal_support
+            + 0.18 * mid_band_ratio
+            + 0.12 * (1.0 - flatness)
+            + 0.06 * clip01(rms / 0.01)
+            + 0.05 * clip01(peak / 0.2)
+        )
     elif stem_type == "other":
         score = 0.35 + 0.30 * clip01(rms / 0.005) + 0.20 * clip01(peak / 0.05) + 0.15 * (1.0 - clip01(low_band_ratio))
     else:
@@ -308,22 +333,140 @@ def blocked_row(
     }
 
 
-def judge_listen_manifest(listen_manifest_json: Path) -> dict[str, Any]:
-    payload = read_json(listen_manifest_json)
-    view = status_view_from_manifest(listen_manifest_json)
-    stem_type = view.stem_type
-    selected_audio_path = str(payload.get("selected_audio_path") or payload.get("selected_stem_path") or view.audio_path or "")
-    safety = safety_from_manifest(payload)
-    safety_reason = safety_violation(safety)
-    if stem_type not in SUPPORTED_STEMS:
-        return blocked_row(
+def mode_specific_blocked_row(
+    *,
+    listen_manifest_json: Path,
+    payload: dict[str, Any],
+    stem_type: str,
+    selected_audio_path: str,
+    reason: str,
+    safety: dict[str, bool],
+) -> dict[str, Any]:
+    row = blocked_row(
+        listen_manifest_json=listen_manifest_json,
+        payload=payload,
+        stem_type=stem_type,
+        selected_audio_path=selected_audio_path,
+        reason=reason,
+        safety=safety,
+    )
+    row["score_mode"] = stem_type
+    row["mode_specific_quality_verified"] = False
+    row["mode_specific_judge"] = {
+        "judge_mode": "no_reference_mode_specific",
+        "score_mode": stem_type,
+        "status": "blocked",
+        "reason": reason,
+    }
+    return row
+
+
+def normalized_mode_specific_candidate_row(payload: dict[str, Any], stem_type: str) -> tuple[dict[str, Any] | None, str]:
+    candidate = payload.get("mode_specific_candidate_row")
+    if not isinstance(candidate, dict):
+        return None, "mode_specific_judge_evidence_missing"
+    normalized = dict(candidate)
+    normalized["track_id"] = str(normalized.get("track_id") or payload.get("track_id") or "")
+    normalized["candidate_id"] = str(
+        normalized.get("candidate_id")
+        or payload.get("candidate_id")
+        or f"{normalized['track_id'] or 'track'}_{stem_type}_pair"
+    )
+    if not normalized.get("instrumental_path") and normalized.get("minus_path"):
+        normalized["instrumental_path"] = normalized["minus_path"]
+    required = ["track_id", "candidate_id", "mix_path", "vocal_path", "instrumental_path"]
+    if any(not str(normalized.get(key) or "") for key in required):
+        return None, "mode_specific_judge_evidence_missing"
+    for key in ("mix_path", "vocal_path", "instrumental_path"):
+        if not resolve_no_reference_path(str(normalized[key])).exists():
+            return None, "mode_specific_judge_evidence_missing"
+    return normalized, ""
+
+
+def mode_specific_judge_row(
+    *,
+    listen_manifest_json: Path,
+    payload: dict[str, Any],
+    stem_type: str,
+    selected_audio_path: str,
+    safety: dict[str, bool],
+) -> dict[str, Any]:
+    candidate_row, missing_reason = normalized_mode_specific_candidate_row(payload, stem_type)
+    if candidate_row is None:
+        return mode_specific_blocked_row(
             listen_manifest_json=listen_manifest_json,
             payload=payload,
             stem_type=stem_type,
             selected_audio_path=selected_audio_path,
-            reason="unsupported_stem_type",
+            reason=missing_reason,
             safety=safety,
         )
+    try:
+        judged = judge_no_reference_candidate_row(candidate_row, score_mode=stem_type)
+    except Exception as exc:
+        return mode_specific_blocked_row(
+            listen_manifest_json=listen_manifest_json,
+            payload=payload,
+            stem_type=stem_type,
+            selected_audio_path=selected_audio_path,
+            reason=f"mode_specific_judge_failed:{type(exc).__name__}",
+            safety=safety,
+        )
+    decision_key = f"{stem_type}_decision"
+    score_key = f"{stem_type}_score"
+    blockers_key = f"{stem_type}_blockers"
+    defect_key = f"{stem_type}_dominant_defect"
+    decision = str(judged.get(decision_key) or judged.get("decision") or "blocked_hard_case")
+    blockers = [str(item) for item in judged.get(blockers_key) or [] if str(item)]
+    reasons = blockers or [str(item) for item in judged.get("reasons") or [] if str(item)] or ["mode_specific_quality_not_verified"]
+    verified = decision == "accept_candidate" and not blockers
+    return {
+        "judge_mode": "no_reference_stem_semantic",
+        "score_mode": stem_type,
+        "decision": decision,
+        "stem_semantic_decision": decision,
+        "stem_type": stem_type,
+        "track_id": str(payload.get("track_id") or judged.get("track_id") or ""),
+        "model_name": str(payload.get("model_name") or ""),
+        "selected_audio_path": selected_audio_path,
+        "stem_semantic_score": as_float(judged.get(score_key)),
+        "stem_semantic_blockers": blockers,
+        "reasons": reasons,
+        "semantic_quality_verified": verified,
+        "semantic_quality_status": "mode_specific_proxy_pass" if verified else "mode_specific_proxy_blocked",
+        "mode_specific_quality_verified": verified,
+        "mode_specific_judge": {
+            "judge_mode": "no_reference_mode_specific",
+            "score_mode": stem_type,
+            "candidate_id": str(judged.get("candidate_id") or ""),
+            "decision": decision,
+            "score": as_float(judged.get(score_key)),
+            "blockers": blockers,
+            "dominant_defect": judged.get(defect_key),
+            "mix_path": str(judged.get("mix_path") or ""),
+            "vocal_path": str(judged.get("vocal_path") or ""),
+            "instrumental_path": str(judged.get("instrumental_path") or ""),
+        },
+        "stem_semantic_metrics": judged,
+        "delivery_allowed": False,
+        "presentation_status": "semantic_judge_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "release_ready": False,
+        "can_mark_release_ready": False,
+        "can_publish_as_release": False,
+        "source_listen_manifest": source_ref(listen_manifest_json),
+        "safety": safety,
+    }
+
+
+def judge_listen_manifest(listen_manifest_json: Path) -> dict[str, Any]:
+    payload = read_json(listen_manifest_json)
+    view = status_view_from_manifest(listen_manifest_json)
+    raw_stem_type = str(payload.get("stem_type") or payload.get("target_stem") or "").strip().lower()
+    stem_type = raw_stem_type if view.stem_type == "unknown" and raw_stem_type else view.stem_type
+    selected_audio_path = str(payload.get("selected_audio_path") or payload.get("selected_stem_path") or view.audio_path or "")
+    safety = safety_from_manifest(payload)
+    safety_reason = safety_violation(safety)
     if safety_reason:
         return blocked_row(
             listen_manifest_json=listen_manifest_json,
@@ -350,6 +493,23 @@ def judge_listen_manifest(listen_manifest_json: Path) -> dict[str, Any]:
             stem_type=stem_type,
             selected_audio_path=selected_audio_path,
             reason="audio_path_missing",
+            safety=safety,
+        )
+    if stem_type in MODE_SPECIFIC_STEMS:
+        return mode_specific_judge_row(
+            listen_manifest_json=listen_manifest_json,
+            payload=payload,
+            stem_type=stem_type,
+            selected_audio_path=selected_audio_path,
+            safety=safety,
+        )
+    if stem_type not in SUPPORTED_STEMS:
+        return blocked_row(
+            listen_manifest_json=listen_manifest_json,
+            payload=payload,
+            stem_type=stem_type,
+            selected_audio_path=selected_audio_path,
+            reason="unsupported_stem_type",
             safety=safety,
         )
     metrics = audio_metrics(audio_path)

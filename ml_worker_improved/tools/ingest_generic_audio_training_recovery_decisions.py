@@ -19,6 +19,10 @@ APPROVED_NAME = "approved_audio_training_examples.jsonl"
 REJECTED_NAME = "rejected_audio_training_recovery_rows.jsonl"
 MANIFEST_NAME = "generic_audio_training_recovery_decision_manifest.json"
 PROGRESS_NAME = "generic_audio_training_recovery_decision_progress.jsonl"
+SHORT_APPROVED_NAME = "audio.jsonl"
+SHORT_REJECTED_NAME = "rej.jsonl"
+SHORT_MANIFEST_NAME = "ingest.json"
+SHORT_PROGRESS_NAME = "progress.jsonl"
 
 APPROVE_DECISIONS = {"approve_for_training", "approved_for_training"}
 NON_APPROVE_DECISIONS = {"exclude", "needs_more_evidence", "reject", "rejected"}
@@ -30,6 +34,22 @@ START_TIME = time.monotonic()
 
 class RecoveryDecisionError(ValueError):
     pass
+
+
+def output_names(short_output_names: bool) -> dict[str, str]:
+    if short_output_names:
+        return {
+            "approved": SHORT_APPROVED_NAME,
+            "rejected": SHORT_REJECTED_NAME,
+            "manifest": SHORT_MANIFEST_NAME,
+            "progress": SHORT_PROGRESS_NAME,
+        }
+    return {
+        "approved": APPROVED_NAME,
+        "rejected": REJECTED_NAME,
+        "manifest": MANIFEST_NAME,
+        "progress": PROGRESS_NAME,
+    }
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -153,9 +173,14 @@ def ingest_generic_audio_training_recovery_decisions(
     decisions_jsonl: Path | None = None,
     output_dir: Path,
     include_ready_without_decision: bool = True,
+    short_output_names: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    progress_path = output_dir / PROGRESS_NAME
+    names = output_names(short_output_names)
+    approved_path = output_dir / names["approved"]
+    rejected_path = output_dir / names["rejected"]
+    manifest_path = output_dir / names["manifest"]
+    progress_path = output_dir / names["progress"]
     progress(
         progress_path,
         "start",
@@ -201,6 +226,7 @@ def ingest_generic_audio_training_recovery_decisions(
         "recovery_queue_jsonl": str(recovery_queue_jsonl),
         "decisions_jsonl": str(decisions_jsonl) if decisions_jsonl else "",
         "output_dir": str(output_dir),
+        "short_output_names": bool(short_output_names),
         "fingerprint": stable_hash(
             {
                 "approved": [
@@ -230,9 +256,9 @@ def ingest_generic_audio_training_recovery_decisions(
         "release_status": "training_dataset_artifact_only",
         "release_ready": False,
         "outputs": {
-            "approved_audio_training_examples_jsonl": str(output_dir / APPROVED_NAME),
-            "rejected_rows_jsonl": str(output_dir / REJECTED_NAME),
-            "manifest_json": str(output_dir / MANIFEST_NAME),
+            "approved_audio_training_examples_jsonl": str(approved_path),
+            "rejected_rows_jsonl": str(rejected_path),
+            "manifest_json": str(manifest_path),
             "progress_jsonl": str(progress_path),
         },
         "safety": {
@@ -242,9 +268,9 @@ def ingest_generic_audio_training_recovery_decisions(
             "not_release_artifact": True,
         },
     }
-    write_jsonl(output_dir / APPROVED_NAME, approved_rows)
-    write_jsonl(output_dir / REJECTED_NAME, rejected_rows)
-    write_json(output_dir / MANIFEST_NAME, manifest)
+    write_jsonl(approved_path, approved_rows)
+    write_jsonl(rejected_path, rejected_rows)
+    write_json(manifest_path, manifest)
     progress(progress_path, "finish", **manifest["summary"])
     return manifest
 
@@ -255,6 +281,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--decisions-jsonl", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--no-include-ready-without-decision", action="store_true")
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -269,6 +296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         decisions_jsonl=args.decisions_jsonl,
         output_dir=args.output_dir,
         include_ready_without_decision=not bool(args.no_include_ready_without_decision),
+        short_output_names=bool(args.short_output_names),
     )
     print(json.dumps({"summary": manifest["summary"], "fingerprint": manifest["fingerprint"]}, ensure_ascii=False, sort_keys=True))
     return 0

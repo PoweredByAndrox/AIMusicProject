@@ -20,7 +20,9 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.run_no_reference_result_judge import (  # noqa: E402
+    apply_minus_detail_gate_override,
     as_list,
+    build_minus_musical_detail_preservation_gate,
     clip01,
     judge_audio,
     resample_audio,
@@ -387,12 +389,15 @@ def aggregate_metrics(window_metrics: list[dict[str, Any]], *, score_mode: str =
     aggregated.update(vocal_result)
     aggregated.update(minus_result)
     aggregated.update(pair_result)
+    if score_mode == "minus":
+        aggregated["minus_musical_detail_preservation_gate"] = build_minus_musical_detail_preservation_gate(aggregated)
+        apply_minus_detail_gate_override(aggregated)
     if score_mode == "vocal":
         decision = str(vocal_result["vocal_decision"])
         reasons = stable_unique(as_list(vocal_result.get("vocal_blockers")) or reasons)
     elif score_mode == "minus":
-        decision = str(minus_result["minus_decision"])
-        reasons = stable_unique(as_list(minus_result.get("minus_blockers")) or reasons)
+        decision = str(aggregated.get("minus_decision") or minus_result["minus_decision"])
+        reasons = stable_unique(as_list(aggregated.get("minus_blockers")) or reasons)
     else:
         if severe_reasons:
             decision = "blocked_hard_case"
@@ -467,10 +472,13 @@ def window_metric_summary(window: dict[str, Any], metrics: dict[str, Any], *, sc
     summary.update(score_candidate(summary, "minus"))
     summary.update(pair_compatibility_score(summary, summary))
     score_mode = validate_mode(score_mode)
+    if score_mode == "minus":
+        summary["minus_musical_detail_preservation_gate"] = build_minus_musical_detail_preservation_gate(summary)
+        apply_minus_detail_gate_override(summary)
     if score_mode == "vocal":
         summary["window_fitness"] = summary["vocal_score"]
     elif score_mode == "minus":
-        summary["window_fitness"] = summary["minus_score"]
+        summary["window_fitness"] = 0.0 if summary.get("minus_decision") == "blocked_hard_case" else summary["minus_score"]
     else:
         summary["window_fitness"] = summary["pair_compatibility_score"]
     summary["pair_window_fitness"] = pair_compatibility_score(summary, summary)["pair_compatibility_score"]

@@ -17,6 +17,7 @@ if str(TOOLS_ROOT) not in sys.path:
 
 from docker_runtime import require_docker_runtime  # noqa: E402
 from train_teacher_mask_separator import (  # noqa: E402
+    DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
     apply_teacher_mask_checkpoint_to_source,
     fit_audio_pair,
     read_audio,
@@ -96,6 +97,14 @@ def _is_trainable_example(row: dict[str, Any], *, stem: str) -> bool:
     return bool(str(row.get("source_audio_path") or "").strip() and str(row.get("target_audio_path") or "").strip())
 
 
+def _row_source_candidate_family(row: dict[str, Any]) -> str:
+    for key in ("source_candidate_family", "candidate_family", "family", "candidate_config_family"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def select_checkpoint_rows(
     rows: Sequence[dict[str, Any]],
     *,
@@ -131,11 +140,15 @@ def select_holdout_examples(
     stem: str,
     forbidden_track_ids: set[str],
     max_holdouts: int,
+    source_candidate_family_filter: str = "",
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
+    family_filter = str(source_candidate_family_filter or "").strip()
     for row in rows:
         if not _is_trainable_example(row, stem=stem):
+            continue
+        if family_filter and _row_source_candidate_family(row) != family_filter:
             continue
         holdout_track_id = str(row.get("track_id") or "")
         if not holdout_track_id or holdout_track_id in forbidden_track_ids:
@@ -222,6 +235,13 @@ def _failed_checks(*, candidate_sdr_db: float, improvement_db: float, min_sdr_db
     return failed
 
 
+def _application_failed_checks(error: Exception) -> list[str]:
+    message = str(error)
+    if "source_feature_memory_cost_guard" in message:
+        return ["application_or_metric_error", "source_feature_memory_cost_guard"]
+    return ["application_or_metric_error"]
+
+
 def evaluate_holdout_pair(
     *,
     checkpoint_row: dict[str, Any],
@@ -231,6 +251,9 @@ def evaluate_holdout_pair(
     device: str,
     min_sdr_db: float,
     min_improvement_db: float,
+    progress_path: Path | None = None,
+    progress_context: dict[str, Any] | None = None,
+    max_source_feature_memory_distance_ops: int = DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
 ) -> dict[str, Any]:
     checkpoint_id = str(checkpoint_row.get("example_id") or "checkpoint")
     holdout_id = str(holdout_row.get("id") or holdout_row.get("example_id") or "holdout")
@@ -242,6 +265,9 @@ def evaluate_holdout_pair(
         stem_name=stem,
         device=device,
         command_args=[],
+        progress_path=progress_path,
+        progress_context=progress_context,
+        max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
     )
     application_diagnostics = manifest.get("application", {}).get("diagnostics", {})
     candidate_path = _stem_output_path(manifest, stem, pair_dir)
@@ -272,6 +298,7 @@ def evaluate_holdout_pair(
         "holdout_track_id": str(holdout_row.get("track_id") or ""),
         "holdout_source_audio_path": str(holdout_row["source_audio_path"]),
         "holdout_target_audio_path": str(holdout_row["target_audio_path"]),
+        "holdout_source_candidate_family": _row_source_candidate_family(holdout_row),
         "candidate_audio_path": str(candidate_path),
         "application_manifest_path": str(pair_dir / "stem_manifest.json"),
         "application_device": str(application_diagnostics.get("device") or ""),
@@ -308,6 +335,8 @@ def validate_generic_audio_finetune_holdout(
     min_checkpoint_pass_rate: float = 1.0,
     max_checkpoints: int = 0,
     max_holdouts_per_checkpoint: int = 2,
+    max_source_feature_memory_distance_ops: int = DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
+    source_candidate_family_filter: str = "",
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     stem = validate_stem_name(stem)
@@ -330,6 +359,7 @@ def validate_generic_audio_finetune_holdout(
         scope=str(scope or ""),
         stem=stem,
         selected_checkpoint_count=len(checkpoint_rows),
+        source_candidate_family_filter=str(source_candidate_family_filter or ""),
     )
     rows: list[dict[str, Any]] = []
     checkpoint_summaries: list[dict[str, Any]] = []
@@ -342,6 +372,7 @@ def validate_generic_audio_finetune_holdout(
             stem=stem,
             forbidden_track_ids=forbidden_track_ids,
             max_holdouts=int(max_holdouts_per_checkpoint),
+            source_candidate_family_filter=str(source_candidate_family_filter or ""),
         )
         progress(
             progress_path,
@@ -364,7 +395,15 @@ def validate_generic_audio_finetune_holdout(
                 checkpoint_example_id=str(checkpoint_row.get("example_id") or ""),
                 holdout_example_id=str(holdout_row.get("id") or holdout_row.get("example_id") or ""),
                 holdout_track_id=str(holdout_row.get("track_id") or ""),
+                max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
             )
+            holdout_progress_context = {
+                "checkpoint_index": checkpoint_index,
+                "holdout_index": holdout_index,
+                "checkpoint_example_id": str(checkpoint_row.get("example_id") or ""),
+                "holdout_example_id": str(holdout_row.get("id") or holdout_row.get("example_id") or ""),
+                "holdout_track_id": str(holdout_row.get("track_id") or ""),
+            }
             try:
                 row = evaluate_holdout_pair(
                     checkpoint_row=checkpoint_row,
@@ -374,12 +413,25 @@ def validate_generic_audio_finetune_holdout(
                     device=device,
                     min_sdr_db=float(min_sdr_db),
                     min_improvement_db=float(min_improvement_db),
+                    progress_path=progress_path,
+                    progress_context=holdout_progress_context,
+                    max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
                 )
             except Exception as exc:
+                failed_checks = _application_failed_checks(exc)
+                progress(
+                    progress_path,
+                    "holdout_application_failed",
+                    device=device,
+                    checkpoint_index=checkpoint_index,
+                    holdout_index=holdout_index,
+                    failed_checks=failed_checks,
+                    error=str(exc),
+                )
                 row = {
                     "schema": "generic_audio_finetune_holdout_row.v1",
                     "status": "failed",
-                    "failed_checks": ["application_or_metric_error"],
+                    "failed_checks": failed_checks,
                     "error": str(exc),
                     "stem": stem,
                     "checkpoint_example_id": str(checkpoint_row.get("example_id") or ""),
@@ -453,6 +505,8 @@ def validate_generic_audio_finetune_holdout(
             "min_checkpoint_pass_rate": float(min_checkpoint_pass_rate),
             "max_checkpoints": int(max_checkpoints),
             "max_holdouts_per_checkpoint": int(max_holdouts_per_checkpoint),
+            "max_source_feature_memory_distance_ops": int(max_source_feature_memory_distance_ops),
+            "source_candidate_family_filter": str(source_candidate_family_filter or ""),
         },
         "holdout_validation_status": holdout_status,
         "training_started": False,
@@ -498,6 +552,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-checkpoint-pass-rate", type=float, default=1.0)
     parser.add_argument("--max-checkpoints", type=int, default=0)
     parser.add_argument("--max-holdouts-per-checkpoint", type=int, default=2)
+    parser.add_argument(
+        "--max-source-feature-memory-distance-ops",
+        type=int,
+        default=DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
+    )
+    parser.add_argument("--source-candidate-family-filter", default="")
     parser.add_argument("--fail-on-failed-holdout", action="store_true")
     return parser
 
@@ -523,6 +583,8 @@ def main(argv: list[str] | None = None) -> int:
         min_checkpoint_pass_rate=float(args.min_checkpoint_pass_rate),
         max_checkpoints=int(args.max_checkpoints),
         max_holdouts_per_checkpoint=int(args.max_holdouts_per_checkpoint),
+        max_source_feature_memory_distance_ops=int(args.max_source_feature_memory_distance_ops),
+        source_candidate_family_filter=str(args.source_candidate_family_filter or ""),
         command_args=command_args,
     )
     print(json.dumps({"manifest_path": str(args.output_dir / HOLDOUT_MANIFEST_NAME), "holdout_validation_status": manifest["holdout_validation_status"]}, indent=2))

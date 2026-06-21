@@ -1,0 +1,1510 @@
+Да. Ниже — **полный прагматичный план дообучения `Qwen/Qwen3-4B-Thinking-2507` через QLoRA/LoRA** под твой кейс: локальный LLM, TradingView/Pine Script/RAG, без Ollama, желательно Docker/WSL, с последующим экспортом в GGUF.
+
+Сразу главное: **для этой модели я бы делал QLoRA, не full fine-tune**. `Qwen3-4B-Thinking-2507` — 4B causal language model, thinking-only, с 36 слоями и native context 262,144 токена; у неё уже встроен thinking-шаблон, и `enable_thinking=True` больше не нужен. Модель сама использует `<think>`, а в выводе может быть только `</think>` без явного открывающего тега — это нормально по карточке модели. ([Hugging Face][1])
+
+---
+
+# 1. Цель обучения
+
+Тебе не нужно “сделать модель умнее вообще”. Это плохая цель.
+
+Тебе нужно дообучить её на **конкретные навыки**:
+
+```text
+1. Понимать Pine Script v4/v5/v6.
+2. Объяснять торговую логику индикаторов и стратегий.
+3. Генерировать корректный Pine Script по ТЗ.
+4. Находить repaint / lookahead / future leak.
+5. Переписывать indicator → strategy.
+6. Объединять несколько индикаторов в одну стратегию.
+7. Работать в фиксированном формате ответа.
+8. Следовать твоему инженерному протоколу: не врать, не говорить “проверено”, если не проверено.
+9. Давать reasoning-ответы, но не превращать каждый ответ в бесконечную простыню.
+```
+
+Плохие цели:
+
+```text
+- “Сделать её супер reasoning-моделью”.
+- “Научить её всему TradingView”.
+- “Залить весь мусорный датасет и ждать улучшения”.
+- “Дообучить на сгенерированных ответах без проверки”.
+```
+
+---
+
+# 2. Базовая архитектура пайплайна
+
+Правильная схема:
+
+```text
+HF model:
+Qwen/Qwen3-4B-Thinking-2507
+        ↓
+dataset.jsonl
+        ↓
+Unsloth + QLoRA 4-bit
+        ↓
+LoRA adapter
+        ↓
+eval на holdout-задачах
+        ↓
+если стало лучше:
+    merge adapter + base model
+        ↓
+экспорт в GGUF
+        ↓
+локальный запуск через llama.cpp / LM Studio / vLLM / SGLang
+```
+
+Неправильная схема:
+
+```text
+GGUF → обучение
+```
+
+GGUF — это финальный формат для инференса, не нормальная база для LoRA-обучения.
+
+---
+
+# 3. Почему именно QLoRA
+
+`Qwen3-4B-Thinking-2507` маленькая по меркам LLM, но full fine-tune всё равно не нужен. QLoRA обучает маленькие адаптеры поверх замороженной 4-bit модели. Оригинальная QLoRA-работа описывает обучение через frozen 4-bit quantized pretrained model + LoRA adapters, с NF4, double quantization и paged optimizers для снижения памяти. ([arXiv][2])
+
+Для тебя:
+
+```text
+12 GB VRAM  → QLoRA нормально.
+32 GB VRAM  → QLoRA комфортно, LoRA 16-bit тоже можно пробовать.
+96 GB RAM   → достаточно для подготовки датасета, merge, конвертации.
+```
+
+Unsloth заявляет для Qwen3 fine-tuning ускорение примерно 2×, до 70% меньше VRAM и поддержку более длинного контекста; их же документация рекомендует для тестов начинать с `max_seq_length=2048` и `load_in_4bit=True`. ([Unsloth - Train and Run Models Locally][3])
+
+---
+
+# 4. Важный нюанс именно Qwen3-Thinking
+
+У Qwen3 thinking-режима есть структурный формат:
+
+```text
+<|im_start|>user
+...
+<|im_end|>
+<|im_start|>assistant
+<think>
+reasoning content
+</think>
+
+final answer
+<|im_end|>
+```
+
+Qwen документация описывает thinking-блок через `<think>` и `</think>`, причём thinking block должен быть включён только в финальном раунде, кроме multi-step tool calls. ([Qwen][4])
+
+Но жёсткий вывод такой:
+
+**Не надо обучать её на длинном мусорном chain-of-thought.**
+
+Лучший вариант:
+
+```text
+<think>
+Краткий план решения: определить версию Pine, проверить repaint, выделить entry/exit, затем переписать код.
+</think>
+
+Итоговый ответ:
+...
+```
+
+То есть reasoning должен быть:
+
+```text
+- короткий;
+- проверяемый;
+- технический;
+- без фантазий;
+- не длиннее, чем нужно.
+```
+
+Если ты зальёшь огромные искусственные “размышления”, модель станет болтливой, медленной и менее полезной.
+
+---
+
+# 5. Формат датасета
+
+Я бы делал **три уровня датасета**.
+
+## Уровень A — instruction tuning
+
+Пример JSONL:
+
+````json
+{"messages":[{"role":"system","content":"Ты senior Pine Script engineer. Отвечай точно, не выдумывай проверки."},{"role":"user","content":"Перепиши этот indicator в strategy и сохрани логику сигналов:\n//@version=5\nindicator(\"...\")\n..."},{"role":"assistant","content":"<think>\nНужно заменить indicator() на strategy(), сохранить условия buy/sell, добавить strategy.entry и strategy.close. Repaint нужно проверить отдельно.\n</think>\n\n```pine\n//@version=5\nstrategy(\"...\", overlay=true)\n...\n```\n\nПроверка: ..."}]}
+````
+
+## Уровень B — code repair
+
+````json
+{"messages":[{"role":"system","content":"Ты проверяешь Pine Script код на ошибки компиляции и repaint."},{"role":"user","content":"Найди ошибки в коде:\n//@version=5\nstrategy(\"X\")\nrequest.security(syminfo.tickerid, \"5\", close[0], lookahead=barmerge.lookahead_on)\n..."},{"role":"assistant","content":"<think>\nЕсть риск future leak из-за lookahead_on. Нужно заменить на lookahead_off и объяснить последствия.\n</think>\n\nОшибка: используется `barmerge.lookahead_on`, это может давать future leak...\n\nИсправление:\n```pine\n...\n```"}]}
+````
+
+## Уровень C — strategy spec generation
+
+```json
+{"messages":[{"role":"system","content":"Ты создаёшь техническое ТЗ для торговой стратегии. Не обещай прибыль."},{"role":"user","content":"Создай спецификацию XAUUSD 1m scalping strategy: liquidity sweep, MSB, ATR SL, TP1/TP2, no repaint."},{"role":"assistant","content":"<think>\nНужно описать условия входа, фильтры, риск-менеджмент, no-repaint ограничения и тестовые критерии.\n</think>\n\n# Strategy Spec\n...\n"}]}
+```
+
+---
+
+# 6. Что включать в датасет
+
+Твой датасет должен быть не “много”, а **чисто и проверяемо**.
+
+Минимальный состав:
+
+```text
+1. 500–1000 примеров Pine Script объяснения.
+2. 500–1000 примеров indicator → strategy.
+3. 300–700 примеров bugfix / compile error.
+4. 300–700 примеров repaint-detection.
+5. 300–700 примеров strategy spec по текстовому запросу.
+6. 100–300 примеров отказа от ложных утверждений:
+   “Я не могу подтвердить, что стратегия прибыльная без backtest.”
+7. 100–300 примеров строгого JSON/Markdown формата.
+```
+
+Стартовый нормальный объём:
+
+```text
+2,000–5,000 качественных примеров
+```
+
+Не начинай с 100k. Это типичная ошибка.
+
+---
+
+# 7. Что НЕ включать
+
+Не включать:
+
+```text
+- чужой закрытый/protected/invite-only Pine Script;
+- мусорные ответы GPT без проверки;
+- дубли;
+- одинаковые задачи с разными ответами;
+- код, который не компилируется, если он не помечен как broken-example;
+- “эта стратегия прибыльная” без backtest;
+- огромные reasoning-тексты на 5–10k токенов;
+- данные с future leak как хорошие примеры.
+```
+
+Для твоего TradingView/RAG-проекта особенно важно: **только open-source Pine Script и с сохранением source/license metadata**.
+
+---
+
+# 8. Разделение датасета
+
+Структура:
+
+```text
+data/
+  raw/
+    tradingview_open_source/
+    synthetic_checked/
+    manual_gold/
+  processed/
+    train.jsonl
+    val.jsonl
+    test.jsonl
+  eval/
+    pine_compile_tasks.jsonl
+    repaint_detection_tasks.jsonl
+    strategy_generation_tasks.jsonl
+```
+
+Разделение:
+
+```text
+train: 85%
+val:   10%
+test:   5%
+```
+
+Но важнее другое:
+
+```text
+test не должен содержать почти такие же примеры, как train
+```
+
+Иначе eval будет фейковый.
+
+---
+
+# 9. Метрики
+
+Обычный `loss` недостаточен.
+
+Нужно смотреть:
+
+```text
+1. train_loss
+2. eval_loss
+3. token_accuracy
+4. exact format accuracy
+5. Pine compile rate
+6. repaint detection accuracy
+7. strategy spec completeness
+8. hallucination rate
+9. refusal correctness
+10. regression against base model
+```
+
+Для Pine Script:
+
+```text
+Главная метрика №1: компилируется или нет.
+Главная метрика №2: не использует future leak.
+Главная метрика №3: соблюдает ТЗ.
+```
+
+Если loss падает, но Pine-код стал хуже — обучение плохое.
+
+---
+
+# 10. Конфигурация обучения — стартовая
+
+Для первого прогона:
+
+```yaml
+model_name: Qwen/Qwen3-4B-Thinking-2507
+method: qlora
+load_in_4bit: true
+
+max_seq_length: 2048
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0
+
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 0.0002
+epochs: 1
+warmup_ratio: 0.05
+weight_decay: 0.01
+optimizer: paged_adamw_8bit
+save_steps: 100
+eval_steps: 100
+logging_steps: 10
+```
+
+Unsloth в своём hyperparameter guide рекомендует `2e-4` как стартовую learning rate для обычного LoRA/QLoRA, 1–3 epochs для instruction datasets, rank 16 или 32, `lora_alpha` равный `r` или `2r`, и dropout обычно 0–0.1. ([Unsloth - Train and Run Models Locally][5])
+
+---
+
+# 11. Конфигурация после первого успешного теста
+
+Если первый eval хороший:
+
+```yaml
+max_seq_length: 4096
+lora_rank: 32
+lora_alpha: 64
+batch_size: 1
+gradient_accumulation_steps: 8
+epochs: 2
+learning_rate: 0.0001
+```
+
+Если модель начала забывать базовые способности:
+
+```yaml
+lora_rank: 16
+epochs: 1
+learning_rate: 0.00005
+```
+
+Если модель слишком болтливая:
+
+```text
+- уменьшить reasoning-примеры;
+- укоротить assistant content;
+- добавить примеры коротких ответов;
+- добавить штраф в eval за лишний текст;
+- не обучать на длинных <think>.
+```
+
+---
+
+# 12. Установка локально
+
+Я бы делал через **WSL2 Ubuntu** или Docker. На Windows напрямую можно, но CUDA-зависимости часто ломаются.
+
+## Вариант WSL2
+
+```bash
+sudo apt update
+sudo apt install -y git python3.11 python3.11-venv python3-pip build-essential
+
+python3.11 -m venv .venv
+source .venv/bin/activate
+
+pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+pip install --no-deps trl peft accelerate bitsandbytes transformers datasets sentencepiece protobuf
+```
+
+Потом проверка:
+
+```bash
+python - <<'PY'
+import torch
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0))
+PY
+```
+
+Если `False` — не начинай обучение. Сначала чини CUDA.
+
+---
+
+# 13. Структура проекта
+
+```text
+qwen3-thinking-lora/
+  configs/
+    train_qwen3_4b_thinking.yaml
+  data/
+    raw/
+    processed/
+      train.jsonl
+      val.jsonl
+      test.jsonl
+    eval/
+  scripts/
+    prepare_dataset.py
+    validate_dataset.py
+    train_lora.py
+    run_eval.py
+    merge_lora.py
+    export_gguf.sh
+  outputs/
+    runs/
+    adapters/
+    merged/
+    gguf/
+  reports/
+    eval_report.md
+```
+
+---
+
+# 14. Валидация датасета перед обучением
+
+Нужны проверки:
+
+```text
+1. JSONL валидный.
+2. Каждая строка содержит messages.
+3. Есть user и assistant.
+4. Assistant не пустой.
+5. Нет дубликатов.
+6. Нет слишком длинных примеров.
+7. Нет protected/invite-only кода.
+8. Кодовые блоки закрыты.
+9. Pine examples помечены версией.
+10. Thinking-блоки не чрезмерные.
+```
+
+Простой валидатор:
+
+```python
+import json
+from pathlib import Path
+
+path = Path("data/processed/train.jsonl")
+
+seen = set()
+bad = []
+
+for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    try:
+        obj = json.loads(line)
+    except Exception as e:
+        bad.append((i, f"JSON error: {e}"))
+        continue
+
+    messages = obj.get("messages")
+    if not isinstance(messages, list) or len(messages) < 2:
+        bad.append((i, "missing messages"))
+        continue
+
+    roles = [m.get("role") for m in messages]
+    if "user" not in roles or "assistant" not in roles:
+        bad.append((i, "missing user/assistant"))
+        continue
+
+    text = json.dumps(obj, ensure_ascii=False)
+    if text in seen:
+        bad.append((i, "duplicate"))
+    seen.add(text)
+
+    assistant = messages[-1].get("content", "")
+    if not assistant.strip():
+        bad.append((i, "empty assistant"))
+
+    if assistant.count("<think>") > 1 or assistant.count("</think>") > 1:
+        bad.append((i, "too many think tags"))
+
+print(f"checked={i}, bad={len(bad)}")
+for item in bad[:50]:
+    print(item)
+```
+
+---
+
+# 15. Training script
+
+Базовый `train_lora.py`:
+
+```python
+import torch
+from datasets import load_dataset
+from transformers import TrainingArguments
+from trl import SFTTrainer
+from unsloth import FastLanguageModel
+
+MODEL_NAME = "Qwen/Qwen3-4B-Thinking-2507"
+MAX_SEQ_LENGTH = 2048
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name=MODEL_NAME,
+    max_seq_length=MAX_SEQ_LENGTH,
+    dtype=None,
+    load_in_4bit=True,
+)
+
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_alpha=32,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",
+    random_state=3407,
+)
+
+def format_messages(example):
+    text = tokenizer.apply_chat_template(
+        example["messages"],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    return {"text": text}
+
+dataset = load_dataset(
+    "json",
+    data_files={
+        "train": "data/processed/train.jsonl",
+        "validation": "data/processed/val.jsonl",
+    },
+)
+
+dataset = dataset.map(format_messages, remove_columns=dataset["train"].column_names)
+
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["validation"],
+    dataset_text_field="text",
+    max_seq_length=MAX_SEQ_LENGTH,
+    packing=False,
+    args=TrainingArguments(
+        output_dir="outputs/runs/qwen3_4b_thinking_qlora",
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=8,
+        warmup_ratio=0.05,
+        num_train_epochs=1,
+        learning_rate=2e-4,
+        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=torch.cuda.is_bf16_supported(),
+        logging_steps=10,
+        eval_strategy="steps",
+        eval_steps=100,
+        save_strategy="steps",
+        save_steps=100,
+        save_total_limit=3,
+        optim="paged_adamw_8bit",
+        weight_decay=0.01,
+        lr_scheduler_type="cosine",
+        report_to="none",
+        seed=3407,
+    ),
+)
+
+trainer.train()
+
+model.save_pretrained("outputs/adapters/qwen3_4b_thinking_lora")
+tokenizer.save_pretrained("outputs/adapters/qwen3_4b_thinking_lora")
+```
+
+---
+
+# 16. Первый запуск
+
+```bash
+source .venv/bin/activate
+
+python scripts/validate_dataset.py
+
+python scripts/train_lora.py
+```
+
+Во время обучения смотри:
+
+```text
+train_loss падает?
+eval_loss падает?
+нет CUDA OOM?
+нет NaN?
+скорость адекватная?
+checkpoint сохраняется?
+```
+
+Если CUDA OOM:
+
+```yaml
+max_seq_length: 1024
+gradient_accumulation_steps: 16
+lora_rank: 8
+```
+
+Если всё стабильно:
+
+```yaml
+max_seq_length: 4096
+lora_rank: 32
+epochs: 2
+```
+
+---
+
+# 17. Eval после обучения
+
+Не смотри только на loss. Делай отдельный eval.
+
+Минимальный eval-набор:
+
+```text
+eval/
+  50 задач: explain Pine code
+  50 задач: indicator → strategy
+  50 задач: detect repaint
+  50 задач: fix compile error
+  50 задач: generate strategy spec
+  20 задач: refuse false claim
+  20 задач: strict JSON output
+```
+
+Оценка:
+
+```text
+1 балл — правильно
+0.5 — частично
+0 — плохо
+```
+
+Для кода:
+
+```text
+compile_pass: true/false
+uses_lookahead_on: true/false
+uses_security_lower_tf_unsafely: true/false
+has_strategy_entry: true/false
+has_sl_tp: true/false
+```
+
+Самый простой отчёт:
+
+```text
+Base model score:     61/100
+LoRA adapter score:   74/100
+Regression cases:     8
+Improved cases:       31
+Broken format cases:  4
+```
+
+Если у LoRA нет +10–15 пунктов на твоём доменном eval — обучение не стоило делать.
+
+---
+
+# 18. Контроль против деградации
+
+Тестируй не только TradingView.
+
+Добавь general sanity:
+
+```text
+1. простая Python-функция;
+2. объяснение SQL;
+3. JSON formatting;
+4. короткий русский ответ;
+5. английский technical answer;
+6. отказ от непроверяемого утверждения;
+7. “не знаю” при недостатке данных.
+```
+
+Почему: LoRA может улучшить Pine, но испортить общую дисциплину.
+
+---
+
+# 19. Merge LoRA adapter
+
+После успешного eval:
+
+```python
+from unsloth import FastLanguageModel
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="outputs/adapters/qwen3_4b_thinking_lora",
+    max_seq_length=4096,
+    dtype=None,
+    load_in_4bit=False,
+)
+
+model.save_pretrained_merged(
+    "outputs/merged/qwen3_4b_thinking_pine",
+    tokenizer,
+    save_method="merged_16bit",
+)
+```
+
+Если merge через Unsloth не сработает, можно делать через PEFT:
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
+
+base = "Qwen/Qwen3-4B-Thinking-2507"
+adapter = "outputs/adapters/qwen3_4b_thinking_lora"
+out = "outputs/merged/qwen3_4b_thinking_pine"
+
+tokenizer = AutoTokenizer.from_pretrained(base)
+
+model = AutoModelForCausalLM.from_pretrained(
+    base,
+    torch_dtype=torch.float16,
+    device_map="auto",
+)
+
+model = PeftModel.from_pretrained(model, adapter)
+model = model.merge_and_unload()
+
+model.save_pretrained(out, safe_serialization=True)
+tokenizer.save_pretrained(out)
+```
+
+---
+
+# 20. Конвертация в GGUF
+
+После merge:
+
+```bash
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+
+python convert_hf_to_gguf.py \
+  ../outputs/merged/qwen3_4b_thinking_pine \
+  --outfile ../outputs/gguf/qwen3_4b_thinking_pine-f16.gguf \
+  --outtype f16
+
+./llama-quantize \
+  ../outputs/gguf/qwen3_4b_thinking_pine-f16.gguf \
+  ../outputs/gguf/qwen3_4b_thinking_pine-Q4_K_M.gguf \
+  Q4_K_M
+```
+
+Я бы делал две версии:
+
+```text
+Q4_K_M — быстро, экономно
+Q5_K_M — лучше качество
+```
+
+Для 4B на 12–32GB VRAM Q5_K_M обычно имеет смысл.
+
+---
+
+# 21. Локальный inference без Ollama
+
+Так как ты не хочешь Ollama, варианты:
+
+```text
+1. llama.cpp server
+2. vLLM
+3. SGLang
+4. LM Studio, если нужен UI
+```
+
+Карточка модели показывает запуск через vLLM и SGLang с OpenAI-compatible API; для vLLM пример — `vllm serve "Qwen/Qwen3-4B-Thinking-2507"`, для SGLang — `python3 -m sglang.launch_server --model-path "Qwen/Qwen3-4B-Thinking-2507"`. ([Hugging Face][1])
+
+Для твоего инженерного пайплайна лучше:
+
+```text
+llama.cpp server для GGUF
+vLLM/SGLang для safetensors
+```
+
+---
+
+# 22. Docker-план
+
+Минимальная схема:
+
+```text
+docker/
+  Dockerfile.train
+  docker-compose.train.yml
+```
+
+`Dockerfile.train`:
+
+```dockerfile
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y \
+    git python3.11 python3.11-venv python3-pip build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m pip install --upgrade pip
+
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+RUN pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+RUN pip install --no-deps trl peft accelerate bitsandbytes transformers datasets sentencepiece protobuf
+
+CMD ["bash"]
+```
+
+`docker-compose.train.yml`:
+
+```yaml
+services:
+  qwen3-train:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.train
+    container_name: qwen3-thinking-lora-train
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - TOKENIZERS_PARALLELISM=false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: "16gb"
+    stdin_open: true
+    tty: true
+```
+
+Запуск:
+
+```bash
+docker compose -f docker-compose.train.yml build
+docker compose -f docker-compose.train.yml run --rm qwen3-train
+python scripts/train_lora.py
+```
+
+---
+
+# 23. Версии экспериментов
+
+Не перезаписывай адаптеры.
+
+Делай так:
+
+```text
+outputs/adapters/
+  qwen3_pine_v001_r16_seq2048_e1/
+  qwen3_pine_v002_r32_seq4096_e1/
+  qwen3_pine_v003_r32_seq4096_e2/
+```
+
+Каждый запуск должен иметь:
+
+```text
+config.yaml
+train.log
+eval_report.json
+eval_report.md
+adapter files
+dataset_manifest.json
+```
+
+`dataset_manifest.json`:
+
+```json
+{
+  "dataset_version": "pine_sft_v001",
+  "train_rows": 3200,
+  "val_rows": 400,
+  "test_rows": 400,
+  "sources": {
+    "manual_gold": 700,
+    "open_source_pine": 1800,
+    "synthetic_checked": 1500
+  },
+  "excluded": [
+    "protected scripts",
+    "invite-only scripts",
+    "unverified GPT outputs"
+  ]
+}
+```
+
+---
+
+# 24. Рекомендуемые этапы
+
+## Этап 0 — baseline
+
+Сначала протестируй чистую модель без обучения.
+
+```text
+Цель: понять, что она уже умеет.
+```
+
+Сделай 100 задач:
+
+```text
+- 20 Pine explanation
+- 20 bugfix
+- 20 repaint detection
+- 20 strategy generation
+- 20 strict format
+```
+
+Без baseline ты не поймёшь, помогло обучение или нет.
+
+---
+
+## Этап 1 — маленький LoRA smoke test
+
+```yaml
+examples: 300-500
+seq_len: 1024
+rank: 8
+epochs: 1
+```
+
+Цель:
+
+```text
+- проверить установку;
+- проверить формат датасета;
+- проверить, что adapter сохраняется;
+- проверить inference.
+```
+
+Не оценивай качество серьёзно на этом этапе.
+
+---
+
+## Этап 2 — первая реальная версия
+
+```yaml
+examples: 2000-5000
+seq_len: 2048
+rank: 16
+alpha: 32
+epochs: 1
+lr: 2e-4
+```
+
+Цель:
+
+```text
+- получить первый полезный adapter;
+- сравнить с baseline;
+- найти регрессии.
+```
+
+---
+
+## Этап 3 — улучшенная версия
+
+```yaml
+examples: 5000-12000
+seq_len: 4096
+rank: 32
+alpha: 64
+epochs: 1-2
+lr: 1e-4
+```
+
+Цель:
+
+```text
+- лучше длинные Pine-файлы;
+- лучше strategy spec;
+- меньше ошибок формата.
+```
+
+---
+
+## Этап 4 — финальный adapter
+
+```yaml
+seq_len: 4096 или 8192
+rank: 32
+epochs: 2
+lr: 5e-5 или 1e-4
+```
+
+Только если eval показывает пользу.
+
+---
+
+# 25. Для thinking-модели: пропорция данных
+
+Unsloth для Qwen3 пишет, что если нужно сохранить reasoning capability, можно использовать смесь reasoning и non-reasoning, например 75% reasoning и 25% non-reasoning; они предупреждают, что non-reasoning dataset может повлиять на reasoning ability. ([Unsloth - Train and Run Models Locally][3])
+
+Но для твоей задачи я бы сделал не 75/25, а так:
+
+```text
+40% короткий technical reasoning
+40% прямые технические ответы без длинного reasoning
+20% строгий формат / JSON / refusals / anti-hallucination
+```
+
+Почему: тебе нужна не олимпиадная математика, а инженерная дисциплина.
+
+---
+
+# 26. Примеры системных инструкций для датасета
+
+Хороший system prompt:
+
+```text
+Ты senior Pine Script / trading systems engineer.
+Твоя задача — писать проверяемый код и технические объяснения.
+Не обещай прибыльность стратегии.
+Не утверждай, что код протестирован, если в задаче нет результатов backtest/compile.
+При анализе Pine Script обязательно проверяй repaint, lookahead, request.security, barstate, future leak.
+Если информации недостаточно — прямо скажи, чего не хватает.
+```
+
+Плохой system prompt:
+
+```text
+Ты самый лучший трейдер и всегда создаёшь прибыльные стратегии.
+```
+
+Это мусор. Он ухудшит модель.
+
+---
+
+# 27. Типовые ошибки при обучении
+
+## Ошибка 1 — слишком много синтетики
+
+Если 90% датасета — GPT-generated, модель научится имитировать GPT-мусор.
+
+Решение:
+
+```text
+synthetic examples only after validation
+```
+
+## Ошибка 2 — нет negative examples
+
+Модель должна учиться говорить:
+
+```text
+“Это нельзя подтвердить.”
+“Здесь возможен repaint.”
+“Без backtest нельзя утверждать profitability.”
+```
+
+## Ошибка 3 — нет compile/eval
+
+Если ты не проверяешь код, LoRA может красиво писать нерабочий Pine.
+
+## Ошибка 4 — слишком длинный context сразу
+
+Начинай с 2048. Потом 4096. Не надо сразу 32k.
+
+## Ошибка 5 — смешать все задачи в одну кашу
+
+Разделяй:
+
+```text
+explain
+repair
+convert
+generate
+detect
+refuse
+format
+```
+
+---
+
+# 28. Минимальный чеклист “можно запускать обучение”
+
+До старта должно быть:
+
+```text
+[ ] CUDA работает
+[ ] модель скачивается
+[ ] tokenizer.apply_chat_template работает
+[ ] train.jsonl валиден
+[ ] val.jsonl валиден
+[ ] test.jsonl отдельно
+[ ] есть baseline report
+[ ] есть config.yaml
+[ ] есть save path
+[ ] есть eval script
+[ ] есть место на диске минимум 80–120 GB
+```
+
+---
+
+# 29. Критерии успеха
+
+Продолжаем проект, если:
+
+```text
+1. Domain eval вырос минимум на 10%.
+2. Pine compile rate вырос.
+3. Repaint detection улучшился.
+4. Strict format не сломался.
+5. Модель не стала сильно болтливее.
+6. General sanity не упал критично.
+```
+
+Останавливаем или откатываем, если:
+
+```text
+1. Loss падает, а eval хуже.
+2. Модель стала чаще выдумывать.
+3. Код чаще не компилируется.
+4. Модель начала всегда писать огромный <think>.
+5. Ответы стали менее управляемыми.
+```
+
+---
+
+# 30. Мой конкретный рекомендуемый первый запуск
+
+```yaml
+run_name: qwen3_4b_thinking_pine_v001
+
+base_model: Qwen/Qwen3-4B-Thinking-2507
+training_method: QLoRA
+framework: Unsloth
+
+dataset:
+  train_examples: 3000
+  val_examples: 300
+  test_examples: 300
+
+params:
+  max_seq_length: 2048
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.0002
+  epochs: 1
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  optimizer: paged_adamw_8bit
+
+expected_result:
+  adapter only, no merge yet
+```
+
+После этого:
+
+```text
+1. run_eval.py на baseline
+2. run_eval.py на LoRA
+3. сравнение
+4. только потом v002
+```
+
+---
+
+# 31. Жёсткий вывод
+
+`Qwen/Qwen3-4B-Thinking-2507` — хороший кандидат для твоего локального LoRA-эксперимента. Она достаточно маленькая для consumer GPU, но уже thinking-oriented. Ошибка будет не в выборе модели, а в датасете.
+
+Главный рычаг качества:
+
+```text
+не rank,
+не epochs,
+не Unsloth,
+не GPU,
+а качество проверенных training examples и eval.
+```
+
+Твой порядок действий:
+
+```text
+1. Baseline eval чистой Qwen3-4B-Thinking-2507.
+2. Подготовить 2k–5k чистых примеров.
+3. QLoRA r16 seq2048 epoch1.
+4. Domain eval.
+5. Если лучше — r32 seq4096.
+6. Если снова лучше — merge.
+7. Export GGUF.
+8. Локальный запуск без Ollama.
+```
+
+---
+
+## Слабые места плана
+
+1. **Я не вижу твой реальный датасет.** Если он грязный, весь план даст плохой результат.
+2. **Qwen3 thinking-модели чувствительны к шаблону чата.** Нельзя вручную форматировать как попало; лучше использовать `tokenizer.apply_chat_template`.
+3. **Unsloth-бенчмарки частично vendor-provided.** Их цифры по VRAM/скорости полезны, но проверять надо на твоей машине.
+4. **Pine Script eval сложнее обычного text eval.** Нужен отдельный compile/backtest pipeline, иначе ты будешь оценивать красоту ответа, а не рабочий код.
+
+**Уверенность: 90/100.**
+
+[1]: https://huggingface.co/Qwen/Qwen3-4B-Thinking-2507 "Qwen/Qwen3-4B-Thinking-2507 · Hugging Face"
+[2]: https://arxiv.org/abs/2305.14314 "QLoRA: Efficient Finetuning of Quantized LLMs"
+[3]: https://unsloth.ai/docs/models/tutorials/qwen3-how-to-run-and-fine-tune "Qwen3 - How to Run & Fine-tune | Unsloth Documentation"
+[4]: https://qwen.readthedocs.io/en/latest/getting_started/concepts.html "Key Concepts - Qwen"
+[5]: https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide "LoRA fine-tuning Hyperparameters Guide | Unsloth Documentation"
+
+Да, **может ухудшить**. Но не потому, что Unsloth “упрощает данные”. Он **не упрощает датасет**. Он меняет способ обучения модели.
+
+Главная разница:
+
+```text
+Данные остаются теми же.
+Но базовая модель во время QLoRA загружается в 4-bit.
+Обучаются только LoRA-адаптеры.
+```
+
+То есть риск качества есть, но причина другая.
+
+---
+
+## 1. Что именно теряется при QLoRA
+
+При обычной LoRA:
+
+```text
+base model: 16-bit / bf16 / fp16
+trainable: LoRA adapters
+VRAM: больше
+качество: потенциально стабильнее
+```
+
+При QLoRA:
+
+```text
+base model: 4-bit quantized
+trainable: LoRA adapters
+VRAM: меньше
+качество: обычно близко, но не всегда идентично
+```
+
+QLoRA как раз придумана для того, чтобы обучать большие модели на меньшей VRAM, пропуская градиенты через замороженную 4-bit модель в LoRA-адаптеры. В оригинальной статье заявлено, что метод сохраняет близкое к full 16-bit fine-tuning качество, используя NF4, double quantization и paged optimizers. ([arXiv][1]) Hugging Face тоже описывает QLoRA как 4-bit quantization + LoRA training. ([Hugging Face][2])
+
+Но “близко” — это не значит “всегда одинаково”.
+
+---
+
+## 2. Твой страх частично правильный
+
+Ты правильно чувствуешь риск: **экономия VRAM может стоить качества**.
+
+Где QLoRA может быть хуже обычной LoRA:
+
+```text
+1. Очень точное кодогенерирование.
+2. Длинный контекст.
+3. Мелкие синтаксические детали.
+4. Математически чувствительные задачи.
+5. Когда датасет маленький и noisy.
+6. Когда LoRA rank слишком низкий.
+7. Когда модель уже маленькая, например 4B.
+```
+
+Для твоего случая — Pine Script / TradingView / code reasoning — это важно. Кодогенерация чувствительна к мелким ошибкам. Потеря одного символа в Pine может сломать компиляцию.
+
+---
+
+## 3. Но данные QLoRA не “упрощает”
+
+Это важный момент.
+
+QLoRA не делает так:
+
+```text
+сложный пример → простой пример
+длинный код → короткий код
+точные данные → сжатые данные
+```
+
+Она делает другое:
+
+```text
+веса базовой модели хранятся в 4-bit
+LoRA-адаптеры обучаются поверх неё
+```
+
+То есть твой датасет остаётся полным. Не данные становятся проще, а **представление базовой модели становится менее точным**.
+
+---
+
+## 4. Unsloth сам по себе не должен ухудшать качество
+
+Unsloth — это в основном оптимизация реализации:
+
+```text
+меньше VRAM
+быстрее training
+оптимизированные kernels
+gradient checkpointing
+удобная загрузка модели
+```
+
+Он не обязан ухудшать качество, если параметры те же. Но его настройки могут ухудшить результат, если ты ради экономии поставишь слишком агрессивные параметры:
+
+```text
+rank 4 вместо 16/32
+seq_len 1024 вместо 4096
+слишком большой learning rate
+слишком много epochs
+слишком маленький датасет
+неправильный chat template
+```
+
+Unsloth указывает, что QLoRA требует заметно меньше VRAM, например для 7B они дают минимум около 5 GB против 19 GB для 16-bit LoRA. Но это минимумы, не гарантия качества. ([Unsloth - Train and Run Models Locally][3])
+
+---
+
+## 5. Для `Qwen3-4B-Thinking` я бы рассуждал так
+
+Так как модель всего **4B**, у тебя есть два варианта.
+
+### Вариант A — QLoRA
+
+Хорошо для первого этапа:
+
+```text
+быстро
+дёшево по VRAM
+меньше риска OOM
+удобно делать много экспериментов
+```
+
+Минус:
+
+```text
+может быть чуть хуже обычной LoRA на точном коде
+```
+
+### Вариант B — обычная LoRA в 16-bit / bf16
+
+Лучше для финального качества, если хватает VRAM:
+
+```text
+base model не 4-bit
+меньше quantization noise
+потенциально лучше кодогенерация
+лучше для финального адаптера
+```
+
+Минус:
+
+```text
+VRAM больше
+обучение тяжелее
+меньше свободы с seq_len/batch
+```
+
+---
+
+## 6. Что я бы сделал прагматично
+
+Не гадать. Проверить.
+
+Сделай **A/B тест**:
+
+```text
+Одинаковый датасет
+Одинаковый train/val/test split
+Одинаковый eval
+Одинаковый seed
+```
+
+### Run 1 — QLoRA
+
+```yaml
+method: QLoRA
+load_in_4bit: true
+rank: 16
+alpha: 32
+seq_len: 2048
+epochs: 1
+lr: 2e-4
+```
+
+### Run 2 — LoRA 16-bit
+
+```yaml
+method: LoRA
+load_in_4bit: false
+rank: 16
+alpha: 32
+seq_len: 2048
+epochs: 1
+lr: 1e-4
+```
+
+Потом сравнить не loss, а реальные метрики:
+
+```text
+Pine compile rate
+repaint detection accuracy
+format following
+strategy spec completeness
+hallucination rate
+general coding sanity
+```
+
+Если LoRA 16-bit лучше на 5–10% по твоему eval — используй её для финала.
+Если разница 0–3% — QLoRA выгоднее.
+
+---
+
+## 7. Когда QLoRA почти точно достаточно
+
+QLoRA нормальна, если задача:
+
+```text
+научить формат ответа
+научить стиль анализа
+улучшить доменную терминологию
+добавить паттерны Pine
+научить анти-repaint чеклист
+научить структуру strategy spec
+```
+
+То есть для instruction-following и domain adaptation QLoRA обычно достаточно.
+
+---
+
+## 8. Когда лучше LoRA 16-bit
+
+Я бы выбрал обычную LoRA, если тебе критично:
+
+```text
+максимально точный Pine-код
+много compile-sensitive примеров
+длинные файлы 4k–16k tokens
+модель всего 4B и VRAM хватает
+финальная версия после успешного QLoRA-прототипа
+```
+
+Особенно для `Qwen3-4B-Thinking`: модель не огромная, поэтому если у тебя **32 GB VRAM**, я бы финальную версию пробовал через **LoRA 16-bit/bf16**, а не только QLoRA.
+
+---
+
+## 9. Мой жёсткий вывод
+
+Твой вопрос правильный. **Да, QLoRA может дать чуть хуже качество, чем LoRA 16-bit.**
+
+Но:
+
+```text
+QLoRA не портит данные.
+QLoRA снижает точность представления базовой модели.
+Unsloth не обязан ухудшать качество.
+Главный риск — не Unsloth, а 4-bit base + плохие гиперпараметры + слабый eval.
+```
+
+Для твоего случая я бы сделал так:
+
+```text
+1. Первый эксперимент: QLoRA r16 seq2048.
+2. Если даёт прирост — второй: QLoRA r32 seq4096.
+3. Если результат перспективный — финальный A/B:
+   QLoRA r32 vs LoRA 16-bit r16/r32.
+4. Победителя конвертировать в GGUF.
+```
+
+Не выбирай метод по теории. Выбирай по eval.
+
+---
+
+## Минимальная рекомендация
+
+Если у тебя **12 GB VRAM**:
+
+```text
+Начинай с QLoRA.
+Обычная LoRA может быть тесной.
+```
+
+Если у тебя **32 GB VRAM**:
+
+```text
+Прототип — QLoRA.
+Финальный прогон — сравнить с LoRA 16-bit.
+```
+
+Если у тебя **больше 48 GB VRAM**:
+
+```text
+Для 4B модели я бы серьёзно смотрел на LoRA 16-bit/bf16 как основной вариант.
+```
+
+---
+
+## Слабое место моего ответа
+
+Я не могу заранее сказать, что именно у тебя победит: QLoRA или LoRA 16-bit. Для code fine-tuning разница может проявиться только на реальном compile/eval наборе. Поэтому единственный честный ответ — **делать A/B тест**, а не верить заявлениям библиотек.
+
+**Уверенность: 92/100.**
+
+[1]: https://arxiv.org/abs/2305.14314?utm_source=chatgpt.com "QLoRA: Efficient Finetuning of Quantized LLMs"
+[2]: https://huggingface.co/docs/peft/en/developer_guides/quantization?utm_source=chatgpt.com "Quantization"
+[3]: https://unsloth.ai/docs/get-started/fine-tuning-for-beginners/unsloth-requirements?utm_source=chatgpt.com "Unsloth Requirements"

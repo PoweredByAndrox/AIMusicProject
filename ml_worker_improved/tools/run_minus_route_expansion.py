@@ -47,6 +47,7 @@ BLOCKERS = (
     "severe_vocal_bleed_in_minus",
     "phase_comb_filtering",
 )
+PROGRESS_NAME = "minus_route_expansion_progress.jsonl"
 JobRunner = Callable[..., dict[str, Any]]
 JudgeWriter = Callable[..., dict[str, Any]]
 
@@ -285,6 +286,24 @@ def write_summary_md(path: Path, summary: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def append_progress(path: Path, *, started: float, event: str, **fields: Any) -> None:
+    payload = {
+        "event": event,
+        "elapsed_sec": round(time.monotonic() - started, 6),
+        "expected_acceleration_mode": "gpu_registered_model_inference_route_expansion",
+        "gpu_inference_required": True,
+        "gpu_inference_skipped": False,
+        "fallback_used": False,
+        "release_ready": False,
+        **SAFETY_FLAGS,
+    }
+    payload.update(fields)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.flush()
+
+
 def run_minus_route_expansion(
     *,
     input_audio: Path,
@@ -299,6 +318,9 @@ def run_minus_route_expansion(
 ) -> dict[str, Any]:
     started = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress_jsonl = output_dir / PROGRESS_NAME
+    if progress_jsonl.exists():
+        progress_jsonl.unlink()
     registry_profile = profile_to_registry_profile(profile)
     configs = list(registry_configs) if registry_configs is not None else build_candidate_job_registry(profile=registry_profile)
     configs_by_id = config_by_id(configs)
@@ -323,6 +345,19 @@ def run_minus_route_expansion(
     job_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     assets: list[dict[str, Any]] = []
+    append_progress(
+        progress_jsonl,
+        started=started,
+        event="start",
+        input_audio_path=str(input_audio),
+        output_dir=str(output_dir),
+        profile=profile,
+        registry_profile=registry_profile,
+        selected_route_count=len(selected),
+        selected_route_ids=[str(row.get("route_id") or "") for row in selected],
+        max_routes=int(max_routes),
+        max_runtime_sec=int(max_runtime_sec),
+    )
     if not input_validation["ok"]:
         failures.append(route_failure_row({"route_id": "input_audio"}, str(input_validation["reason"])))
     for route in selected:
@@ -338,6 +373,17 @@ def run_minus_route_expansion(
             failures.append(route_failure_row(route, registry_blocker))
             continue
         job_dir = output_dir / "jobs" / safe_name(str(route.get("route_id") or config_id))
+        append_progress(
+            progress_jsonl,
+            started=started,
+            event="route_start",
+            route_id=str(route.get("route_id") or config.route_id),
+            candidate_config_id=config_id,
+            source_model_id=config.source_model_id,
+            target_mode=config.target_mode,
+            target_stem=config.target_stem,
+            output_dir=str(job_dir),
+        )
         manifest = job_runner(
             input_audio=input_audio,
             candidate_config_id=config_id,
@@ -372,10 +418,32 @@ def run_minus_route_expansion(
         assets.extend(job_assets)
         if failure is not None:
             failures.append(failure)
+        append_progress(
+            progress_jsonl,
+            started=started,
+            event="route_finish",
+            route_id=str(route.get("route_id") or config.route_id),
+            candidate_config_id=config_id,
+            generation_status=str(manifest.get("generation_status") or ""),
+            audio_rendered=bool(manifest.get("audio_rendered") is True),
+            asset_count=len(job_assets),
+            failure_reason=str((failure or {}).get("skip_reason") or ""),
+        )
 
     candidate_rows = build_pairs(assets, max_candidates=max(0, int(max_routes)) or len(assets))
     judge_input_rows = [row for row in candidate_rows if row.get("vocal_path") and row.get("minus_path")]
     judge_result = {"rows": [], "summary": {}}
+    append_progress(
+        progress_jsonl,
+        started=started,
+        event="judge_start",
+        expected_acceleration_mode="external_only_cpu_dsp_scoring",
+        gpu_inference_required=False,
+        gpu_inference_skipped=True,
+        gpu_inference_skip_reason="minus_route_judge_reads_existing_audio_only",
+        candidate_count=len(judge_input_rows),
+        score_mode="minus",
+    )
     if judge_input_rows:
         judge_result = judge_writer(
             judge_input_rows,
@@ -392,6 +460,17 @@ def run_minus_route_expansion(
         (output_dir / "minus_route_judge_minus_summary.md").write_text("# Minus Route Judge\n\n- candidates_judged: 0\n", encoding="utf-8")
         (output_dir / "minus_route_judge_cache.jsonl").write_text("", encoding="utf-8")
     judged_rows = list(judge_result.get("rows") or [])
+    append_progress(
+        progress_jsonl,
+        started=started,
+        event="judge_finish",
+        expected_acceleration_mode="external_only_cpu_dsp_scoring",
+        gpu_inference_required=False,
+        gpu_inference_skipped=True,
+        gpu_inference_skip_reason="minus_route_judge_reads_existing_audio_only",
+        judged_count=len(judged_rows),
+        score_mode="minus",
+    )
     candidate_rows = augment_candidate_rows(candidate_rows, judged_rows)
     pair_rows = pair_compatibility_rows(candidate_rows, judged_rows)
     summary = build_summary(
@@ -415,6 +494,7 @@ def run_minus_route_expansion(
         "max_routes": int(max_routes),
         "max_runtime_sec": int(max_runtime_sec),
         "route_discovery_json": str(route_discovery_json or output_dir / "minus_route_discovery.json"),
+        "progress_jsonl": str(progress_jsonl),
         "selected_routes": selected,
         "summary": summary,
         **SAFETY_FLAGS,
@@ -425,6 +505,15 @@ def run_minus_route_expansion(
     write_jsonl(output_dir / "minus_route_pair_compatibility.jsonl", pair_rows)
     write_jsonl(output_dir / "minus_route_failures.jsonl", failures)
     write_summary_md(output_dir / "minus_route_expansion_summary.md", summary)
+    append_progress(
+        progress_jsonl,
+        started=started,
+        event="finish",
+        manifest_path=str(output_dir / "minus_route_expansion_manifest.json"),
+        accepted_minus_candidates=summary.get("accepted_minus_candidates"),
+        release_ready_count=summary.get("release_ready_count"),
+        route_space_exhausted=summary.get("route_space_exhausted"),
+    )
     return {
         "manifest_path": str(output_dir / "minus_route_expansion_manifest.json"),
         "summary": summary,

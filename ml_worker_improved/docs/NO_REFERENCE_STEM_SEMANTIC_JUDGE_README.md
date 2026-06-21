@@ -10,6 +10,8 @@ Supported stems:
 - `drums`
 - `bass`
 - `other`
+- `guitar`
+- `piano`
 
 ## Contract
 
@@ -34,6 +36,8 @@ Supported stems:
 - melody: `melody_low_pitch_confidence`, `melody_bass_dominant`
 - drums: `drums_low_transient_density`
 - bass: `bass_low_band_energy_ratio`
+- guitar/piano: `<stem>_low_tonal_confidence`,
+  `<stem>_low_mid_band_energy_ratio`, `<stem>_bass_dominant`
 - unsupported: `unsupported_stem_type`
 
 `melody_bass_dominant` blocks melody candidates whose dominant frequency is
@@ -57,3 +61,6 @@ docker compose run --rm --no-deps ml-worker python tools/run_no_reference_stem_s
 - `no_reference_stem_semantic_judge_progress.jsonl`
 
 This is a semantic proxy gate, not a release-ready gate.
+The `guitar` and `piano` routes are conservative tonal-instrument proxy checks
+based on existing audio metrics; they are not source-separated ground truth or
+melody transcription.

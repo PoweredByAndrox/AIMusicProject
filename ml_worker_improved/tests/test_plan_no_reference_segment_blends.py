@@ -138,6 +138,27 @@ def test_rejects_segment_when_alternate_has_severe_blocker() -> None:
     assert result["summary"]["blocked_segment_candidates"] == 1
 
 
+def test_rejects_segment_when_alternate_has_minus_detail_gate_blocker() -> None:
+    result = build_segment_blend_plan(
+        candidate_pool_rows(),
+        [
+            metric_row("base", window_fitness=0.50, vocal_score=0.80, minus_score=0.45),
+            metric_row(
+                "alt",
+                window_fitness=0.82,
+                vocal_score=0.82,
+                minus_score=0.95,
+                reasons=["minus_detail_gate_blocked"],
+            ),
+        ],
+        [optimizer_row(rejected_reason="vocal_regression_severe")],
+        min_segment_delta=0.05,
+    )
+
+    assert result["rows"] == []
+    assert result["summary"]["blocked_segment_candidates"] == 1
+
+
 def test_proposes_vocal_only_when_minus_regresses() -> None:
     result = build_segment_blend_plan(
         candidate_pool_rows(),

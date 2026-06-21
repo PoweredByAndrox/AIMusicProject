@@ -6,7 +6,11 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from tools.train_generic_audio_teacher_mask_adapter import fingerprint_rows, train_generic_audio_teacher_mask_adapter
+from tools.train_generic_audio_teacher_mask_adapter import (
+    fingerprint_rows,
+    select_training_rows,
+    train_generic_audio_teacher_mask_adapter,
+)
 from tools.train_teacher_mask_separator import TeacherMaskTrainConfig
 
 
@@ -51,6 +55,23 @@ def test_adapter_fingerprint_changes_when_training_config_changes() -> None:
         source_feature_memory_neighbors=3,
         device="cpu",
     )
+    bounded_memory = TeacherMaskTrainConfig(
+        n_fft=256,
+        hop_length=64,
+        hidden_size=64,
+        source_feature_memory_neighbors=3,
+        source_feature_memory_projection_dim=8,
+        source_feature_memory_max_frames=16,
+        device="cpu",
+    )
+    complex_mask = TeacherMaskTrainConfig(
+        n_fft=256,
+        hop_length=64,
+        hidden_size=64,
+        mask_output_mode="complex",
+        complex_mask_ceiling=2.5,
+        device="cpu",
+    )
 
     assert fingerprint_rows(rows, stem="vocal", config=base, max_frames_per_pair=64, max_examples_per_track=1) != fingerprint_rows(
         rows,
@@ -66,6 +87,78 @@ def test_adapter_fingerprint_changes_when_training_config_changes() -> None:
         max_frames_per_pair=128,
         max_examples_per_track=1,
     )
+    assert fingerprint_rows(rows, stem="vocal", config=memory, max_frames_per_pair=64, max_examples_per_track=1) != fingerprint_rows(
+        rows,
+        stem="vocal",
+        config=bounded_memory,
+        max_frames_per_pair=64,
+        max_examples_per_track=1,
+    )
+    assert fingerprint_rows(rows, stem="vocal", config=base, max_frames_per_pair=64, max_examples_per_track=1) != fingerprint_rows(
+        rows,
+        stem="vocal",
+        config=complex_mask,
+        max_frames_per_pair=64,
+        max_examples_per_track=1,
+    )
+
+
+def test_select_training_rows_uses_canonical_group_and_family_filter(tmp_path: Path) -> None:
+    source_a = _write_audio(tmp_path / "a" / "source.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    target_a = _write_audio(tmp_path / "a" / "target.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    source_a_alt = _write_audio(tmp_path / "a_alt" / "source.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    target_a_alt = _write_audio(tmp_path / "a_alt" / "target.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    source_b = _write_audio(tmp_path / "b" / "source.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    target_b = _write_audio(tmp_path / "b" / "target.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    rows = [
+        {
+            "id": "alias-a",
+            "track_id": "alias-a",
+            "source_plan_track_id": "canonical-a",
+            "stem_type": "vocal",
+            "source_candidate_family": "scnet",
+            "source_audio_path": str(source_a),
+            "target_audio_path": str(target_a),
+            "trainable": True,
+        },
+        {
+            "id": "alias-a-alt",
+            "track_id": "alias-a-alt",
+            "source_plan_track_id": "canonical-a",
+            "stem_type": "vocal",
+            "source_candidate_family": "scnet",
+            "source_audio_path": str(source_a_alt),
+            "target_audio_path": str(target_a_alt),
+            "trainable": True,
+        },
+        {
+            "id": "track-b",
+            "track_id": "track-b",
+            "stem_type": "vocal",
+            "source_candidate_family": "melband",
+            "source_audio_path": str(source_b),
+            "target_audio_path": str(target_b),
+            "trainable": True,
+        },
+    ]
+
+    selected = select_training_rows(
+        rows,
+        stem="vocal",
+        exclude_holdout_track_ids=set(),
+        max_examples_per_track=1,
+        source_candidate_family_filter="scnet",
+    )
+    excluded = select_training_rows(
+        rows,
+        stem="vocal",
+        exclude_holdout_track_ids={"canonical-a"},
+        max_examples_per_track=1,
+        source_candidate_family_filter="scnet",
+    )
+
+    assert [row["id"] for row in selected] == ["alias-a"]
+    assert excluded == []
 
 
 def test_trains_shared_adapter_and_writes_holdout_safe_run_rows(tmp_path: Path) -> None:
@@ -122,6 +215,8 @@ def test_trains_shared_adapter_and_writes_holdout_safe_run_rows(tmp_path: Path) 
         activity_weight=10.0,
         source_feature_memory_neighbors=1,
         source_feature_memory_chunk_size=32,
+        source_feature_memory_projection_dim=8,
+        source_feature_memory_max_frames=12,
         seed=2026,
         device="cpu",
     )
@@ -135,6 +230,8 @@ def test_trains_shared_adapter_and_writes_holdout_safe_run_rows(tmp_path: Path) 
     assert manifest["release_ready"] is False
     assert manifest["contract"]["stores_learned_source_feature_memory"] is True
     assert manifest["training"]["diagnostics"]["source_feature_memory_frame_count"] > 0
+    assert manifest["training"]["config"]["source_feature_memory_projection_dim"] == 8
+    assert manifest["training"]["config"]["source_feature_memory_max_frames"] == 12
     assert Path(manifest["checkpoint_path"]).exists()
     assert Path(manifest["training_preview_path"]).exists()
 
@@ -151,3 +248,73 @@ def test_trains_shared_adapter_and_writes_holdout_safe_run_rows(tmp_path: Path) 
     assert progress_rows[-1]["event"] == "finish"
     disk_manifest = _read_json(tmp_path / "shared_adapter" / "generic_audio_teacher_mask_adapter_manifest.json")
     assert disk_manifest["adapter_id"] == manifest["adapter_id"]
+
+
+def test_trains_with_explicit_pseudo_teacher_rows_without_claiming_ground_truth(tmp_path: Path) -> None:
+    sample_rate = 8_000
+    time = np.arange(sample_rate, dtype=np.float64) / sample_rate
+    target = _stereo(0.22 * np.sin(2.0 * np.pi * 660.0 * time))
+    source = target + _stereo(0.18 * np.sin(2.0 * np.pi * 160.0 * time))
+    verified_rows = [
+        {
+            "id": "verified-a",
+            "track_id": "verified-a",
+            "stem_type": "vocal",
+            "source_audio_path": str(_write_audio(tmp_path / "verified-a" / "source.flac", source, sample_rate)),
+            "target_audio_path": str(_write_audio(tmp_path / "verified-a" / "target.flac", target, sample_rate)),
+            "trainable": True,
+            "split": "train",
+            "human_verified": True,
+            "reference_verified": False,
+        }
+    ]
+    pseudo_rows = [
+        {
+            "schema": "generic_finetuning_pseudo_teacher_audio_training_example.v1",
+            "id": "pseudo-b",
+            "track_id": "pseudo-b",
+            "stem_type": "vocal",
+            "source_audio_path": str(_write_audio(tmp_path / "pseudo-b" / "source.flac", source, sample_rate)),
+            "target_audio_path": str(_write_audio(tmp_path / "pseudo-b" / "target.flac", target, sample_rate)),
+            "trainable": True,
+            "split": "train",
+            "pseudo_teacher": True,
+            "human_verified": False,
+            "reference_verified": False,
+            "release_ready": False,
+            "delivery_allowed": False,
+        }
+    ]
+    examples = _write_jsonl(tmp_path / "verified.jsonl", verified_rows)
+    pseudo_examples = _write_jsonl(tmp_path / "pseudo.jsonl", pseudo_rows)
+
+    manifest = train_generic_audio_teacher_mask_adapter(
+        audio_training_examples_jsonl=examples,
+        pseudo_teacher_examples_jsonl=pseudo_examples,
+        output_dir=tmp_path / "shared_adapter",
+        stem="vocal",
+        scope="pseudo_teacher_adapter",
+        min_unique_tracks=2,
+        n_fft=256,
+        hop_length=64,
+        hidden_size=64,
+        epochs=8,
+        batch_size=64,
+        learning_rate=0.01,
+        seed=2026,
+        device="cpu",
+    )
+
+    assert manifest["selected_training_example_count"] == 2
+    assert manifest["verified_training_example_count"] == 1
+    assert manifest["pseudo_teacher_training_example_count"] == 1
+    assert manifest["pseudo_teacher_examples_jsonl"] == str(pseudo_examples)
+    assert manifest["contract"]["pseudo_teacher_targets_used_at_training"] is True
+    assert manifest["contract"]["dirty_stems_never_ground_truth"] is True
+    assert manifest["contract"]["pseudo_teacher_targets_are_ground_truth"] is False
+    assert manifest["delivery_allowed"] is False
+    assert manifest["release_ready"] is False
+
+    progress_rows = _read_jsonl(Path(manifest["progress_jsonl"]))
+    assert progress_rows[0]["pseudo_teacher_input_row_count"] == 1
+    assert progress_rows[0]["pseudo_teacher_training_example_count"] == 1

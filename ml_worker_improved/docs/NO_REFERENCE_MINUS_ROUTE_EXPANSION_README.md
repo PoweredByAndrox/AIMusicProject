@@ -43,16 +43,57 @@ docker compose run --rm ml-worker python tools/run_minus_route_expansion.py \
 Outputs:
 
 - `minus_route_expansion_manifest.json`
+- `minus_route_expansion_progress.jsonl`
 - `minus_route_jobs.jsonl`
 - `minus_route_candidate_pool.jsonl`
 - `minus_route_judge_minus.jsonl`
 - `minus_route_pair_compatibility.jsonl`
+- `minus_route_failures.jsonl`
 - `minus_route_expansion_summary.md`
 
 Each candidate row records `route_id`, `candidate_config_id`, `target_mode`,
 `minus_path`, optional `vocal_path`, source model/tool, generation status,
 shape-normalization provenance, minus judge decision, blockers,
 `accepted_minus`, and `release_ready=false`.
+
+The progress JSONL is part of the contract. It records start/finish events for
+route execution and judge stages, expected acceleration mode, selected route
+ids, and safety flags. Registered model execution is GPU-required; the
+windowed judge is explicitly marked as existing-audio CPU/DSP scoring with
+`gpu_inference_skipped=true`.
+
+Exploration/hard-case discovery may include an already registered Becruily
+instrumental/vocals route:
+
+```text
+local_registered__becruily_instrumental_vocals__both__minus_hard_case
+```
+
+This route is not in the safe default profile. It is provenance-labeled as
+`other_existing`, runs only when explicitly selected by hard-case exploration,
+and still must pass the same minus result judge, windowed judge, pair
+compatibility, and warning-window comparison gates before any listen handoff.
+
+## Matrix-Aware Hard-Case Policy
+
+`tools/no_reference_hard_case_route_policy.py` can consume one or more
+`--candidate-score-matrix-json` files. Matrix evidence is control-plane only:
+it never marks audio as release-ready. The policy derives hard-case triggers
+from blocked matrix `next_action`, result judge blockers, and self-judge proxy
+issues, then selects a locally available route from the registered job registry.
+
+When a matrix-selected route is minus-only but a same-model `both` route is
+locally available, the policy selects the `both` route so the next candidate
+wave can produce a vocal+minus pair for the required gates. The policy also
+tracks failed `model_name`/`source_model_id` values across all supplied matrices
+and refuses to reselect exhausted route families. If no unfailed local route is
+available, it writes:
+
+```text
+route_allowed=false
+route_block_reason=matrix_hard_case_routes_already_failed_or_unavailable
+release_ready=false
+```
 
 ## Validation
 

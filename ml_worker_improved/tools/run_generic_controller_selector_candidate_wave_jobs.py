@@ -23,9 +23,9 @@ from worker.model_registry import ModelRegistry  # noqa: E402
 
 CommandRunner = Callable[..., Any]
 
-CANDIDATE_WAVE_EXECUTION_JOB_MATRIX_NAME = "generic_controller_selector_candidate_wave_execution_job_matrix.jsonl"
-CANDIDATE_WAVE_EXECUTION_MANIFEST_NAME = "generic_controller_selector_candidate_wave_execution_manifest.json"
-CANDIDATE_WAVE_EXECUTION_PROGRESS_NAME = "generic_controller_selector_candidate_wave_execution_progress.jsonl"
+CANDIDATE_WAVE_EXECUTION_JOB_MATRIX_NAME = "jobs.jsonl"
+CANDIDATE_WAVE_EXECUTION_MANIFEST_NAME = "exec.json"
+CANDIDATE_WAVE_EXECUTION_PROGRESS_NAME = "progress.jsonl"
 
 START_TIME = time.monotonic()
 

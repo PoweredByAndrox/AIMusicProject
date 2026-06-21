@@ -536,6 +536,23 @@ def build_minus_musical_detail_preservation_gate(row: dict[str, Any]) -> dict[st
     }
 
 
+def apply_minus_detail_gate_override(row: dict[str, Any]) -> None:
+    gate = row.get("minus_musical_detail_preservation_gate")
+    if not isinstance(gate, dict) or gate.get("status") == "proxy_pass":
+        return
+    blockers = [
+        str(blocker.get("label") or "minus_detail_gate_blocked")
+        for blocker in gate.get("blockers", [])
+        if isinstance(blocker, dict)
+    ]
+    row["decision"] = "blocked_hard_case"
+    row["minus_decision"] = "blocked_hard_case"
+    row["minus_blockers"] = stable_unique(as_list(row.get("minus_blockers")) + ["minus_detail_gate_blocked"] + blockers)
+    row["reasons"] = stable_unique(as_list(row.get("reasons")) + ["minus_detail_gate_blocked"])
+    if not row.get("minus_dominant_defect"):
+        row["minus_dominant_defect"] = "music_damage"
+
+
 def judge_candidate_row(row: dict[str, Any], *, score_mode: str | None = None) -> dict[str, Any]:
     required = ["track_id", "candidate_id", "mix_path", "vocal_path", "instrumental_path"]
     missing = [key for key in required if not row.get(key)]
@@ -565,6 +582,7 @@ def judge_candidate_row(row: dict[str, Any], *, score_mode: str | None = None) -
     }
     if score_mode == "minus":
         judged["minus_musical_detail_preservation_gate"] = build_minus_musical_detail_preservation_gate(judged)
+        apply_minus_detail_gate_override(judged)
     return judged
 
 

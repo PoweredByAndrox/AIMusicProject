@@ -29,7 +29,7 @@ from tools.run_no_reference_minus_delivery_pipeline import (
 )
 from tools.run_no_reference_vocal_delivery_pipeline import run_vocal_delivery_pipeline
 from tools.run_no_reference_stem_semantic_batch import run_batch as run_stem_semantic_batch
-from tools.run_testing_stuff_music_corpus_job_matrix import execute_job_matrix
+from tools.run_testing_stuff_music_corpus_job_matrix import EXECUTION_MANIFEST_NAME, execute_job_matrix
 
 PROGRESS_JSONL_NAME = "testing_stuff_music_corpus_vocal_minus_master_execution_progress.jsonl"
 STEPS_JSONL_NAME = "testing_stuff_music_corpus_vocal_minus_master_execution_steps.jsonl"
@@ -215,7 +215,7 @@ def output_manifest_path(step: dict[str, Any]) -> Path:
         return output_dir / "no_reference_full_stem_pack_manifest.json"
     if gate == "complete_nonvocal_stem_score_matrices":
         return output_dir / str(step["track_id"]) / "stem_score_matrix" / STEM_SCORE_MATRIX_NAME
-    return output_dir / "testing_stuff_music_corpus_job_execution_manifest.json"
+    return output_dir / EXECUTION_MANIFEST_NAME
 
 
 def blocked_step(step: dict[str, Any], status: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -259,7 +259,7 @@ def run_generation_step(
             "step_status": status,
             "execution_started": bool(summary.get("execution_started")),
             "generation_summary": summary,
-            "output_manifest_json": str(Path(str(step["output_dir"])) / "testing_stuff_music_corpus_job_execution_manifest.json"),
+            "output_manifest_json": str(Path(str(step["output_dir"])) / EXECUTION_MANIFEST_NAME),
         }
     )
     return step

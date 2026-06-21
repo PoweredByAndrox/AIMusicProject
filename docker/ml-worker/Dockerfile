@@ -97,6 +97,12 @@ ENV AUDIO_SEPARATOR_PYTHON=/opt/audio-separator-venv/bin/python
 # (allin1==1.1.0 uses the old natten<=0.14 split API which was removed in natten>=0.15)
 RUN python /app/patch_natten_compat.py
 
+COPY docker/ml-worker/requirements-qwen-qlora.txt /app/requirements-qwen-qlora.txt
+
+# Qwen controller adapter route dependencies. Keep this late so QLoRA route
+# updates do not force a rebuild of the heavyweight source-separation layers.
+RUN pip install --no-cache-dir -r /app/requirements-qwen-qlora.txt
+
 # Create necessary directories
 RUN mkdir -p /app/storage \
     /app/faiss_index \

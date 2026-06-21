@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,8 @@ if str(TOOLS_ROOT) not in sys.path:
 from docker_runtime import require_docker_runtime  # noqa: E402
 
 
-DEFAULT_EXCLUDED_STEMS = ("vocals", "vocal")
+DEFAULT_EXCLUDED_STEMS = ("vocals", "vocal", "minus", "instrumental", "instrumentals")
+PEAK_MODES = {"normalize", "clip"}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -32,7 +34,31 @@ def read_stem_audio(stem_path: Path) -> tuple[np.ndarray, int]:
     return np.asarray(audio, dtype=np.float32), int(sample_rate)
 
 
-def resolve_manifest_stems(manifest: dict[str, Any], excluded_stems: set[str]) -> list[tuple[str, Path]]:
+def parse_stem_weights(raw_weights: list[str]) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    for raw in raw_weights:
+        if "=" not in str(raw):
+            raise ValueError(f"Invalid stem weight {raw!r}; expected stem=value")
+        stem_name, value_text = str(raw).split("=", 1)
+        stem_name = stem_name.strip()
+        if not stem_name:
+            raise ValueError(f"Invalid stem weight {raw!r}; empty stem name")
+        try:
+            value = float(value_text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid stem weight {raw!r}; value must be numeric") from exc
+        if not math.isfinite(value) or value < 0.0 or value > 2.0:
+            raise ValueError(f"Invalid stem weight {raw!r}; value must be finite and between 0.0 and 2.0")
+        weights[stem_name] = value
+    return weights
+
+
+def resolve_manifest_stems(
+    manifest: dict[str, Any],
+    excluded_stems: set[str],
+    stem_weights: dict[str, float] | None = None,
+) -> list[tuple[str, Path]]:
+    stem_weights = stem_weights or {}
     stems = manifest.get("stems")
     if not isinstance(stems, dict):
         raise RuntimeError("Manifest has no stems object")
@@ -50,14 +76,27 @@ def resolve_manifest_stems(manifest: dict[str, Any], excluded_stems: set[str]) -
 
     if not selected:
         raise RuntimeError("No stems selected for instrumental build")
+    selected_names = {stem_name for stem_name, _stem_path in selected}
+    missing_weight_stems = sorted(set(stem_weights) - selected_names)
+    if missing_weight_stems:
+        raise ValueError(f"Stem weight references missing stem(s): {', '.join(missing_weight_stems)}")
     return selected
 
 
-def build_instrumental(stem_paths: list[tuple[str, Path]]) -> tuple[np.ndarray, int, dict[str, Any]]:
+def build_instrumental(
+    stem_paths: list[tuple[str, Path]],
+    *,
+    stem_weights: dict[str, float] | None = None,
+    peak_mode: str = "normalize",
+) -> tuple[np.ndarray, int, dict[str, Any]]:
+    if peak_mode not in PEAK_MODES:
+        raise ValueError(f"Unsupported peak_mode {peak_mode!r}; expected one of {', '.join(sorted(PEAK_MODES))}")
+    stem_weights = stem_weights or {}
     mix: np.ndarray | None = None
     sample_rate: int | None = None
     included_stems: list[str] = []
     source_paths: dict[str, str] = {}
+    applied_weights: dict[str, float] = {}
 
     for stem_name, stem_path in stem_paths:
         audio, stem_sample_rate = read_stem_audio(stem_path)
@@ -73,22 +112,28 @@ def build_instrumental(stem_paths: list[tuple[str, Path]]) -> tuple[np.ndarray, 
                 f"Stem shape mismatch: expected={mix.shape} actual={audio.shape} stem={stem_name}"
             )
 
-        mix = mix + audio
+        weight = float(stem_weights.get(stem_name, 1.0))
+        mix = mix + audio * weight
         included_stems.append(stem_name)
         source_paths[stem_name] = str(stem_path)
+        applied_weights[stem_name] = round(weight, 9)
 
     if mix is None or sample_rate is None:
         raise RuntimeError("No audio was mixed")
 
     peak_before = float(np.max(np.abs(mix))) if mix.size else 0.0
     normalization_gain = 1.0
-    if peak_before > 1.0:
+    if peak_mode == "normalize" and peak_before > 1.0:
         normalization_gain = 1.0 / peak_before
         mix = mix * normalization_gain
+    elif peak_mode == "clip":
+        mix = np.clip(mix, -1.0, 1.0)
 
     summary = {
         "included_stems": included_stems,
         "source_paths": source_paths,
+        "stem_weights": applied_weights,
+        "peak_mode": peak_mode,
         "sample_rate": int(sample_rate),
         "frames": int(mix.shape[0]),
         "channels": int(mix.shape[1]) if mix.ndim == 2 else 1,
@@ -109,6 +154,8 @@ def main() -> int:
     parser.add_argument("--output-audio", required=True, type=Path)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--exclude-stem", action="append", default=list(DEFAULT_EXCLUDED_STEMS))
+    parser.add_argument("--stem-weight", action="append", default=[])
+    parser.add_argument("--peak-mode", choices=sorted(PEAK_MODES), default="normalize")
     parser.add_argument("--subtype", default="PCM_24")
     args = parser.parse_args()
 
@@ -116,9 +163,14 @@ def main() -> int:
         raise FileNotFoundError(args.stem_manifest)
 
     excluded_stems = {str(stem).strip() for stem in args.exclude_stem if str(stem).strip()}
+    stem_weights = parse_stem_weights(args.stem_weight)
     manifest = load_json(args.stem_manifest)
-    selected_stems = resolve_manifest_stems(manifest, excluded_stems)
-    instrumental, sample_rate, summary = build_instrumental(selected_stems)
+    selected_stems = resolve_manifest_stems(manifest, excluded_stems, stem_weights=stem_weights)
+    instrumental, sample_rate, summary = build_instrumental(
+        selected_stems,
+        stem_weights=stem_weights,
+        peak_mode=str(args.peak_mode),
+    )
 
     args.output_audio.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(args.output_audio), instrumental, sample_rate, subtype=str(args.subtype))
@@ -132,6 +184,8 @@ def main() -> int:
         "inputs": {
             "stem_manifest": str(args.stem_manifest),
             "excluded_stems": sorted(excluded_stems),
+            "stem_weights": dict(sorted(stem_weights.items())),
+            "peak_mode": str(args.peak_mode),
         },
         "output": {
             "audio_path": str(args.output_audio),

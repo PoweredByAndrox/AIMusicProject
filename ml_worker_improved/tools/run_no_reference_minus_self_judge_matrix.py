@@ -15,10 +15,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from tools.instrumental_self_judge_gate import judge_instrumental
 
 
-MATRIX_JSONL = "no_reference_minus_self_judge_matrix.jsonl"
-MANIFEST_JSON = "no_reference_minus_self_judge_matrix_manifest.json"
-SUMMARY_MD = "no_reference_minus_self_judge_matrix_summary.md"
-PROGRESS_JSONL = "no_reference_minus_self_judge_matrix_progress.jsonl"
+MATRIX_JSONL = "rows.jsonl"
+MANIFEST_JSON = "manifest.json"
+SUMMARY_MD = "summary.md"
+PROGRESS_JSONL = "progress.jsonl"
 EXPECTED_ACCELERATION_MODE = "cpu_dsp_self_judge_matrix"
 
 SAFETY_FLAGS = {
@@ -111,6 +111,8 @@ def blocked_missing_audio_row(
     index: int,
     paths: dict[str, str],
     missing: list[str],
+    track_alias: str,
+    candidate_alias: str,
 ) -> dict[str, Any]:
     track_id, candidate_id = row_id(row, index)
     return {
@@ -118,6 +120,7 @@ def blocked_missing_audio_row(
         "row_index": index,
         "track_id": track_id,
         "candidate_id": candidate_id,
+        "self_judge_alias": {"track_alias": track_alias, "candidate_alias": candidate_alias},
         **paths,
         "self_judge_status": "blocked_missing_audio",
         "dominant_failure_reason": "missing_audio_inputs",
@@ -143,6 +146,8 @@ def matrix_row_from_manifest(
     paths: dict[str, str],
     manifest: dict[str, Any],
     manifest_path: Path,
+    track_alias: str,
+    candidate_alias: str,
 ) -> dict[str, Any]:
     track_id, candidate_id = row_id(source_row, index)
     overall = manifest.get("overall") if isinstance(manifest.get("overall"), dict) else {}
@@ -156,6 +161,7 @@ def matrix_row_from_manifest(
         "row_index": index,
         "track_id": track_id,
         "candidate_id": candidate_id,
+        "self_judge_alias": {"track_alias": track_alias, "candidate_alias": candidate_alias},
         **paths,
         "self_judge_status": status,
         "dominant_failure_reason": "" if eligible else "self_judge_proxy_blocked",
@@ -216,6 +222,12 @@ def build_manifest(output_root: Path, rows: list[dict[str, Any]], summary: dict[
         "eligible_candidate_ids": [
             str(row.get("candidate_id") or "") for row in rows if row.get("listen_candidate_eligible") is True
         ],
+        "artifact_name_policy": {
+            "path_segment_limit": 32,
+            "raw_ids_in_paths": False,
+            "provenance_in_manifest": True,
+            "nested_artifact_aliases": "tNNN/cNNN",
+        },
         "delivery_allowed": False,
         "presentation_status": "diagnostic_self_judge_matrix_not_for_listen_pack",
         "release_status": "not_release_ready",
@@ -288,11 +300,20 @@ def run_self_judge_matrix(
     rows: list[dict[str, Any]] = []
     for index, source_row in enumerate(selected_rows, start=1):
         track_id, candidate_id = row_id(source_row, index)
+        track_alias = f"t{index:03d}"
+        candidate_alias = f"c{index:03d}"
         paths = audio_paths(source_row)
         missing = missing_audio_inputs(paths)
         log_progress(progress_path, "candidate_start", row_index=index, track_id=track_id, candidate_id=candidate_id)
         if missing:
-            row = blocked_missing_audio_row(row=source_row, index=index, paths=paths, missing=missing)
+            row = blocked_missing_audio_row(
+                row=source_row,
+                index=index,
+                paths=paths,
+                missing=missing,
+                track_alias=track_alias,
+                candidate_alias=candidate_alias,
+            )
             rows.append(row)
             log_progress(
                 progress_path,
@@ -305,9 +326,7 @@ def run_self_judge_matrix(
             )
             continue
 
-        candidate_dir = output_root / safe_slug(track_id, fallback=f"track_{index:04d}") / safe_slug(
-            candidate_id, fallback=f"candidate_{index:04d}"
-        )
+        candidate_dir = output_root / track_alias / candidate_alias
         manifest = judge_runner(
             source_audio_path=Path(paths["mix_path"]),
             candidate_instrumental_path=Path(paths["minus_path"]),
@@ -315,14 +334,17 @@ def run_self_judge_matrix(
             candidate_vocal_path=Path(paths["vocal_path"]) if paths.get("vocal_path") else None,
             candidate_label=candidate_id,
             segment_sec=float(segment_sec),
+            short_output_names=True,
         )
-        manifest_path = candidate_dir / "instrumental_self_judge_manifest.json"
+        manifest_path = Path(str(manifest.get("manifest_path") or candidate_dir / "manifest.json"))
         row = matrix_row_from_manifest(
             source_row=source_row,
             index=index,
             paths=paths,
             manifest=manifest,
             manifest_path=manifest_path,
+            track_alias=track_alias,
+            candidate_alias=candidate_alias,
         )
         rows.append(row)
         log_progress(

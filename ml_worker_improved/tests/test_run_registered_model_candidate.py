@@ -29,6 +29,10 @@ def _load_executor_module():
     return module
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def _demo_registry(tmp_path: Path):
     from worker.model_registry import ModelRegistry, ModelRegistryEntry
 
@@ -127,6 +131,22 @@ def test_executes_registered_candidate_and_writes_execution_manifest() -> None:
         assert manifest["candidate_manifest"]["path"].endswith("stem_manifest.json")
         assert executed_commands == [["python", "demo.py", str(source_path), str(root / "candidate"), "--device", "cuda"]]
         assert (root / "candidate" / "registry_candidate_execution_manifest.json").exists()
+        progress_path = root / "candidate" / "registered_candidate_progress.jsonl"
+        assert manifest["progress_jsonl"] == str(progress_path)
+        progress_rows = _read_jsonl(progress_path)
+        assert [row["event"] for row in progress_rows] == [
+            "start",
+            "availability_checked",
+            "command_start",
+            "command_finish",
+            "target_stem_materialization_start",
+            "target_stem_materialization_finish",
+            "finish",
+        ]
+        assert all(row["expected_acceleration_mode"] == "gpu_registered_model_inference" for row in progress_rows)
+        assert all(row["gpu_inference_required"] is True for row in progress_rows)
+        assert all(row["gpu_inference_skipped"] is False for row in progress_rows)
+        assert progress_rows[-1]["status"] == "completed"
 
 
 def test_unavailable_model_reports_missing_paths_without_running_command() -> None:
@@ -332,6 +352,41 @@ def test_hq_full_stem_minus_target_skips_melody_export_step() -> None:
         assert manifest["candidate_manifest"]["target_source"] == "sum_non_vocal_stems"
 
 
+def test_hq_full_stem_vocal_target_skips_melody_export_step() -> None:
+    executor = _load_executor_module()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source_path = root / "source.flac"
+        source_path.write_text("stub", encoding="utf-8")
+        executed_commands: list[list[str]] = []
+
+        def fake_runner(command: list[str]) -> None:
+            executed_commands.append(command)
+            output_dir = Path(command[3])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            vocals_path = output_dir / "vocals.flac"
+            vocals_path.write_text("stub vocals", encoding="utf-8")
+            (output_dir / "stem_manifest.json").write_text(
+                json.dumps({"model_name": "htdemucs_6s", "stems": {"vocals": {"path": str(vocals_path)}}}),
+                encoding="utf-8",
+            )
+
+        manifest = executor.run_registered_model_candidate(
+            model_id="demo_hq_full_stem_exporter",
+            source_audio_path=source_path,
+            output_dir=root / "candidate",
+            registry=_demo_registry(root),
+            command_runner=fake_runner,
+            device="cuda",
+            target_stem="vocal",
+        )
+
+        assert manifest["status"] == "completed"
+        assert "--no-melody-stem" in executed_commands[0]
+        assert manifest["candidate_manifest"]["target_stem"] == "vocal"
+        assert manifest["candidate_manifest"]["target_source"] == "existing_manifest_stem"
+
+
 def test_existing_instrumental_minus_target_preserves_original_stem_metadata() -> None:
     executor = _load_executor_module()
     from worker.model_registry import ModelRegistry, ModelRegistryEntry
@@ -428,6 +483,12 @@ def test_command_runner_error_writes_execution_failed_manifest() -> None:
         assert payload["error"]["type"] == "RuntimeError"
         assert payload["error"]["message"] == "runner exploded"
         assert payload["contract"]["fallback_used"] is False
+        progress_rows = _read_jsonl(root / "candidate" / "registered_candidate_progress.jsonl")
+        assert [row["event"] for row in progress_rows][-1] == "failed"
+        assert progress_rows[-1]["phase"] == "registered_model_inference"
+        assert progress_rows[-1]["reason"] == "execution_failed"
+        assert progress_rows[-1]["error_type"] == "RuntimeError"
+        assert progress_rows[-1]["expected_acceleration_mode"] == "gpu_registered_model_inference"
 
 
 def test_default_subprocess_runner_error_writes_stdout_and_stderr_logs() -> None:

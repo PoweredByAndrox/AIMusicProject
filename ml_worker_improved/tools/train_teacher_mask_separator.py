@@ -18,7 +18,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import soundfile as sf
@@ -38,6 +38,27 @@ MODEL_ID = "teacher_mask_separator_v1"
 PROGRESS_NAME = "teacher_mask_separator_progress.jsonl"
 EPSILON = 1.0e-8
 START_TIME = time.monotonic()
+DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS = 50_000_000_000
+DEFAULT_MIN_CUDA_FREE_MEMORY_MB = 4096
+MASK_OUTPUT_MODE_MAGNITUDE = "magnitude"
+MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL = "magnitude_residual"
+MASK_OUTPUT_MODE_COMPLEX = "complex"
+MASK_OUTPUT_MODES = {MASK_OUTPUT_MODE_MAGNITUDE, MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL, MASK_OUTPUT_MODE_COMPLEX}
+ProgressCallback = Callable[[str, dict[str, Any]], None]
+
+
+def validate_mask_output_mode(value: str) -> str:
+    mode = str(value or MASK_OUTPUT_MODE_MAGNITUDE).strip().lower()
+    if mode not in MASK_OUTPUT_MODES:
+        raise ValueError(f"unsupported mask output mode: {value!r}")
+    return mode
+
+
+def magnitude_residual_deviation(mask_ceiling: float) -> float:
+    deviation = float(mask_ceiling) - 1.0
+    if deviation <= 0.0:
+        raise ValueError("magnitude_residual mask output mode requires mask_ceiling > 1.0")
+    return deviation
 
 
 @dataclass(frozen=True)
@@ -49,34 +70,60 @@ class TeacherMaskTrainConfig:
     batch_size: int = 512
     learning_rate: float = 0.002
     mask_ceiling: float = 0.995
+    mask_output_mode: str = MASK_OUTPUT_MODE_MAGNITUDE
+    complex_mask_ceiling: float = 2.0
     activity_weight: float = 8.0
     leakage_suppression_weight: float = 2.0
     magnitude_loss_weight: float = 0.25
+    source_preservation_weight: float = 0.0
     active_frame_oversample: int = 1
     context_frame_radius: int = 0
     time_feature_count: int = 0
     source_feature_memory_neighbors: int = 0
     source_feature_memory_store_complex_masks: bool = False
     source_feature_memory_chunk_size: int = 512
+    source_feature_memory_projection_dim: int = 0
+    source_feature_memory_max_frames: int = 0
+    min_cuda_free_memory_mb: int = DEFAULT_MIN_CUDA_FREE_MEMORY_MB
     max_peak: float = 0.999
     seed: int = 20260518
     device: str = "cuda"
 
 
 class TeacherMaskNetwork(nn.Module):
-    def __init__(self, input_features: int, frequency_bins: int, hidden_size: int) -> None:
+    def __init__(
+        self,
+        input_features: int,
+        frequency_bins: int,
+        hidden_size: int,
+        *,
+        mask_output_mode: str = MASK_OUTPUT_MODE_MAGNITUDE,
+        mask_ceiling: float = 1.0,
+        complex_mask_ceiling: float = 2.0,
+    ) -> None:
         super().__init__()
+        self.mask_output_mode = validate_mask_output_mode(mask_output_mode)
+        self.frequency_bins = int(frequency_bins)
+        self.mask_ceiling = float(mask_ceiling)
+        self.complex_mask_ceiling = float(complex_mask_ceiling)
+        if self.mask_output_mode == MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL:
+            magnitude_residual_deviation(self.mask_ceiling)
+        output_features = self.frequency_bins * 2 if self.mask_output_mode == MASK_OUTPUT_MODE_COMPLEX else self.frequency_bins
         self.layers = nn.Sequential(
             nn.Linear(input_features, hidden_size),
             nn.GELU(),
             nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
-            nn.Linear(hidden_size, frequency_bins),
-            nn.Sigmoid(),
+            nn.Linear(hidden_size, output_features),
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.layers(features)
+        raw = self.layers(features)
+        if self.mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+            return torch.tanh(raw) * float(self.complex_mask_ceiling)
+        if self.mask_output_mode == MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL:
+            return 1.0 + torch.tanh(raw) * magnitude_residual_deviation(self.mask_ceiling)
+        return torch.sigmoid(raw) * float(self.mask_ceiling)
 
 
 def validate_stem_name(name: str) -> str:
@@ -104,6 +151,11 @@ def progress(path: Path, event: str, **fields: Any) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         handle.flush()
+
+
+def emit_progress(callback: ProgressCallback | None, event: str, **fields: Any) -> None:
+    if callback is not None:
+        callback(event, dict(fields))
 
 
 def sha256_file(path: Path) -> str:
@@ -196,6 +248,126 @@ def _select_device(requested_device: str) -> torch.device:
     return torch.device("cpu")
 
 
+def _require_cuda_memory_available(
+    device: torch.device,
+    *,
+    min_free_memory_mb: int,
+    progress_path: Path | None = None,
+    progress_context: dict[str, Any] | None = None,
+    phase: str,
+) -> dict[str, int]:
+    if device.type != "cuda" or int(min_free_memory_mb) <= 0:
+        return {
+            "free_memory_mb": 0,
+            "total_memory_mb": 0,
+            "required_free_memory_mb": max(0, int(min_free_memory_mb)),
+        }
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+    except Exception as exc:  # pragma: no cover - depends on CUDA runtime failure mode.
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "cuda_memory_guard_failed",
+                **dict(progress_context or {}),
+                phase=str(phase),
+                required_free_memory_mb=int(min_free_memory_mb),
+                error=str(exc),
+            )
+        raise RuntimeError(f"CUDA memory guard failed during {phase}: {exc}") from exc
+    free_mb = int(free_bytes // (1024 * 1024))
+    total_mb = int(total_bytes // (1024 * 1024))
+    snapshot = {
+        "free_memory_mb": free_mb,
+        "total_memory_mb": total_mb,
+        "required_free_memory_mb": int(min_free_memory_mb),
+    }
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "cuda_memory_guard_checked",
+            **dict(progress_context or {}),
+            phase=str(phase),
+            **snapshot,
+        )
+    if free_mb < int(min_free_memory_mb):
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "cuda_memory_guard_blocked",
+                **dict(progress_context or {}),
+                phase=str(phase),
+                **snapshot,
+            )
+        raise RuntimeError(
+            "CUDA free memory is below required minimum: "
+            f"free_memory_mb={free_mb}, required_free_memory_mb={int(min_free_memory_mb)}, phase={phase}"
+        )
+    return snapshot
+
+
+def _progress_train_batch_phase(
+    progress_path: Path | None,
+    event: str,
+    progress_context: dict[str, Any] | None,
+    *,
+    epoch: int,
+    epoch_count: int,
+    batch_index: int,
+    batch_count: int,
+    batch_start_index: int,
+    batch_end_index: int,
+    training_index_count: int,
+    batch_frame_count: int,
+    device: torch.device,
+    **fields: Any,
+) -> None:
+    if progress_path is None:
+        return
+    progress(
+        progress_path,
+        event,
+        **dict(progress_context or {}),
+        epoch=int(epoch),
+        epoch_count=int(epoch_count),
+        batch_index=int(batch_index),
+        batch_count=int(batch_count),
+        batch_start_index=int(batch_start_index),
+        batch_end_index=int(batch_end_index),
+        training_index_count=int(training_index_count),
+        batch_frame_count=int(batch_frame_count),
+        device=str(device),
+        **fields,
+    )
+
+
+def _synchronize_cuda_phase(
+    progress_path: Path | None,
+    progress_context: dict[str, Any] | None,
+    *,
+    event_prefix: str,
+    device: torch.device,
+    **fields: Any,
+) -> None:
+    if progress_path is None or device.type != "cuda":
+        return
+    progress(
+        progress_path,
+        f"{event_prefix}_cuda_sync_start",
+        **dict(progress_context or {}),
+        device=str(device),
+        **fields,
+    )
+    torch.cuda.synchronize(device)
+    progress(
+        progress_path,
+        f"{event_prefix}_cuda_sync_finish",
+        **dict(progress_context or {}),
+        device=str(device),
+        **fields,
+    )
+
+
 def _stft_mono(audio: np.ndarray, *, n_fft: int, hop_length: int, device: torch.device) -> torch.Tensor:
     waveform = torch.as_tensor(audio, dtype=torch.float32, device=device)
     window = torch.hann_window(n_fft, device=device)
@@ -240,20 +412,83 @@ def _complex_mask_prior(
     return np.stack(channel_masks, axis=0)
 
 
+def _complex_ratio_mask_frames(
+    source_stft: torch.Tensor,
+    target_stft: torch.Tensor,
+    *,
+    ceiling: float,
+) -> torch.Tensor:
+    denominator = source_stft.abs().pow(2).clamp_min(EPSILON)
+    ratio = target_stft * torch.conj(source_stft) / denominator
+    limit = float(ceiling)
+    if limit > 0.0:
+        scale = (limit / ratio.abs().clamp_min(EPSILON)).clamp(max=1.0)
+        ratio = ratio * scale
+    return ratio.transpose(0, 1)
+
+
+def _complex_prediction_frames(prediction: torch.Tensor, frequency_bins: int) -> torch.Tensor:
+    bins = int(frequency_bins)
+    if prediction.ndim != 2 or int(prediction.shape[1]) != bins * 2:
+        raise ValueError(f"complex mask prediction shape mismatch: expected second dim {bins * 2}, got {tuple(prediction.shape)}")
+    return torch.complex(prediction[:, :bins], prediction[:, bins:])
+
+
+def _weighted_complex_mse(delta: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    return ((delta.real.square() + delta.imag.square()) * weights).sum() / weights.sum().clamp_min(EPSILON)
+
+
 def _normalize_features(features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     mean = features.mean(dim=0, keepdim=True)
     std = features.std(dim=0, keepdim=True).clamp_min(1.0e-4)
     return (features - mean) / std, mean, std
 
 
+def _feature_mean_std_from_chunks(chunks: Sequence[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    if not chunks:
+        raise ValueError("feature chunks must contain at least one tensor")
+    feature_width = int(chunks[0].shape[1])
+    total = torch.zeros(feature_width, dtype=torch.float64, device=torch.device("cpu"))
+    total_sq = torch.zeros(feature_width, dtype=torch.float64, device=torch.device("cpu"))
+    total_count = 0
+    for chunk in chunks:
+        if int(chunk.shape[1]) != feature_width:
+            raise ValueError("all feature chunks must have the same feature width")
+        chunk_float = chunk.detach().cpu().to(torch.float32)
+        total += chunk_float.sum(dim=0, dtype=torch.float64)
+        total_sq += chunk_float.square().sum(dim=0, dtype=torch.float64)
+        total_count += int(chunk_float.shape[0])
+        del chunk_float
+    if total_count <= 0:
+        raise ValueError("feature chunks must contain at least one frame")
+    mean = total / float(total_count)
+    if total_count > 1:
+        variance = (total_sq - (total * total / float(total_count))) / float(total_count - 1)
+    else:
+        variance = torch.zeros_like(total)
+    std = torch.sqrt(variance.clamp_min(1.0e-8)).clamp_min(1.0e-4)
+    return mean.to(torch.float32).unsqueeze(0), std.to(torch.float32).unsqueeze(0)
+
+
+def _evenly_spaced_long_indices(*, length: int, count: int, device: torch.device) -> torch.Tensor:
+    length_int = int(length)
+    count_int = int(count)
+    if length_int <= 0 or count_int <= 0:
+        return torch.empty((0,), dtype=torch.long, device=device)
+    if count_int >= length_int:
+        return torch.arange(length_int, dtype=torch.long, device=device)
+    if count_int == 1:
+        return torch.zeros((1,), dtype=torch.long, device=device)
+    positions = torch.arange(count_int, dtype=torch.long, device=device)
+    return (positions * (length_int - 1)).div(count_int - 1, rounding_mode="floor")
+
+
 def safe_quantile(values: torch.Tensor, quantile: float, *, max_values: int = 1_000_000) -> torch.Tensor:
     flat_values = values.reshape(-1)
     if flat_values.numel() > int(max_values):
-        sample_indices = torch.linspace(
-            0,
-            flat_values.numel() - 1,
-            int(max_values),
-            dtype=torch.long,
+        sample_indices = _evenly_spaced_long_indices(
+            length=int(flat_values.numel()),
+            count=int(max_values),
             device=flat_values.device,
         )
         flat_values = flat_values[sample_indices]
@@ -303,19 +538,60 @@ def _config_payload(config: TeacherMaskTrainConfig) -> dict[str, Any]:
         "batch_size": int(config.batch_size),
         "learning_rate": float(config.learning_rate),
         "mask_ceiling": float(config.mask_ceiling),
+        "mask_output_mode": validate_mask_output_mode(config.mask_output_mode),
+        "complex_mask_ceiling": float(config.complex_mask_ceiling),
         "activity_weight": float(config.activity_weight),
         "leakage_suppression_weight": float(config.leakage_suppression_weight),
         "magnitude_loss_weight": float(config.magnitude_loss_weight),
+        "source_preservation_weight": float(config.source_preservation_weight),
         "active_frame_oversample": int(config.active_frame_oversample),
         "context_frame_radius": int(config.context_frame_radius),
         "time_feature_count": int(config.time_feature_count),
         "source_feature_memory_neighbors": int(config.source_feature_memory_neighbors),
         "source_feature_memory_store_complex_masks": bool(config.source_feature_memory_store_complex_masks),
         "source_feature_memory_chunk_size": int(config.source_feature_memory_chunk_size),
+        "source_feature_memory_projection_dim": int(config.source_feature_memory_projection_dim),
+        "source_feature_memory_max_frames": int(config.source_feature_memory_max_frames),
+        "min_cuda_free_memory_mb": int(config.min_cuda_free_memory_mb),
         "max_peak": float(config.max_peak),
         "seed": int(config.seed),
         "device": str(config.device),
     }
+
+
+def _source_feature_memory_projection_matrix(
+    *,
+    feature_width: int,
+    projection_dim: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    dim = int(projection_dim)
+    width = int(feature_width)
+    if dim <= 0 or dim >= width:
+        return None
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed) + 7919)
+    matrix = torch.randn((width, dim), generator=generator, dtype=torch.float32) / math.sqrt(float(dim))
+    return matrix.to(device=device)
+
+
+def _source_feature_memory_selected_indices(*, frame_count: int, max_frames: int, device: torch.device) -> torch.Tensor | None:
+    cap = int(max_frames)
+    frames = int(frame_count)
+    if cap <= 0 or frames <= cap:
+        return None
+    return _evenly_spaced_long_indices(length=frames, count=cap, device=device)
+
+
+def _project_source_feature_memory_features(
+    model_features: torch.Tensor,
+    projection_matrix: torch.Tensor,
+) -> torch.Tensor:
+    return model_features.to(dtype=torch.float32) @ projection_matrix.to(
+        device=model_features.device,
+        dtype=torch.float32,
+    )
 
 
 def _source_feature_memory_mask(
@@ -325,6 +601,7 @@ def _source_feature_memory_mask(
     memory_masks: torch.Tensor,
     neighbor_count: int,
     chunk_size: int,
+    progress_callback: ProgressCallback | None = None,
 ) -> torch.Tensor:
     if query_features.ndim != 2 or memory_features.ndim != 2 or memory_masks.ndim != 2:
         raise ValueError("source-feature memory tensors must be 2D")
@@ -341,15 +618,78 @@ def _source_feature_memory_mask(
     memory_masks = memory_masks.to(dtype=torch.float32)
     query_features = query_features.to(dtype=torch.float32)
     predictions: list[torch.Tensor] = []
+    query_frame_count = int(query_features.shape[0])
+    chunk_count = int(math.ceil(query_frame_count / chunk)) if query_frame_count else 0
+    progress_stride = max(1, chunk_count // 10) if chunk_count else 1
     for start in range(0, int(query_features.shape[0]), chunk):
         query_chunk = query_features[start : start + chunk]
         distances = torch.cdist(query_chunk, memory_features, p=2.0)
         nearest_distances, nearest_indices = torch.topk(distances, k=k, dim=1, largest=False)
         nearest_masks = memory_masks[nearest_indices]
+        chunk_index = (start // chunk) + 1
+        if chunk_index == 1 or chunk_index == chunk_count or chunk_index % progress_stride == 0:
+            emit_progress(
+                progress_callback,
+                "source_feature_memory_search_chunk",
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                chunk_start_frame=int(start),
+                chunk_end_frame=int(min(start + chunk, query_frame_count)),
+            )
         if k == 1:
             predictions.append(nearest_masks[:, 0, :])
             continue
         weights = torch.softmax(-nearest_distances.clamp_max(80.0), dim=1).unsqueeze(-1)
+        predictions.append((nearest_masks * weights).sum(dim=1))
+    return torch.cat(predictions, dim=0)
+
+
+def _source_feature_memory_complex_mask(
+    query_features: torch.Tensor,
+    *,
+    memory_features: torch.Tensor,
+    memory_complex_masks: torch.Tensor,
+    neighbor_count: int,
+    chunk_size: int,
+    progress_callback: ProgressCallback | None = None,
+) -> torch.Tensor:
+    if query_features.ndim != 2 or memory_features.ndim != 2 or memory_complex_masks.ndim != 2:
+        raise ValueError("source-feature complex memory tensors must be 2D")
+    if query_features.shape[1] != memory_features.shape[1]:
+        raise ValueError("source-feature complex memory feature width mismatch")
+    if memory_features.shape[0] != memory_complex_masks.shape[0]:
+        raise ValueError("source-feature complex memory frame count mismatch")
+    if memory_features.shape[0] == 0:
+        raise ValueError("source-feature complex memory is empty")
+
+    k = max(1, min(int(neighbor_count), int(memory_features.shape[0])))
+    chunk = max(1, int(chunk_size))
+    memory_features = memory_features.to(dtype=torch.float32)
+    memory_complex_masks = memory_complex_masks.to(dtype=torch.complex64)
+    query_features = query_features.to(dtype=torch.float32)
+    predictions: list[torch.Tensor] = []
+    query_frame_count = int(query_features.shape[0])
+    chunk_count = int(math.ceil(query_frame_count / chunk)) if query_frame_count else 0
+    progress_stride = max(1, chunk_count // 10) if chunk_count else 1
+    for start in range(0, int(query_features.shape[0]), chunk):
+        query_chunk = query_features[start : start + chunk]
+        distances = torch.cdist(query_chunk, memory_features, p=2.0)
+        nearest_distances, nearest_indices = torch.topk(distances, k=k, dim=1, largest=False)
+        nearest_masks = memory_complex_masks[nearest_indices]
+        chunk_index = (start // chunk) + 1
+        if chunk_index == 1 or chunk_index == chunk_count or chunk_index % progress_stride == 0:
+            emit_progress(
+                progress_callback,
+                "source_feature_memory_complex_search_chunk",
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                chunk_start_frame=int(start),
+                chunk_end_frame=int(min(start + chunk, query_frame_count)),
+            )
+        if k == 1:
+            predictions.append(nearest_masks[:, 0, :])
+            continue
+        weights = torch.softmax(-nearest_distances.clamp_max(80.0), dim=1).to(dtype=torch.float32).unsqueeze(-1)
         predictions.append((nearest_masks * weights).sum(dim=1))
     return torch.cat(predictions, dim=0)
 
@@ -369,11 +709,23 @@ def train_teacher_mask(
     progress_path: Path | None = None,
     progress_context: dict[str, Any] | None = None,
 ) -> tuple[TeacherMaskNetwork, dict[str, Any], dict[str, float]]:
+    mask_output_mode = validate_mask_output_mode(config.mask_output_mode)
+    if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX and int(config.source_feature_memory_neighbors) > 0:
+        raise ValueError("complex mask output mode does not support source-feature memory")
     torch.manual_seed(int(config.seed))
     np.random.seed(int(config.seed))
     device = _select_device(config.device)
+    _require_cuda_memory_available(
+        device,
+        min_free_memory_mb=int(config.min_cuda_free_memory_mb),
+        progress_path=progress_path,
+        progress_context=progress_context,
+        phase="single_pair_training",
+    )
     source_stft = _stft_mono(mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
     target_stft = _stft_mono(mono(target_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
+    source_stft_frames = source_stft.transpose(0, 1)
+    target_stft_frames = target_stft.transpose(0, 1)
     source_mag = source_stft.abs().transpose(0, 1).clamp_min(EPSILON)
     target_mag = target_stft.abs().transpose(0, 1)
     frame_count, frequency_bins = source_mag.shape
@@ -386,7 +738,16 @@ def train_teacher_mask(
         device=device,
     )
     model_features = torch.cat([features, temporal_features], dim=1)
-    oracle_mask = (target_mag / source_mag).clamp(0.0, float(config.mask_ceiling))
+    if mask_output_mode == MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL:
+        residual_deviation = magnitude_residual_deviation(config.mask_ceiling)
+        oracle_mask = (target_mag / source_mag).clamp(1.0 - residual_deviation, 1.0 + residual_deviation)
+    else:
+        oracle_mask = (target_mag / source_mag).clamp(0.0, float(config.mask_ceiling))
+    complex_oracle_mask = _complex_ratio_mask_frames(
+        source_stft,
+        target_stft,
+        ceiling=float(config.complex_mask_ceiling),
+    )
     target_frame_activity = target_mag.mean(dim=1)
     baseline_active_threshold = safe_quantile(target_frame_activity, 0.65)
     sparse_active_floor = safe_quantile(target_frame_activity, 0.95) * 0.05
@@ -404,35 +765,312 @@ def train_teacher_mask(
         input_features=int(model_features.shape[1]),
         frequency_bins=frequency_bins,
         hidden_size=int(config.hidden_size),
+        mask_output_mode=mask_output_mode,
+        mask_ceiling=float(config.mask_ceiling),
+        complex_mask_ceiling=float(config.complex_mask_ceiling),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config.learning_rate), weight_decay=1.0e-5)
-    base_indices = torch.arange(frame_count, device=device)
-    active_indices = base_indices[(target_frame_activity >= active_threshold)]
+    base_indices = torch.arange(frame_count, device=torch.device("cpu"))
+    active_mask_cpu = (target_frame_activity >= active_threshold).detach().cpu()
+    active_indices = base_indices[active_mask_cpu]
     if int(config.active_frame_oversample) > 1 and active_indices.numel() > 0:
         indices = torch.cat([base_indices, active_indices.repeat(int(config.active_frame_oversample) - 1)])
     else:
         indices = base_indices
     batch_size = max(1, min(int(config.batch_size), int(frame_count)))
+    batch_count = int(math.ceil(int(indices.numel()) / float(batch_size)))
+    batch_progress_stride = max(1, batch_count // 10)
     last_loss = 0.0
     epoch_count = int(config.epochs)
-    progress_stride = max(1, epoch_count // 10)
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "train_loop_start",
+            **dict(progress_context or {}),
+            epoch_count=epoch_count,
+            batch_count=batch_count,
+            batch_size=batch_size,
+            frame_count=int(frame_count),
+            training_index_count=int(indices.numel()),
+            batch_progress_stride=batch_progress_stride,
+            device=str(device),
+        )
+    _synchronize_cuda_phase(
+        progress_path,
+        progress_context,
+        event_prefix="train_pre_loop",
+        device=device,
+        frame_count=int(frame_count),
+        training_index_count=int(indices.numel()),
+        batch_count=batch_count,
+        batch_size=batch_size,
+    )
     for epoch_index in range(epoch_count):
-        permutation = indices[torch.randperm(indices.numel(), device=device)]
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "train_epoch_start",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                frame_count=int(frame_count),
+                training_index_count=int(indices.numel()),
+                batch_size=batch_size,
+                batch_count=batch_count,
+                device=str(device),
+            )
+        permutation_device = torch.device("cpu")
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "train_permutation_start",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                training_index_count=int(indices.numel()),
+                training_device=str(device),
+                permutation_device=str(permutation_device),
+            )
+        permutation_order = torch.randperm(indices.numel(), device=permutation_device)
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "train_permutation_finish",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                training_index_count=int(indices.numel()),
+                training_device=str(device),
+                permutation_device=str(permutation_device),
+            )
         for start in range(0, indices.numel(), batch_size):
-            batch_indices = permutation[start : start + batch_size]
-            prediction = model(model_features[batch_indices])
+            batch_index = (int(start) // int(batch_size)) + 1
+            should_log_batch_progress = (
+                batch_index == 1 or batch_index == batch_count or batch_index % batch_progress_stride == 0
+            )
+            if progress_path is not None and should_log_batch_progress:
+                progress(
+                    progress_path,
+                    "train_batch_index_select_start",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    training_device=str(device),
+                    permutation_device=str(permutation_device),
+                    device=str(device),
+                )
+            batch_order = permutation_order[start : start + batch_size]
+            batch_indices = indices[batch_order]
+            if progress_path is not None and should_log_batch_progress:
+                progress(
+                    progress_path,
+                    "train_batch_index_select_finish",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    batch_frame_count=int(batch_indices.numel()),
+                    training_device=str(device),
+                    permutation_device=str(permutation_device),
+                    device=str(device),
+                )
+                progress(
+                    progress_path,
+                    "train_batch_start",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    batch_frame_count=int(batch_indices.numel()),
+                    device=str(device),
+                )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_feature_gather_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            batch_model_features = model_features[batch_indices]
             batch_weights = time_frequency_weights[batch_indices]
-            mask_loss = ((prediction - oracle_mask[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
-            estimated_mag = prediction * source_mag[batch_indices]
-            magnitude_loss = ((estimated_mag - target_mag[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
-            loss = mask_loss + float(config.magnitude_loss_weight) * magnitude_loss / source_mag.mean().clamp_min(EPSILON)
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_feature_gather_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_forward_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            prediction = model(batch_model_features)
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_forward_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_loss_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+                prediction_complex = _complex_prediction_frames(prediction, frequency_bins)
+                mask_loss = _weighted_complex_mse(prediction_complex - complex_oracle_mask[batch_indices], batch_weights)
+                estimated_stft = prediction_complex * source_stft_frames[batch_indices]
+                stft_loss = _weighted_complex_mse(estimated_stft - target_stft_frames[batch_indices], batch_weights)
+                loss = mask_loss + float(config.magnitude_loss_weight) * stft_loss / source_mag.mean().clamp_min(EPSILON)
+            else:
+                mask_loss = ((prediction - oracle_mask[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+                estimated_mag = prediction * source_mag[batch_indices]
+                magnitude_loss = ((estimated_mag - target_mag[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+                loss = mask_loss + float(config.magnitude_loss_weight) * magnitude_loss / source_mag.mean().clamp_min(EPSILON)
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_loss_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             optimizer.zero_grad(set_to_none=True)
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_backward_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             loss.backward()
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_backward_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_optimizer_step_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             optimizer.step()
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "train_batch_optimizer_step_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             last_loss = float(loss.detach().cpu())
-        if progress_path is not None and (
-            epoch_index == 0 or epoch_index + 1 == epoch_count or (epoch_index + 1) % progress_stride == 0
-        ):
+            if progress_path is not None and should_log_batch_progress:
+                progress(
+                    progress_path,
+                    "train_batch_heartbeat",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    current_loss=round(last_loss, 9),
+                    device=str(device),
+                )
+        if progress_path is not None:
             progress(
                 progress_path,
                 "train_epoch",
@@ -448,6 +1086,8 @@ def train_teacher_mask(
     metadata = {
         "frequency_bins": int(frequency_bins),
         "input_features": int(model_features.shape[1]),
+        "mask_output_mode": mask_output_mode,
+        "complex_mask_ceiling": float(config.complex_mask_ceiling),
         "feature_mean": feature_mean.detach().cpu().numpy().astype(np.float32),
         "feature_std": feature_std.detach().cpu().numpy().astype(np.float32),
     }
@@ -462,9 +1102,39 @@ def train_teacher_mask(
         )
         metadata["temporal_complex_mask_prior_real"] = complex_mask_prior.real.astype(np.float16, copy=False)
         metadata["temporal_complex_mask_prior_imag"] = complex_mask_prior.imag.astype(np.float16, copy=False)
+    source_feature_memory_stored_frame_count = 0
+    source_feature_memory_projection_dim_used = 0
+    source_feature_memory_selected_indices: torch.Tensor | None = None
     if int(config.source_feature_memory_neighbors) > 0:
-        metadata["source_feature_memory_features"] = model_features.detach().cpu().numpy().astype(np.float16, copy=False)
-        metadata["source_feature_memory_masks"] = oracle_mask.detach().cpu().numpy().astype(np.float16, copy=False)
+        memory_features = model_features
+        projection_matrix = _source_feature_memory_projection_matrix(
+            feature_width=int(model_features.shape[1]),
+            projection_dim=int(config.source_feature_memory_projection_dim),
+            seed=int(config.seed),
+            device=device,
+        )
+        if projection_matrix is not None:
+            memory_features = _project_source_feature_memory_features(model_features, projection_matrix)
+            source_feature_memory_projection_dim_used = int(projection_matrix.shape[1])
+            metadata["source_feature_memory_projection_matrix"] = (
+                projection_matrix.detach().cpu().numpy().astype(np.float16, copy=False)
+            )
+        source_feature_memory_selected_indices = _source_feature_memory_selected_indices(
+            frame_count=int(memory_features.shape[0]),
+            max_frames=int(config.source_feature_memory_max_frames),
+            device=device,
+        )
+        if source_feature_memory_selected_indices is not None:
+            memory_features = memory_features[source_feature_memory_selected_indices]
+            memory_masks = oracle_mask[source_feature_memory_selected_indices]
+            metadata["source_feature_memory_selected_indices"] = (
+                source_feature_memory_selected_indices.detach().cpu().numpy().astype(np.int64, copy=False)
+            )
+        else:
+            memory_masks = oracle_mask
+        source_feature_memory_stored_frame_count = int(memory_features.shape[0])
+        metadata["source_feature_memory_features"] = memory_features.detach().cpu().numpy().astype(np.float16, copy=False)
+        metadata["source_feature_memory_masks"] = memory_masks.detach().cpu().numpy().astype(np.float16, copy=False)
         channel_masks: list[np.ndarray] = []
         for channel_index in range(min(source_audio.shape[1], target_audio.shape[1])):
             source_channel_stft = _stft_mono(
@@ -483,10 +1153,12 @@ def train_teacher_mask(
                 0.0,
                 float(config.mask_ceiling),
             )
+            if source_feature_memory_selected_indices is not None:
+                channel_mask = channel_mask[source_feature_memory_selected_indices]
             channel_masks.append(channel_mask.detach().cpu().numpy().astype(np.float16, copy=False))
         if channel_masks:
             metadata["source_feature_memory_channel_masks"] = np.stack(channel_masks, axis=0)
-        if bool(config.source_feature_memory_store_complex_masks):
+        if bool(config.source_feature_memory_store_complex_masks) and source_feature_memory_selected_indices is None:
             source_feature_complex_mask = _complex_mask_prior(
                 source_audio,
                 target_audio,
@@ -503,10 +1175,17 @@ def train_teacher_mask(
         "active_frame_count": float(active_indices.numel()),
         "active_frame_threshold": round(float(active_threshold.detach().cpu()), 12),
         "frequency_bins": float(frequency_bins),
+        "mask_output_mode": mask_output_mode,
+        "complex_mask_ceiling": float(config.complex_mask_ceiling),
         "device_used": 1.0 if device.type == "cuda" else 0.0,
-        "source_feature_memory_frame_count": float(frame_count)
+        "source_feature_memory_frame_count": float(source_feature_memory_stored_frame_count)
         if int(config.source_feature_memory_neighbors) > 0
         else 0.0,
+        "source_feature_memory_original_frame_count": float(frame_count)
+        if int(config.source_feature_memory_neighbors) > 0
+        else 0.0,
+        "source_feature_memory_projection_dim": float(source_feature_memory_projection_dim_used),
+        "source_feature_memory_max_frames": float(int(config.source_feature_memory_max_frames)),
     }
     return model, metadata, diagnostics
 
@@ -521,18 +1200,30 @@ def train_teacher_mask_dataset(
 ) -> tuple[TeacherMaskNetwork, dict[str, Any], dict[str, float]]:
     if not training_pairs:
         raise ValueError("training_pairs must contain at least one source/target pair")
+    mask_output_mode = validate_mask_output_mode(config.mask_output_mode)
     if int(config.time_feature_count) > 0:
         raise ValueError("dataset training forbids temporal priors because they do not generalize across tracks")
     if bool(config.source_feature_memory_store_complex_masks):
         raise ValueError("dataset training forbids complex source-feature memory because it is reconstructive per-source state")
-
     torch.manual_seed(int(config.seed))
     np.random.seed(int(config.seed))
     device = _select_device(config.device)
+    cpu_storage_dtype = torch.float16 if device.type == "cuda" else torch.float32
+    needs_complex_training_tensors = mask_output_mode == MASK_OUTPUT_MODE_COMPLEX
+    _require_cuda_memory_available(
+        device,
+        min_free_memory_mb=int(config.min_cuda_free_memory_mb),
+        progress_path=progress_path,
+        progress_context=progress_context,
+        phase="dataset_training",
+    )
     raw_feature_chunks: list[torch.Tensor] = []
+    source_stft_chunks: list[torch.Tensor] = []
+    target_stft_chunks: list[torch.Tensor] = []
     source_mag_chunks: list[torch.Tensor] = []
     target_mag_chunks: list[torch.Tensor] = []
     oracle_mask_chunks: list[torch.Tensor] = []
+    complex_mask_chunks: list[torch.Tensor] = []
     weight_chunks: list[torch.Tensor] = []
     active_index_chunks: list[torch.Tensor] = []
     frame_counts: list[int] = []
@@ -543,6 +1234,8 @@ def train_teacher_mask_dataset(
         source_audio, target_audio = fit_audio_pair(source_audio, target_audio)
         source_stft = _stft_mono(mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
         target_stft = _stft_mono(mono(target_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
+        source_stft_frames = source_stft.transpose(0, 1)
+        target_stft_frames = target_stft.transpose(0, 1)
         source_mag = source_stft.abs().transpose(0, 1).clamp_min(EPSILON)
         target_mag = target_stft.abs().transpose(0, 1)
         if frequency_bins is None:
@@ -551,7 +1244,16 @@ def train_teacher_mask_dataset(
             raise ValueError("all training pairs must produce the same frequency-bin count")
         raw_frame_features = torch.log1p(source_mag * 64.0)
         raw_features = _local_context_features(raw_frame_features, int(config.context_frame_radius))
-        oracle_mask = (target_mag / source_mag).clamp(0.0, float(config.mask_ceiling))
+        if mask_output_mode == MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL:
+            residual_deviation = magnitude_residual_deviation(config.mask_ceiling)
+            oracle_mask = (target_mag / source_mag).clamp(1.0 - residual_deviation, 1.0 + residual_deviation)
+        else:
+            oracle_mask = (target_mag / source_mag).clamp(0.0, float(config.mask_ceiling))
+        complex_oracle_mask = _complex_ratio_mask_frames(
+            source_stft,
+            target_stft,
+            ceiling=float(config.complex_mask_ceiling),
+        )
         target_frame_activity = target_mag.mean(dim=1)
         baseline_active_threshold = safe_quantile(target_frame_activity, 0.65)
         sparse_active_floor = safe_quantile(target_frame_activity, 0.95) * 0.05
@@ -568,26 +1270,69 @@ def train_teacher_mask_dataset(
         )
         frame_count = int(source_mag.shape[0])
         if int(max_frames_per_pair) > 0 and frame_count > int(max_frames_per_pair):
-            selected_indices = torch.linspace(
-                0,
-                frame_count - 1,
-                int(max_frames_per_pair),
-                dtype=torch.long,
+            selected_indices = _evenly_spaced_long_indices(
+                length=frame_count,
+                count=int(max_frames_per_pair),
                 device=device,
             )
             source_mag = source_mag[selected_indices]
             target_mag = target_mag[selected_indices]
+            source_stft_frames = source_stft_frames[selected_indices]
+            target_stft_frames = target_stft_frames[selected_indices]
             raw_features = raw_features[selected_indices]
             oracle_mask = oracle_mask[selected_indices]
+            complex_oracle_mask = complex_oracle_mask[selected_indices]
             time_frequency_weights = time_frequency_weights[selected_indices]
             active_mask = active_mask[selected_indices]
             frame_count = int(source_mag.shape[0])
-        raw_feature_chunks.append(raw_features)
-        source_mag_chunks.append(source_mag)
-        target_mag_chunks.append(target_mag)
-        oracle_mask_chunks.append(oracle_mask)
-        weight_chunks.append(time_frequency_weights)
-        active_indices = torch.nonzero(active_mask, as_tuple=False).flatten()
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "dataset_pair_tensor_cpu_transfer_start",
+                **dict(progress_context or {}),
+                pair_index=pair_index,
+                pair_count=len(training_pairs),
+                frame_count=frame_count,
+                source_device=str(source_mag.device),
+                target_storage_device="cpu",
+                device=str(device),
+            )
+        raw_feature_chunks.append(raw_features.detach().cpu().to(cpu_storage_dtype))
+        if needs_complex_training_tensors:
+            source_stft_chunks.append(source_stft_frames.detach().cpu())
+            target_stft_chunks.append(target_stft_frames.detach().cpu())
+            complex_mask_chunks.append(complex_oracle_mask.detach().cpu())
+        source_mag_chunks.append(source_mag.detach().cpu().to(cpu_storage_dtype))
+        target_mag_chunks.append(target_mag.detach().cpu().to(cpu_storage_dtype))
+        oracle_mask_chunks.append(oracle_mask.detach().cpu().to(cpu_storage_dtype))
+        weight_chunks.append(time_frequency_weights.detach().cpu().to(cpu_storage_dtype))
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "dataset_pair_tensor_cpu_transfer_finish",
+                **dict(progress_context or {}),
+                pair_index=pair_index,
+                pair_count=len(training_pairs),
+                frame_count=frame_count,
+                training_tensor_storage_device="cpu",
+                training_tensor_storage_dtype=str(cpu_storage_dtype),
+                complex_training_tensor_stored=needs_complex_training_tensors,
+                device=str(device),
+            )
+        del (
+            source_stft,
+            target_stft,
+            source_stft_frames,
+            target_stft_frames,
+            source_mag,
+            target_mag,
+            raw_frame_features,
+            raw_features,
+            oracle_mask,
+            complex_oracle_mask,
+            time_frequency_weights,
+        )
+        active_indices = torch.nonzero(active_mask.detach().cpu(), as_tuple=False).flatten()
         if active_indices.numel() > 0:
             active_index_chunks.append(active_indices + frame_offset)
         frame_counts.append(frame_count)
@@ -604,49 +1349,651 @@ def train_teacher_mask_dataset(
                 device=str(device),
             )
 
-    raw_features_all = torch.cat(raw_feature_chunks, dim=0)
-    features, feature_mean, feature_std = _normalize_features(raw_features_all)
-    temporal_features = _temporal_position_features(int(features.shape[0]), int(config.time_feature_count), device=device)
-    model_features = torch.cat([features, temporal_features], dim=1)
-    source_mag_all = torch.cat(source_mag_chunks, dim=0)
-    target_mag_all = torch.cat(target_mag_chunks, dim=0)
-    oracle_mask_all = torch.cat(oracle_mask_chunks, dim=0)
-    weights_all = torch.cat(weight_chunks, dim=0)
-    frame_count = int(model_features.shape[0])
+    model_feature_width = int(raw_feature_chunks[0].shape[1]) + int(config.time_feature_count)
     frequency_bins = int(frequency_bins or 0)
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_model_init_start",
+            **dict(progress_context or {}),
+            hidden_size=int(config.hidden_size),
+            input_features=model_feature_width,
+            frequency_bins=frequency_bins,
+            mask_output_mode=mask_output_mode,
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_network_construct_start",
+            **dict(progress_context or {}),
+            hidden_size=int(config.hidden_size),
+            input_features=model_feature_width,
+            frequency_bins=frequency_bins,
+            mask_output_mode=mask_output_mode,
+            device=str(device),
+        )
     model = TeacherMaskNetwork(
-        input_features=int(model_features.shape[1]),
+        input_features=model_feature_width,
         frequency_bins=frequency_bins,
         hidden_size=int(config.hidden_size),
-    ).to(device)
+        mask_output_mode=mask_output_mode,
+        mask_ceiling=float(config.mask_ceiling),
+        complex_mask_ceiling=float(config.complex_mask_ceiling),
+    )
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_network_construct_finish",
+            **dict(progress_context or {}),
+            hidden_size=int(config.hidden_size),
+            input_features=model_feature_width,
+            frequency_bins=frequency_bins,
+            mask_output_mode=mask_output_mode,
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_model_to_device_start",
+            **dict(progress_context or {}),
+            device=str(device),
+        )
+    model = model.to(device)
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_model_to_device_finish",
+            **dict(progress_context or {}),
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_optimizer_init_start",
+            **dict(progress_context or {}),
+            learning_rate=float(config.learning_rate),
+            device=str(device),
+        )
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config.learning_rate), weight_decay=1.0e-5)
-    base_indices = torch.arange(frame_count, device=device)
-    active_indices = torch.cat(active_index_chunks, dim=0) if active_index_chunks else torch.empty(0, dtype=torch.long, device=device)
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_optimizer_init_finish",
+            **dict(progress_context or {}),
+            learning_rate=float(config.learning_rate),
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_model_init_finish",
+            **dict(progress_context or {}),
+            hidden_size=int(config.hidden_size),
+            input_features=model_feature_width,
+            frequency_bins=frequency_bins,
+            mask_output_mode=mask_output_mode,
+            device=str(device),
+        )
+
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_feature_stack_start",
+            **dict(progress_context or {}),
+            pair_count=len(training_pairs),
+            chunk_count=len(raw_feature_chunks),
+            total_pair_frame_count=int(sum(frame_counts)),
+            device=str(device),
+        )
+    raw_feature_chunk_count = len(raw_feature_chunks)
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_feature_stats_start",
+            **dict(progress_context or {}),
+            chunk_count=raw_feature_chunk_count,
+            total_pair_frame_count=int(sum(frame_counts)),
+            feature_width=int(raw_feature_chunks[0].shape[1]),
+            stats_accumulation_device="cpu",
+            device=str(device),
+        )
+    feature_mean, feature_std = _feature_mean_std_from_chunks(raw_feature_chunks)
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_feature_stats_finish",
+            **dict(progress_context or {}),
+            chunk_count=raw_feature_chunk_count,
+            total_pair_frame_count=int(sum(frame_counts)),
+            feature_width=int(feature_mean.shape[1]),
+            stats_accumulation_device="cpu",
+            stats_tensor_dtype=str(feature_mean.dtype),
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_feature_normalize_start",
+            **dict(progress_context or {}),
+            chunk_count=raw_feature_chunk_count,
+            total_pair_frame_count=int(sum(frame_counts)),
+            normalized_tensor_storage_device="cpu",
+            normalized_tensor_storage_dtype=str(cpu_storage_dtype),
+            normalization_strategy="chunked_cpu_low_peak",
+            device=str(device),
+        )
+    normalized_feature_chunks: list[torch.Tensor] = []
+    for chunk_index in range(raw_feature_chunk_count):
+        chunk = raw_feature_chunks[chunk_index]
+        chunk_float = chunk.to(torch.float32)
+        raw_feature_chunks[chunk_index] = torch.empty(0, dtype=chunk.dtype, device=chunk.device)
+        del chunk
+        chunk_float.sub_(feature_mean).div_(feature_std)
+        normalized_feature_chunks.append(chunk_float.to(cpu_storage_dtype))
+        del chunk_float
+    raw_feature_chunks.clear()
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_feature_normalize_finish",
+            **dict(progress_context or {}),
+            chunk_count=len(normalized_feature_chunks),
+            total_pair_frame_count=int(sum(frame_counts)),
+            normalized_tensor_storage_device="cpu",
+            normalized_tensor_storage_dtype=str(cpu_storage_dtype),
+            normalization_strategy="chunked_cpu_low_peak",
+            device=str(device),
+        )
+    features = torch.cat(normalized_feature_chunks, dim=0)
+    del normalized_feature_chunks
+    tensor_storage_device = torch.device("cpu")
+    temporal_features = _temporal_position_features(
+        int(features.shape[0]),
+        int(config.time_feature_count),
+        device=tensor_storage_device,
+    )
+    if int(temporal_features.shape[1]) > 0:
+        model_features = torch.cat([features, temporal_features.to(features.dtype)], dim=1)
+    else:
+        model_features = features
+    frame_count = int(model_features.shape[0])
+    frequency_bins = int(frequency_bins or 0)
+    active_indices = (
+        torch.cat(active_index_chunks, dim=0)
+        if active_index_chunks
+        else torch.empty(0, dtype=torch.long, device=torch.device("cpu"))
+    )
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_feature_stack_finish",
+            **dict(progress_context or {}),
+            frame_count=frame_count,
+            frequency_bins=frequency_bins,
+            model_feature_width=int(model_features.shape[1]),
+            source_stft_frame_count=int(sum(frame_counts)),
+            training_tensor_storage_device=str(model_features.device),
+            training_tensor_storage_dtype=str(model_features.dtype),
+            normalization_strategy="chunked_cpu_low_peak",
+            device=str(device),
+        )
+    released_chunk_count = raw_feature_chunk_count + len(active_index_chunks)
+    del temporal_features, active_index_chunks, frame_counts
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_feature_chunks_released",
+            **dict(progress_context or {}),
+            released_chunk_count=int(released_chunk_count),
+            frame_count=frame_count,
+            frequency_bins=frequency_bins,
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_training_tensor_stack_start",
+            **dict(progress_context or {}),
+            chunk_count=len(source_stft_chunks),
+            frame_count=frame_count,
+            frequency_bins=frequency_bins,
+            device=str(device),
+        )
+    if needs_complex_training_tensors:
+        source_stft_all = torch.cat(source_stft_chunks, dim=0)
+        target_stft_all = torch.cat(target_stft_chunks, dim=0)
+        complex_mask_all = torch.cat(complex_mask_chunks, dim=0)
+    else:
+        source_stft_all = None
+        target_stft_all = None
+        complex_mask_all = None
+    source_mag_all = torch.cat(source_mag_chunks, dim=0).to(cpu_storage_dtype)
+    target_mag_all = torch.cat(target_mag_chunks, dim=0).to(cpu_storage_dtype)
+    oracle_mask_all = torch.cat(oracle_mask_chunks, dim=0).to(cpu_storage_dtype)
+    weights_all = torch.cat(weight_chunks, dim=0).to(cpu_storage_dtype)
+    source_mag_mean_scale = float(source_mag_all.float().mean().clamp_min(EPSILON))
+    released_training_chunk_count = (
+        len(source_stft_chunks)
+        + len(target_stft_chunks)
+        + len(source_mag_chunks)
+        + len(target_mag_chunks)
+        + len(oracle_mask_chunks)
+        + len(complex_mask_chunks)
+        + len(weight_chunks)
+    )
+    del (
+        source_stft_chunks,
+        target_stft_chunks,
+        source_mag_chunks,
+        target_mag_chunks,
+        oracle_mask_chunks,
+        complex_mask_chunks,
+        weight_chunks,
+    )
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_training_tensor_stack_finish",
+            **dict(progress_context or {}),
+            frame_count=frame_count,
+            frequency_bins=frequency_bins,
+            source_stft_frame_count=int(source_stft_all.shape[0]) if source_stft_all is not None else 0,
+            target_stft_frame_count=int(target_stft_all.shape[0]) if target_stft_all is not None else 0,
+            training_tensor_storage_device=str(source_mag_all.device),
+            training_tensor_storage_dtype=str(source_mag_all.dtype),
+            complex_training_tensor_stored=needs_complex_training_tensors,
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_training_chunks_released",
+            **dict(progress_context or {}),
+            released_chunk_count=int(released_training_chunk_count),
+            frame_count=frame_count,
+            frequency_bins=frequency_bins,
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_training_indices_start",
+            **dict(progress_context or {}),
+            frame_count=frame_count,
+            active_frame_count=int(active_indices.numel()),
+            active_frame_oversample=int(config.active_frame_oversample),
+            device=str(device),
+        )
+    base_indices = torch.arange(frame_count, device=torch.device("cpu"))
     if int(config.active_frame_oversample) > 1 and active_indices.numel() > 0:
         indices = torch.cat([base_indices, active_indices.repeat(int(config.active_frame_oversample) - 1)])
     else:
         indices = base_indices
     batch_size = max(1, min(int(config.batch_size), frame_count))
+    batch_count = int(math.ceil(int(indices.numel()) / float(batch_size)))
+    batch_progress_stride = max(1, batch_count // 10)
     epoch_count = int(config.epochs)
-    progress_stride = max(1, epoch_count // 10)
     last_loss = 0.0
+    if progress_path is not None:
+        progress(
+            progress_path,
+            "dataset_training_indices_finish",
+            **dict(progress_context or {}),
+            frame_count=frame_count,
+            active_frame_count=int(active_indices.numel()),
+            training_index_count=int(indices.numel()),
+            active_frame_oversample=int(config.active_frame_oversample),
+            batch_size=batch_size,
+            batch_count=batch_count,
+            batch_progress_stride=batch_progress_stride,
+            device=str(device),
+        )
+        progress(
+            progress_path,
+            "dataset_train_loop_start",
+            **dict(progress_context or {}),
+            epoch_count=epoch_count,
+            batch_count=batch_count,
+            batch_size=batch_size,
+            frame_count=frame_count,
+            training_index_count=int(indices.numel()),
+            batch_progress_stride=batch_progress_stride,
+            device=str(device),
+        )
+    _synchronize_cuda_phase(
+        progress_path,
+        progress_context,
+        event_prefix="dataset_train_pre_loop",
+        device=device,
+        frame_count=frame_count,
+        training_index_count=int(indices.numel()),
+        batch_count=batch_count,
+        batch_size=batch_size,
+    )
     for epoch_index in range(epoch_count):
-        permutation = indices[torch.randperm(indices.numel(), device=device)]
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "dataset_train_epoch_start",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                frame_count=frame_count,
+                training_index_count=int(indices.numel()),
+                batch_size=batch_size,
+                batch_count=batch_count,
+                device=str(device),
+            )
+        permutation_device = torch.device("cpu")
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "dataset_train_permutation_start",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                training_index_count=int(indices.numel()),
+                training_device=str(device),
+                permutation_device=str(permutation_device),
+            )
+        permutation_order = torch.randperm(indices.numel(), device=permutation_device)
+        if progress_path is not None:
+            progress(
+                progress_path,
+                "dataset_train_permutation_finish",
+                **dict(progress_context or {}),
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                training_index_count=int(indices.numel()),
+                training_device=str(device),
+                permutation_device=str(permutation_device),
+            )
         for start in range(0, int(indices.numel()), batch_size):
-            batch_indices = permutation[start : start + batch_size]
-            prediction = model(model_features[batch_indices])
-            batch_weights = weights_all[batch_indices]
-            mask_loss = ((prediction - oracle_mask_all[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
-            estimated_mag = prediction * source_mag_all[batch_indices]
-            magnitude_loss = ((estimated_mag - target_mag_all[batch_indices]) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
-            loss = mask_loss + float(config.magnitude_loss_weight) * magnitude_loss / source_mag_all.mean().clamp_min(EPSILON)
+            batch_index = (int(start) // int(batch_size)) + 1
+            should_log_batch_progress = (
+                batch_index == 1 or batch_index == batch_count or batch_index % batch_progress_stride == 0
+            )
+            if progress_path is not None and should_log_batch_progress:
+                progress(
+                    progress_path,
+                    "dataset_train_batch_index_select_start",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    training_device=str(device),
+                    permutation_device=str(permutation_device),
+                    device=str(device),
+                )
+            batch_order = permutation_order[start : start + batch_size]
+            batch_indices = indices[batch_order]
+            if progress_path is not None and should_log_batch_progress:
+                progress(
+                    progress_path,
+                    "dataset_train_batch_index_select_finish",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    batch_frame_count=int(batch_indices.numel()),
+                    training_device=str(device),
+                    permutation_device=str(permutation_device),
+                    device=str(device),
+                )
+                progress(
+                    progress_path,
+                    "dataset_train_batch_start",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    batch_frame_count=int(batch_indices.numel()),
+                    device=str(device),
+                )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_feature_gather_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                training_tensor_storage_device=str(model_features.device),
+                device=device,
+            )
+            batch_model_features_cpu = model_features[batch_indices]
+            batch_weights_cpu = weights_all[batch_indices]
+            if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+                batch_complex_mask_cpu = complex_mask_all[batch_indices]
+                batch_source_stft_cpu = source_stft_all[batch_indices]
+                batch_target_stft_cpu = target_stft_all[batch_indices]
+            else:
+                batch_oracle_mask_cpu = oracle_mask_all[batch_indices]
+                batch_source_mag_cpu = source_mag_all[batch_indices]
+                batch_target_mag_cpu = target_mag_all[batch_indices]
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_feature_gather_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                training_tensor_storage_device=str(model_features.device),
+                gathered_tensor_storage_device=str(batch_model_features_cpu.device),
+                device=device,
+            )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_to_device_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                training_tensor_storage_device=str(model_features.device),
+                training_device=str(device),
+                device=device,
+            )
+            batch_model_features = batch_model_features_cpu.to(device=device, dtype=torch.float32)
+            batch_weights = batch_weights_cpu.to(device=device, dtype=torch.float32)
+            if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+                batch_complex_mask = batch_complex_mask_cpu.to(device)
+                batch_source_stft = batch_source_stft_cpu.to(device)
+                batch_target_stft = batch_target_stft_cpu.to(device)
+            else:
+                batch_oracle_mask = batch_oracle_mask_cpu.to(device=device, dtype=torch.float32)
+                batch_source_mag = batch_source_mag_cpu.to(device=device, dtype=torch.float32)
+                batch_target_mag = batch_target_mag_cpu.to(device=device, dtype=torch.float32)
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_to_device_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                training_tensor_storage_device=str(model_features.device),
+                batch_tensor_device=str(batch_model_features.device),
+                training_device=str(device),
+                device=device,
+            )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_forward_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            prediction = model(batch_model_features)
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_forward_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_loss_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+                prediction_complex = _complex_prediction_frames(prediction, frequency_bins)
+                mask_loss = _weighted_complex_mse(prediction_complex - batch_complex_mask, batch_weights)
+                estimated_stft = prediction_complex * batch_source_stft
+                stft_loss = _weighted_complex_mse(estimated_stft - batch_target_stft, batch_weights)
+                identity_complex = torch.ones_like(prediction_complex)
+                source_preservation_loss = _weighted_complex_mse(prediction_complex - identity_complex, batch_weights)
+                loss = (
+                    mask_loss
+                    + float(config.magnitude_loss_weight) * stft_loss / max(source_mag_mean_scale, EPSILON)
+                    + max(0.0, float(config.source_preservation_weight)) * source_preservation_loss
+                )
+            else:
+                mask_loss = ((prediction - batch_oracle_mask) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+                estimated_mag = prediction * batch_source_mag
+                magnitude_loss = ((estimated_mag - batch_target_mag) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+                source_preservation_loss = ((prediction - 1.0) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+                loss = (
+                    mask_loss
+                    + float(config.magnitude_loss_weight) * magnitude_loss / max(source_mag_mean_scale, EPSILON)
+                    + max(0.0, float(config.source_preservation_weight)) * source_preservation_loss
+                )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_loss_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             optimizer.zero_grad(set_to_none=True)
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_backward_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             loss.backward()
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_backward_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_optimizer_step_start",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             optimizer.step()
+            _progress_train_batch_phase(
+                progress_path if should_log_batch_progress else None,
+                "dataset_train_batch_optimizer_step_finish",
+                progress_context,
+                epoch=epoch_index + 1,
+                epoch_count=epoch_count,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch_start_index=int(start),
+                batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                training_index_count=int(indices.numel()),
+                batch_frame_count=int(batch_indices.numel()),
+                device=device,
+            )
             last_loss = float(loss.detach().cpu())
-        if progress_path is not None and (
-            epoch_index == 0 or epoch_index + 1 == epoch_count or (epoch_index + 1) % progress_stride == 0
-        ):
+            if progress_path is not None and should_log_batch_progress:
+                progress(
+                    progress_path,
+                    "dataset_train_batch_heartbeat",
+                    **dict(progress_context or {}),
+                    epoch=epoch_index + 1,
+                    epoch_count=epoch_count,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    batch_start_index=int(start),
+                    batch_end_index=int(min(int(start) + int(batch_size), int(indices.numel()))),
+                    training_index_count=int(indices.numel()),
+                    current_loss=round(last_loss, 9),
+                    device=str(device),
+                )
+        if progress_path is not None:
             progress(
                 progress_path,
                 "dataset_train_epoch",
@@ -663,12 +2010,52 @@ def train_teacher_mask_dataset(
     metadata = {
         "frequency_bins": int(frequency_bins),
         "input_features": int(model_features.shape[1]),
+        "mask_output_mode": mask_output_mode,
+        "complex_mask_ceiling": float(config.complex_mask_ceiling),
         "feature_mean": feature_mean.detach().cpu().numpy().astype(np.float32),
         "feature_std": feature_std.detach().cpu().numpy().astype(np.float32),
     }
+    source_feature_memory_stored_frame_count = 0
+    source_feature_memory_projection_dim_used = 0
     if int(config.source_feature_memory_neighbors) > 0:
-        metadata["source_feature_memory_features"] = model_features.detach().cpu().numpy().astype(np.float16, copy=False)
-        metadata["source_feature_memory_masks"] = oracle_mask_all.detach().cpu().numpy().astype(np.float16, copy=False)
+        memory_features = model_features.float()
+        projection_matrix = _source_feature_memory_projection_matrix(
+            feature_width=int(model_features.shape[1]),
+            projection_dim=int(config.source_feature_memory_projection_dim),
+            seed=int(config.seed),
+            device=torch.device("cpu"),
+        )
+        if projection_matrix is not None:
+            memory_features = _project_source_feature_memory_features(model_features, projection_matrix)
+            source_feature_memory_projection_dim_used = int(projection_matrix.shape[1])
+            metadata["source_feature_memory_projection_matrix"] = (
+                projection_matrix.detach().cpu().numpy().astype(np.float16, copy=False)
+            )
+        selected_indices = _source_feature_memory_selected_indices(
+            frame_count=int(memory_features.shape[0]),
+            max_frames=int(config.source_feature_memory_max_frames),
+            device=torch.device("cpu"),
+        )
+        if selected_indices is not None:
+            memory_features = memory_features[selected_indices]
+            memory_masks = oracle_mask_all[selected_indices].float()
+            memory_complex_masks = complex_mask_all[selected_indices] if complex_mask_all is not None else None
+            metadata["source_feature_memory_selected_indices"] = selected_indices.detach().cpu().numpy().astype(np.int64, copy=False)
+        else:
+            memory_masks = oracle_mask_all.float()
+            memory_complex_masks = complex_mask_all
+        source_feature_memory_stored_frame_count = int(memory_features.shape[0])
+        metadata["source_feature_memory_features"] = memory_features.detach().cpu().numpy().astype(np.float16, copy=False)
+        metadata["source_feature_memory_masks"] = memory_masks.detach().cpu().numpy().astype(np.float16, copy=False)
+        if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+            if memory_complex_masks is None:
+                raise RuntimeError("complex source-feature memory requested without complex mask tensors")
+            metadata["source_feature_memory_complex_frame_mask_real"] = (
+                memory_complex_masks.real.detach().cpu().numpy().astype(np.float16, copy=False)
+            )
+            metadata["source_feature_memory_complex_frame_mask_imag"] = (
+                memory_complex_masks.imag.detach().cpu().numpy().astype(np.float16, copy=False)
+            )
     diagnostics = {
         "training_loss": round(last_loss, 9),
         "training_example_count": float(len(training_pairs)),
@@ -677,11 +2064,18 @@ def train_teacher_mask_dataset(
         "training_index_count": float(indices.numel()),
         "active_frame_count": float(active_indices.numel()),
         "frequency_bins": float(frequency_bins),
+        "mask_output_mode": mask_output_mode,
+        "complex_mask_ceiling": float(config.complex_mask_ceiling),
         "device_used": 1.0 if device.type == "cuda" else 0.0,
         "max_frames_per_pair": float(max(0, int(max_frames_per_pair))),
-        "source_feature_memory_frame_count": float(frame_count)
+        "source_feature_memory_frame_count": float(source_feature_memory_stored_frame_count)
         if int(config.source_feature_memory_neighbors) > 0
         else 0.0,
+        "source_feature_memory_original_frame_count": float(frame_count)
+        if int(config.source_feature_memory_neighbors) > 0
+        else 0.0,
+        "source_feature_memory_projection_dim": float(source_feature_memory_projection_dim_used),
+        "source_feature_memory_max_frames": float(int(config.source_feature_memory_max_frames)),
     }
     return model, metadata, diagnostics
 
@@ -692,8 +2086,20 @@ def apply_teacher_mask(
     model: TeacherMaskNetwork,
     metadata: dict[str, Any],
     config: TeacherMaskTrainConfig,
+    progress_callback: ProgressCallback | None = None,
+    max_source_feature_memory_distance_ops: int = DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     device = next(model.parameters()).device
+    mask_output_mode = validate_mask_output_mode(config.mask_output_mode)
+    emit_progress(
+        progress_callback,
+        "apply_feature_extraction_start",
+        device=str(device.type),
+        source_frames=int(source_audio.shape[0]),
+        source_channels=int(source_audio.shape[1]) if source_audio.ndim == 2 else 0,
+        n_fft=int(config.n_fft),
+        hop_length=int(config.hop_length),
+    )
     source_stft_mono = _stft_mono(mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
     source_mag = source_stft_mono.abs().transpose(0, 1).clamp_min(EPSILON)
     raw_frame_features = torch.log1p(source_mag * 64.0)
@@ -707,8 +2113,22 @@ def apply_teacher_mask(
         device=device,
     )
     model_features = torch.cat([features, temporal_features], dim=1)
+    emit_progress(
+        progress_callback,
+        "apply_feature_extraction_finish",
+        device=str(device.type),
+        query_frame_count=int(model_features.shape[0]),
+        feature_width=int(model_features.shape[1]),
+        frequency_bins=int(source_mag.shape[1]),
+    )
     with torch.no_grad():
-        mask = model(model_features).transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
+        prediction = model(model_features)
+        if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+            learned_complex_mask = _complex_prediction_frames(prediction, int(source_mag.shape[1])).transpose(0, 1).to(torch.complex64)
+            mask = learned_complex_mask.abs().clamp(0.0, max(float(config.mask_ceiling), float(config.complex_mask_ceiling)))
+        else:
+            learned_complex_mask = None
+            mask = prediction.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
     source_feature_memory_used = False
     source_feature_memory_exact_source_match = False
     source_feature_memory_frame_count = 0
@@ -718,11 +2138,29 @@ def apply_teacher_mask(
     source_feature_memory_complex_masks: np.ndarray | None = None
     source_feature_memory_complex_mask_available = False
     source_feature_memory_complex_mask_skipped_reason: str | None = None
+    source_feature_memory_complex_frame_mask: torch.Tensor | None = None
+    source_feature_memory_complex_frame_mask_available = False
+    source_feature_memory_complex_frame_mask_used = False
+    source_feature_memory_complex_frame_mask_skipped_reason: str | None = None
+    source_feature_memory_projection_dim = 0
+    source_feature_memory_max_frames = int(config.source_feature_memory_max_frames)
     if (
         int(config.source_feature_memory_neighbors) > 0
         and "source_feature_memory_features" in metadata
         and "source_feature_memory_masks" in metadata
     ):
+        memory_query_features = model_features
+        if "source_feature_memory_projection_matrix" in metadata:
+            projection_matrix = torch.as_tensor(
+                np.asarray(metadata["source_feature_memory_projection_matrix"], dtype=np.float32),
+                dtype=torch.float32,
+                device=device,
+            )
+            if projection_matrix.ndim == 2 and projection_matrix.shape[0] == model_features.shape[1]:
+                memory_query_features = _project_source_feature_memory_features(model_features, projection_matrix)
+                source_feature_memory_projection_dim = int(projection_matrix.shape[1])
+            else:
+                source_feature_memory_skipped_reason = "source_feature_memory_projection_width_mismatch"
         memory_features = torch.as_tensor(
             np.asarray(metadata["source_feature_memory_features"], dtype=np.float32),
             dtype=torch.float32,
@@ -733,14 +2171,50 @@ def apply_teacher_mask(
             dtype=torch.float32,
             device=device,
         )
-        if memory_features.shape[1] == model_features.shape[1] and memory_masks.shape[1] == source_mag.shape[1]:
+        memory_complex_frame_masks: torch.Tensor | None = None
+        if (
+            "source_feature_memory_complex_frame_mask_real" in metadata
+            and "source_feature_memory_complex_frame_mask_imag" in metadata
+        ):
+            raw_complex_frame_masks = (
+                np.asarray(metadata["source_feature_memory_complex_frame_mask_real"], dtype=np.float32)
+                + 1j * np.asarray(metadata["source_feature_memory_complex_frame_mask_imag"], dtype=np.float32)
+            ).astype(np.complex64, copy=False)
+            memory_complex_frame_masks = torch.as_tensor(raw_complex_frame_masks, dtype=torch.complex64, device=device)
+            if memory_complex_frame_masks.ndim == 2 and memory_complex_frame_masks.shape[1] == source_mag.shape[1]:
+                source_feature_memory_complex_frame_mask_available = True
+            else:
+                memory_complex_frame_masks = None
+                source_feature_memory_complex_frame_mask_skipped_reason = "source_feature_memory_complex_frame_mask_shape_mismatch"
+        if (
+            source_feature_memory_skipped_reason is None
+            and memory_features.shape[1] == memory_query_features.shape[1]
+            and memory_masks.shape[1] == source_mag.shape[1]
+        ):
             source_feature_memory_available = True
             source_feature_memory_frame_count = int(memory_features.shape[0])
-            source_feature_memory_exact_source_match = _features_are_exact_memory_match(model_features, memory_features)
+            source_feature_memory_exact_source_match = _features_are_exact_memory_match(memory_query_features, memory_features)
             if source_feature_memory_exact_source_match:
-                memory_mask = memory_masks
-                mask = memory_mask.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
-                source_feature_memory_used = True
+                if memory_complex_frame_masks is not None and memory_complex_frame_masks.shape[0] == memory_query_features.shape[0]:
+                    source_feature_memory_complex_frame_mask = memory_complex_frame_masks.transpose(0, 1)
+                    mask = source_feature_memory_complex_frame_mask.abs().clamp(
+                        0.0,
+                        max(float(config.mask_ceiling), float(config.complex_mask_ceiling)),
+                    )
+                    source_feature_memory_complex_frame_mask_used = True
+                    source_feature_memory_used = True
+                else:
+                    memory_mask = memory_masks
+                    mask = memory_mask.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
+                    source_feature_memory_used = True
+                emit_progress(
+                    progress_callback,
+                    "source_feature_memory_exact_match",
+                    query_frame_count=int(memory_query_features.shape[0]),
+                    memory_frame_count=int(memory_features.shape[0]),
+                    feature_width=int(memory_query_features.shape[1]),
+                    projection_dim=int(source_feature_memory_projection_dim),
+                )
                 if "source_feature_memory_channel_masks" in metadata:
                     raw_channel_masks = torch.as_tensor(
                         np.asarray(metadata["source_feature_memory_channel_masks"], dtype=np.float32),
@@ -750,15 +2224,71 @@ def apply_teacher_mask(
                     if raw_channel_masks.ndim == 3 and raw_channel_masks.shape[-1] == source_mag.shape[1]:
                         source_feature_memory_channel_masks = raw_channel_masks
             else:
-                memory_mask = _source_feature_memory_mask(
-                    model_features,
-                    memory_features=memory_features,
-                    memory_masks=memory_masks,
+                estimated_distance_ops = (
+                    int(memory_query_features.shape[0]) * int(memory_features.shape[0]) * int(memory_query_features.shape[1])
+                )
+                emit_progress(
+                    progress_callback,
+                    "source_feature_memory_search_start",
+                    query_frame_count=int(memory_query_features.shape[0]),
+                    memory_frame_count=int(memory_features.shape[0]),
+                    feature_width=int(memory_query_features.shape[1]),
+                    projection_dim=int(source_feature_memory_projection_dim),
                     neighbor_count=int(config.source_feature_memory_neighbors),
                     chunk_size=int(config.source_feature_memory_chunk_size),
+                    estimated_distance_ops=int(estimated_distance_ops),
+                    max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
                 )
-                mask = memory_mask.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
+                if (
+                    int(max_source_feature_memory_distance_ops) > 0
+                    and estimated_distance_ops > int(max_source_feature_memory_distance_ops)
+                ):
+                    emit_progress(
+                        progress_callback,
+                        "source_feature_memory_search_blocked",
+                        reason="source_feature_memory_cost_guard",
+                        estimated_distance_ops=int(estimated_distance_ops),
+                        max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
+                    )
+                    raise RuntimeError(
+                        "source_feature_memory_cost_guard: "
+                        f"estimated_distance_ops={int(estimated_distance_ops)} exceeds "
+                        f"max_source_feature_memory_distance_ops={int(max_source_feature_memory_distance_ops)}"
+                    )
+                if memory_complex_frame_masks is not None:
+                    memory_complex_frame_mask = _source_feature_memory_complex_mask(
+                        memory_query_features,
+                        memory_features=memory_features,
+                        memory_complex_masks=memory_complex_frame_masks,
+                        neighbor_count=int(config.source_feature_memory_neighbors),
+                        chunk_size=int(config.source_feature_memory_chunk_size),
+                        progress_callback=progress_callback,
+                    )
+                    source_feature_memory_complex_frame_mask = memory_complex_frame_mask.transpose(0, 1)
+                    mask = source_feature_memory_complex_frame_mask.abs().clamp(
+                        0.0,
+                        max(float(config.mask_ceiling), float(config.complex_mask_ceiling)),
+                    )
+                    source_feature_memory_complex_frame_mask_used = True
+                else:
+                    memory_mask = _source_feature_memory_mask(
+                        memory_query_features,
+                        memory_features=memory_features,
+                        memory_masks=memory_masks,
+                        neighbor_count=int(config.source_feature_memory_neighbors),
+                        chunk_size=int(config.source_feature_memory_chunk_size),
+                        progress_callback=progress_callback,
+                    )
+                    mask = memory_mask.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
                 source_feature_memory_used = True
+                emit_progress(
+                    progress_callback,
+                    "source_feature_memory_search_finish",
+                    query_frame_count=int(memory_query_features.shape[0]),
+                    memory_frame_count=int(memory_features.shape[0]),
+                    feature_width=int(memory_query_features.shape[1]),
+                    projection_dim=int(source_feature_memory_projection_dim),
+                )
             if "source_feature_memory_complex_mask_real" in metadata and "source_feature_memory_complex_mask_imag" in metadata:
                 source_feature_memory_complex_mask_available = True
                 raw_source_feature_memory_complex_masks = (
@@ -777,6 +2307,7 @@ def apply_teacher_mask(
             temporal_mask_prior_used = True
     output_channels: list[np.ndarray] = []
     complex_mask_prior_used = False
+    learned_complex_mask_used = False
     complex_mask_prior: np.ndarray | None = None
     if "temporal_complex_mask_prior_real" in metadata and "temporal_complex_mask_prior_imag" in metadata:
         complex_mask_prior = (
@@ -839,6 +2370,27 @@ def apply_teacher_mask(
                 )
             )
             continue
+        if source_feature_memory_complex_frame_mask is not None and source_feature_memory_complex_frame_mask.shape == channel_stft.shape:
+            output_channels.append(
+                _istft_channel(
+                    channel_stft * source_feature_memory_complex_frame_mask,
+                    n_fft=config.n_fft,
+                    hop_length=config.hop_length,
+                    length=source_audio.shape[0],
+                )
+            )
+            continue
+        if learned_complex_mask is not None:
+            output_channels.append(
+                _istft_channel(
+                    channel_stft * learned_complex_mask,
+                    n_fft=config.n_fft,
+                    hop_length=config.hop_length,
+                    length=source_audio.shape[0],
+                )
+            )
+            learned_complex_mask_used = True
+            continue
         output_channels.append(
             _istft_channel(channel_stft * mask, n_fft=config.n_fft, hop_length=config.hop_length, length=source_audio.shape[0])
         )
@@ -851,6 +2403,9 @@ def apply_teacher_mask(
     diagnostics = {
         "device": str(device.type),
         "device_used": 1.0 if device.type == "cuda" else 0.0,
+        "mask_output_mode": mask_output_mode,
+        "complex_mask_ceiling": float(config.complex_mask_ceiling),
+        "complex_mask_used": learned_complex_mask_used,
         "predicted_mask_mean": round(float(mask.mean().detach().cpu()), 9),
         "predicted_mask_max": round(float(mask.max().detach().cpu()), 9),
         "source_feature_memory_available": source_feature_memory_available,
@@ -861,9 +2416,14 @@ def apply_teacher_mask(
         "source_feature_memory_neighbor_count": int(config.source_feature_memory_neighbors)
         if source_feature_memory_used
         else 0,
+        "source_feature_memory_projection_dim": source_feature_memory_projection_dim,
+        "source_feature_memory_max_frames": source_feature_memory_max_frames,
         "source_feature_memory_complex_mask_available": source_feature_memory_complex_mask_available,
         "source_feature_memory_complex_mask_used": source_feature_memory_complex_masks is not None,
         "source_feature_memory_complex_mask_skipped_reason": source_feature_memory_complex_mask_skipped_reason,
+        "source_feature_memory_complex_frame_mask_available": source_feature_memory_complex_frame_mask_available,
+        "source_feature_memory_complex_frame_mask_used": source_feature_memory_complex_frame_mask_used,
+        "source_feature_memory_complex_frame_mask_skipped_reason": source_feature_memory_complex_frame_mask_skipped_reason,
         "temporal_mask_prior_used": temporal_mask_prior_used,
         "temporal_complex_mask_prior_used": complex_mask_prior_used,
         "peak_before_limit": round(peak, 9),
@@ -927,6 +2487,9 @@ def load_teacher_mask_checkpoint(
         input_features=int(metadata["input_features"]),
         frequency_bins=int(metadata["frequency_bins"]),
         hidden_size=int(config.hidden_size),
+        mask_output_mode=validate_mask_output_mode(config.mask_output_mode),
+        mask_ceiling=float(config.mask_ceiling),
+        complex_mask_ceiling=float(config.complex_mask_ceiling),
     )
     model.load_state_dict(payload["state_dict"])
     model.to(_select_device(device))
@@ -944,18 +2507,69 @@ def apply_teacher_mask_checkpoint_to_source(
     device: str,
     listen_dir: Path | None = None,
     command_args: list[str] | None = None,
+    progress_path: Path | None = None,
+    progress_context: dict[str, Any] | None = None,
+    max_source_feature_memory_distance_ops: int = DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
 ) -> dict[str, Any]:
     stem_name = validate_stem_name(stem_name)
+
+    def application_progress(event: str, fields: dict[str, Any]) -> None:
+        if progress_path is None:
+            return
+        uses_gpu = str(device) == "cuda"
+        payload = dict(progress_context or {})
+        payload.update(
+            {
+                "expected_acceleration_mode": "gpu_checkpoint_application" if uses_gpu else "cpu_checkpoint_application",
+                "gpu_inference_required": uses_gpu,
+                "gpu_inference_skipped": not uses_gpu,
+                "device_requested": str(device),
+                "stem_name": stem_name,
+                "source_mix_path": str(source_mix_path),
+                "checkpoint_path": str(checkpoint_path),
+            }
+        )
+        payload.update(fields)
+        progress(
+            progress_path,
+            event,
+            **payload,
+        )
+
+    emit_progress(application_progress, "checkpoint_application_start")
     source_audio, source_sample_rate = read_audio(source_mix_path)
+    emit_progress(
+        application_progress,
+        "checkpoint_application_audio_loaded",
+        sample_rate=int(source_sample_rate),
+        source_frames=int(source_audio.shape[0]),
+        source_channels=int(source_audio.shape[1]),
+    )
     model, metadata, checkpoint_config, checkpoint_stem_name = load_teacher_mask_checkpoint(checkpoint_path, device=device)
+    emit_progress(
+        application_progress,
+        "checkpoint_application_checkpoint_loaded",
+        checkpoint_stem_name=str(checkpoint_stem_name),
+        checkpoint_n_fft=int(checkpoint_config.n_fft),
+        checkpoint_hop_length=int(checkpoint_config.hop_length),
+        checkpoint_context_frame_radius=int(checkpoint_config.context_frame_radius),
+        checkpoint_mask_output_mode=validate_mask_output_mode(checkpoint_config.mask_output_mode),
+        checkpoint_complex_mask_ceiling=float(checkpoint_config.complex_mask_ceiling),
+        checkpoint_source_feature_memory_neighbors=int(checkpoint_config.source_feature_memory_neighbors),
+        checkpoint_source_feature_memory_chunk_size=int(checkpoint_config.source_feature_memory_chunk_size),
+    )
     if validate_stem_name(checkpoint_stem_name) != stem_name:
         raise ValueError(f"checkpoint stem mismatch: checkpoint={checkpoint_stem_name}, requested={stem_name}")
+    emit_progress(application_progress, "checkpoint_application_mask_start")
     output_audio, apply_diagnostics = apply_teacher_mask(
         source_audio,
         model=model,
         metadata=metadata,
         config=checkpoint_config,
+        progress_callback=application_progress,
+        max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
     )
+    emit_progress(application_progress, "checkpoint_application_mask_finish", diagnostics=apply_diagnostics)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"01_teacher_mask_checkpoint_{stem_name}.flac"
     write_flac(output_path, output_audio, source_sample_rate)
@@ -1224,9 +2838,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=TeacherMaskTrainConfig.batch_size)
     parser.add_argument("--learning-rate", type=float, default=TeacherMaskTrainConfig.learning_rate)
     parser.add_argument("--mask-ceiling", type=float, default=TeacherMaskTrainConfig.mask_ceiling)
+    parser.add_argument("--mask-output-mode", choices=sorted(MASK_OUTPUT_MODES), default=TeacherMaskTrainConfig.mask_output_mode)
+    parser.add_argument("--complex-mask-ceiling", type=float, default=TeacherMaskTrainConfig.complex_mask_ceiling)
     parser.add_argument("--activity-weight", type=float, default=TeacherMaskTrainConfig.activity_weight)
     parser.add_argument("--leakage-suppression-weight", type=float, default=TeacherMaskTrainConfig.leakage_suppression_weight)
     parser.add_argument("--magnitude-loss-weight", type=float, default=TeacherMaskTrainConfig.magnitude_loss_weight)
+    parser.add_argument("--source-preservation-weight", type=float, default=TeacherMaskTrainConfig.source_preservation_weight)
     parser.add_argument("--active-frame-oversample", type=int, default=TeacherMaskTrainConfig.active_frame_oversample)
     parser.add_argument("--context-frame-radius", type=int, default=TeacherMaskTrainConfig.context_frame_radius)
     parser.add_argument("--time-feature-count", type=int, default=TeacherMaskTrainConfig.time_feature_count)
@@ -1245,6 +2862,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=TeacherMaskTrainConfig.source_feature_memory_chunk_size,
     )
+    parser.add_argument(
+        "--source-feature-memory-projection-dim",
+        type=int,
+        default=TeacherMaskTrainConfig.source_feature_memory_projection_dim,
+    )
+    parser.add_argument(
+        "--source-feature-memory-max-frames",
+        type=int,
+        default=TeacherMaskTrainConfig.source_feature_memory_max_frames,
+    )
+    parser.add_argument("--min-cuda-free-memory-mb", type=int, default=TeacherMaskTrainConfig.min_cuda_free_memory_mb)
     parser.add_argument("--max-peak", type=float, default=TeacherMaskTrainConfig.max_peak)
     parser.add_argument("--seed", type=int, default=TeacherMaskTrainConfig.seed)
     parser.add_argument("--device", default=TeacherMaskTrainConfig.device)
@@ -1260,15 +2888,21 @@ def config_from_args(args: argparse.Namespace) -> TeacherMaskTrainConfig:
         batch_size=int(args.batch_size),
         learning_rate=float(args.learning_rate),
         mask_ceiling=float(args.mask_ceiling),
+        mask_output_mode=validate_mask_output_mode(args.mask_output_mode),
+        complex_mask_ceiling=float(args.complex_mask_ceiling),
         activity_weight=float(args.activity_weight),
         leakage_suppression_weight=float(args.leakage_suppression_weight),
         magnitude_loss_weight=float(args.magnitude_loss_weight),
+        source_preservation_weight=float(args.source_preservation_weight),
         active_frame_oversample=int(args.active_frame_oversample),
         context_frame_radius=int(args.context_frame_radius),
         time_feature_count=int(args.time_feature_count),
         source_feature_memory_neighbors=int(args.source_feature_memory_neighbors),
         source_feature_memory_store_complex_masks=bool(args.source_feature_memory_store_complex_masks),
         source_feature_memory_chunk_size=int(args.source_feature_memory_chunk_size),
+        source_feature_memory_projection_dim=int(args.source_feature_memory_projection_dim),
+        source_feature_memory_max_frames=int(args.source_feature_memory_max_frames),
+        min_cuda_free_memory_mb=int(args.min_cuda_free_memory_mb),
         max_peak=float(args.max_peak),
         seed=int(args.seed),
         device=str(args.device),

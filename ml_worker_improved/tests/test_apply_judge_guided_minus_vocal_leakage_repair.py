@@ -5,9 +5,11 @@ import json
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
@@ -68,6 +70,70 @@ class JudgeGuidedMinusVocalLeakageRepairTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_selects_residual_vocal_watch_windows_above_repair_threshold(self) -> None:
+        module = _load_module()
+        rows = [
+            {
+                "candidate_id": "warned_minus",
+                "minus_path": "/app/warned.flac",
+                "window_metrics": [
+                    {
+                        "start_sec": 12.0,
+                        "duration_sec": 4.0,
+                        "vocal_leakage_in_minus_score": 0.17,
+                        "reasons": ["residual_vocal_watch"],
+                    },
+                    {
+                        "start_sec": 24.0,
+                        "duration_sec": 4.0,
+                        "vocal_leakage_in_minus_score": 0.22,
+                        "reasons": ["residual_vocal_watch"],
+                    },
+                ],
+            }
+        ]
+
+        windows = module.select_target_windows(
+            rows,
+            candidate_id="warned_minus",
+            minus_path="/app/warned.flac",
+            leak_threshold=0.18,
+        )
+
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["start_sec"], 24.0)
+        self.assertEqual(windows[0]["duration_sec"], 4.0)
+        self.assertEqual(windows[0]["reasons"], ["residual_vocal_watch"])
+
+    def test_selects_minus_dominant_vocal_bleed_windows_above_repair_threshold(self) -> None:
+        module = _load_module()
+        rows = [
+            {
+                "candidate_id": "warned_minus",
+                "minus_path": "/app/warned.flac",
+                "window_metrics": [
+                    {
+                        "start_sec": 168.0,
+                        "duration_sec": 12.0,
+                        "vocal_leakage_in_minus_score": 0.49,
+                        "minus_dominant_defect": "vocal_bleed_in_minus",
+                        "reasons": ["no_reference_proxy_passed"],
+                    }
+                ],
+            }
+        ]
+
+        windows = module.select_target_windows(
+            rows,
+            candidate_id="warned_minus",
+            minus_path="/app/warned.flac",
+            leak_threshold=0.15,
+        )
+
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["start_sec"], 168.0)
+        self.assertEqual(windows[0]["minus_dominant_defect"], "vocal_bleed_in_minus")
 
     def test_selects_self_judge_vocal_projection_blocker_windows(self) -> None:
         module = _load_module()
@@ -157,6 +223,22 @@ class JudgeGuidedMinusVocalLeakageRepairTests(unittest.TestCase):
         self.assertEqual(windows[0]["start_sec"], 156.0)
         self.assertEqual(windows[0]["duration_sec"], 12.0)
         self.assertEqual(windows[0]["segment_id"], "segment_0013")
+
+    def test_read_judge_rows_accepts_windowed_judge_jsonl_starting_with_object(self) -> None:
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            judge_path = Path(tmp_dir) / "wj.jsonl"
+            judge_path.write_text(
+                json.dumps({"candidate_id": "minus", "minus_path": "/app/minus.flac"})
+                + "\n"
+                + json.dumps({"candidate_id": "alt", "minus_path": "/app/alt.flac"})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            rows = module.read_judge_rows(judge_path)
+
+        self.assertEqual([row["candidate_id"] for row in rows], ["minus", "alt"])
 
     def test_projection_repair_reduces_vocal_projection_without_touching_unselected_audio(self) -> None:
         module = _load_module()
@@ -329,6 +411,141 @@ class JudgeGuidedMinusVocalLeakageRepairTests(unittest.TestCase):
         )
         self.assertEqual(manifest["candidate_row"]["minus_path"], "/app/out/minus_judge_guided_leakage_repair.flac")
         self.assertEqual(manifest["candidate_row"]["vocal_path"], "/app/vocals.flac")
+
+    def test_build_repair_can_write_short_output_names(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        times = np.arange(sample_rate, dtype=np.float32) / float(sample_rate)
+        vocal = 0.25 * np.sin(2.0 * np.pi * 440.0 * times).astype(np.float32)
+        music = 0.35 * np.sin(2.0 * np.pi * 110.0 * times).astype(np.float32)
+        raw = np.column_stack([music + vocal, music + vocal])
+        base_minus = np.column_stack([music + (0.45 * vocal), music + (0.45 * vocal)])
+        primary_vocals = np.column_stack([vocal, vocal])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            raw_path = root / "mix.flac"
+            base_path = root / "base.flac"
+            vocal_path = root / "voc.flac"
+            sf.write(raw_path, raw, sample_rate)
+            sf.write(base_path, base_minus, sample_rate)
+            sf.write(vocal_path, primary_vocals, sample_rate)
+            judge_path = root / "wj.jsonl"
+            judge_path.write_text(
+                json.dumps(
+                    {
+                        "candidate_id": "base",
+                        "minus_path": str(base_path),
+                        "window_metrics": [
+                            {
+                                "start_sec": 0.0,
+                                "duration_sec": 1.0,
+                                "vocal_leakage_in_minus_score": 0.7,
+                                "reasons": ["vocal_leakage_in_minus"],
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_dir = root / "out"
+
+            manifest = module.build_judge_guided_minus_vocal_leakage_repair(
+                Namespace(
+                    raw_audio_path=raw_path,
+                    base_minus_path=base_path,
+                    primary_vocals_path=vocal_path,
+                    windowed_judge_jsonl=judge_path,
+                    output_dir=output_dir,
+                    candidate_id="base",
+                    track_id="track-a",
+                    listen_dir=None,
+                    listen_label="m001.flac",
+                    leak_threshold=0.60,
+                    strength=0.85,
+                    max_projection_gain=0.75,
+                    gate_smoothing_sec=0.0,
+                    window_margin_sec=0.0,
+                    band_low_hz=160.0,
+                    band_high_hz=2000.0,
+                    projection_mode="segment_local",
+                    short_output_names=True,
+                )
+            )
+
+            self.assertTrue((output_dir / "manifest.json").exists())
+            self.assertTrue((output_dir / "rows.jsonl").exists())
+            self.assertTrue((output_dir / "m001.flac").exists())
+            self.assertFalse((output_dir / "judge_guided_minus_vocal_leakage_repair_manifest.json").exists())
+            self.assertFalse((output_dir / "minus_judge_guided_leakage_repair.flac").exists())
+            self.assertEqual(manifest["candidate_row_jsonl"], str(output_dir / "rows.jsonl"))
+            self.assertEqual(manifest["rendered_minus_candidate_path"], str(output_dir / "m001.flac"))
+            self.assertTrue(all(len(path.name) <= 32 for path in output_dir.iterdir()))
+
+    def test_no_matching_repair_windows_writes_blocked_short_manifest(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            base_path = root / "base.flac"
+            judge_path = root / "wj.jsonl"
+            judge_path.write_text(
+                json.dumps(
+                    {
+                        "candidate_id": "base",
+                        "minus_path": str(base_path),
+                        "window_metrics": [
+                            {
+                                "start_sec": 0.0,
+                                "duration_sec": 1.0,
+                                "vocal_leakage_in_minus_score": 0.4,
+                                "reasons": ["silence_hallucination"],
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_dir = root / "out"
+
+            manifest = module.build_judge_guided_minus_vocal_leakage_repair(
+                Namespace(
+                    raw_audio_path=root / "mix.flac",
+                    base_minus_path=base_path,
+                    primary_vocals_path=root / "voc.flac",
+                    windowed_judge_jsonl=judge_path,
+                    output_dir=output_dir,
+                    candidate_id="base",
+                    track_id="track-a",
+                    listen_dir=None,
+                    listen_label="m001.flac",
+                    leak_threshold=0.15,
+                    strength=0.85,
+                    max_projection_gain=0.75,
+                    gate_smoothing_sec=0.0,
+                    window_margin_sec=0.0,
+                    band_low_hz=160.0,
+                    band_high_hz=2000.0,
+                    projection_mode="segment_local",
+                    short_output_names=True,
+                )
+            )
+
+            self.assertEqual(manifest["delivery_status"], "blocked")
+            self.assertFalse(manifest["delivery_allowed"])
+            self.assertEqual(manifest["failed_checks"], ["no_matching_repair_windows"])
+            self.assertEqual(manifest["repair"]["selected_window_count"], 0)
+            self.assertEqual(manifest["manifest_path"], str(output_dir / "manifest.json"))
+            self.assertEqual(manifest["candidate_row_jsonl"], str(output_dir / "rows.jsonl"))
+            self.assertTrue((output_dir / "manifest.json").exists())
+            self.assertTrue((output_dir / "rows.jsonl").exists())
+            self.assertTrue((output_dir / "summary.md").exists())
+            self.assertFalse((output_dir / "m001.flac").exists())
+            self.assertEqual((output_dir / "rows.jsonl").read_text(encoding="utf-8"), "")
 
 
 if __name__ == "__main__":

@@ -76,6 +76,54 @@ def test_build_minus_phase_repair_writes_variants_and_candidate_pool(tmp_path: P
     assert module.phase_consistency(attenuated) > module.phase_consistency(minus)
 
 
+def test_build_minus_phase_repair_aligns_mismatched_sample_rates(tmp_path: Path) -> None:
+    module = _load_module()
+    mix_rate = 48000
+    stem_rate = 44100
+    mix_t = np.linspace(0.0, 1.0, mix_rate, endpoint=False)
+    stem_t = np.linspace(0.0, 1.0, stem_rate, endpoint=False)
+    mix = np.column_stack([0.2 * np.sin(2.0 * np.pi * 220.0 * mix_t)] * 2)
+    vocal = np.column_stack([0.05 * np.sin(2.0 * np.pi * 440.0 * stem_t)] * 2)
+    minus = np.column_stack([0.25 * np.sin(2.0 * np.pi * 330.0 * stem_t)] * 2)
+    mix_path = tmp_path / "mix48.wav"
+    vocal_path = tmp_path / "vocal441.wav"
+    minus_path = tmp_path / "minus441.wav"
+    _write_stereo(mix_path, mix, mix_rate)
+    _write_stereo(vocal_path, vocal, stem_rate)
+    _write_stereo(minus_path, minus, stem_rate)
+
+    manifest = module.build_minus_phase_repair(
+        mix_path=mix_path,
+        vocal_path=vocal_path,
+        minus_path=minus_path,
+        output_dir=tmp_path / "repair",
+        track_id="track-a",
+        candidate_id="candidate-a",
+        minus_route_id="source-minus",
+    )
+
+    rows = [
+        json.loads(line)
+        for line in Path(manifest["candidate_pair_jsonl"]).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    repaired, repaired_rate = sf.read(rows[0]["minus_path"], always_2d=True, dtype="float32")
+    assert manifest["variant_count"] == 3
+    assert repaired_rate == stem_rate
+    assert repaired.shape[0] == stem_rate
+    assert manifest["sample_rate_alignment"] == {
+        "target_sample_rate": stem_rate,
+        "mix_original_sample_rate": mix_rate,
+        "vocal_original_sample_rate": stem_rate,
+        "minus_original_sample_rate": stem_rate,
+        "mix_resampled_to_target": True,
+        "vocal_resampled_to_target": False,
+        "minus_resampled_to_target": False,
+    }
+    assert manifest["delivery_allowed"] is False
+    assert manifest["release_ready"] is False
+
+
 def test_main_uses_docker_guard_and_writes_manifest(tmp_path: Path) -> None:
     module = _load_module()
     sample_rate = 16000

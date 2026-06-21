@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 import soundfile as sf
+from scipy import signal
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -77,6 +79,17 @@ def align_audio(audio_items: Sequence[np.ndarray]) -> list[np.ndarray]:
     frame_count = min(audio.shape[0] for audio in audio_items)
     channel_count = min(audio.shape[1] for audio in audio_items)
     return [audio[:frame_count, :channel_count].astype(np.float32, copy=False) for audio in audio_items]
+
+
+def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if int(source_rate) == int(target_rate):
+        return audio.astype(np.float32, copy=False)
+    if int(source_rate) <= 0 or int(target_rate) <= 0:
+        raise ValueError(f"invalid_sample_rate:{source_rate},{target_rate}")
+    divisor = math.gcd(int(source_rate), int(target_rate))
+    up = int(target_rate) // divisor
+    down = int(source_rate) // divisor
+    return signal.resample_poly(audio, up, down, axis=0).astype(np.float32, copy=False)
 
 
 def clip_peak(audio: np.ndarray, max_peak: float) -> tuple[np.ndarray, float, float]:
@@ -164,8 +177,19 @@ def build_minus_phase_repair(
     mix_audio, mix_rate = read_audio(mix_path)
     vocal_audio, vocal_rate = read_audio(vocal_path)
     minus_audio, minus_rate = read_audio(minus_path)
-    if len({mix_rate, vocal_rate, minus_rate}) != 1:
-        raise ValueError(f"sample_rate_mismatch:{mix_rate},{vocal_rate},{minus_rate}")
+    target_rate = int(minus_rate)
+    sample_rate_alignment = {
+        "target_sample_rate": target_rate,
+        "mix_original_sample_rate": int(mix_rate),
+        "vocal_original_sample_rate": int(vocal_rate),
+        "minus_original_sample_rate": int(minus_rate),
+        "mix_resampled_to_target": int(mix_rate) != target_rate,
+        "vocal_resampled_to_target": int(vocal_rate) != target_rate,
+        "minus_resampled_to_target": False,
+    }
+    mix_audio = resample_audio(mix_audio, mix_rate, target_rate)
+    vocal_audio = resample_audio(vocal_audio, vocal_rate, target_rate)
+    progress("minus_phase_repair_sample_rate_aligned", **sample_rate_alignment)
     mix_audio, vocal_audio, minus_audio = align_audio([mix_audio, vocal_audio, minus_audio])
     output_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
@@ -175,7 +199,7 @@ def build_minus_phase_repair(
         repaired = variant_audio(minus_audio, side_gain)
         repaired, peak_before, peak_after = clip_peak(repaired, max_peak)
         target_path = output_dir / f"{variant_name}.flac"
-        sf.write(str(target_path), repaired, mix_rate, subtype="PCM_24")
+        sf.write(str(target_path), repaired, target_rate, subtype="PCM_24")
         target_phase = phase_consistency(repaired)
         rows.append(
             build_candidate_row(
@@ -211,6 +235,7 @@ def build_minus_phase_repair(
         "source_mix_path": str(mix_path),
         "source_vocal_path": str(vocal_path),
         "source_minus_path": str(minus_path),
+        "sample_rate_alignment": sample_rate_alignment,
         "candidate_pair_jsonl": str(candidate_pair_jsonl),
         "variant_count": len(rows),
         "variants": variants,

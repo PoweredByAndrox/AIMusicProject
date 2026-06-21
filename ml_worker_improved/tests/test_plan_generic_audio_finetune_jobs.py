@@ -96,6 +96,21 @@ def test_cli_writes_audio_finetune_plan(tmp_path: Path) -> None:
     assert manifest["outputs"]["progress_jsonl"].endswith("generic_audio_finetune_job_plan_progress.jsonl")
 
 
+def test_short_output_names_are_available_for_new_artifacts(tmp_path: Path) -> None:
+    rows = write_jsonl(tmp_path / "audio.jsonl", [audio_row(tmp_path, "v1", "track-a", "vocal")])
+
+    manifest = plan_generic_audio_finetune_jobs(
+        audio_training_examples_jsonl=rows,
+        output_dir=tmp_path / "out",
+        short_output_names=True,
+    )
+
+    assert manifest["short_output_names"] is True
+    assert Path(manifest["outputs"]["plan_json"]).name == "plan.json"
+    assert Path(manifest["outputs"]["progress_jsonl"]).name == "progress.jsonl"
+    assert all(len(path.name) <= 32 for path in (tmp_path / "out").iterdir() if path.is_file())
+
+
 def test_missing_audio_paths_are_not_trainable(tmp_path: Path) -> None:
     row = audio_row(tmp_path, "v1", "track-a", "vocal")
     Path(row["target_audio_path"]).unlink()

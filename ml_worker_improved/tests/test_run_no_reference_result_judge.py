@@ -159,6 +159,27 @@ def test_minus_score_mode_adds_minus_matrix_fields(tmp_path: Path) -> None:
     assert result["summary"]["score_mode"] == "minus"
 
 
+def test_minus_detail_gate_blocker_overrides_accept_decision(tmp_path: Path) -> None:
+    vocal = sine(440)
+    instrumental = sine(120) + sine(700)
+    mix = vocal + instrumental
+    music_damaged_minus = instrumental * 0.50
+
+    result = judge_candidate_rows(
+        [candidate_row(tmp_path, candidate_id="detail-damaged", mix=mix, vocal=vocal, minus=music_damaged_minus)],
+        score_mode="minus",
+    )
+    row = result["rows"][0]
+
+    assert row["minus_musical_detail_preservation_gate"]["status"] == "proxy_blocked"
+    assert row["decision"] == "blocked_hard_case"
+    assert row["minus_decision"] == "blocked_hard_case"
+    assert "minus_detail_gate_blocked" in row["reasons"]
+    assert "minus_detail_gate_blocked" in row["minus_blockers"]
+    assert result["summary"]["accepted_candidates"] == 0
+    assert result["summary"]["blocked_hard_case"] == 1
+
+
 def test_non_minus_score_modes_do_not_add_minus_detail_gate(tmp_path: Path) -> None:
     vocal = sine(440)
     instrumental = sine(120)

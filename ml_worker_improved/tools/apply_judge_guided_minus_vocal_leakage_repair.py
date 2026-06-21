@@ -14,6 +14,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from docker_runtime import require_docker_runtime  # noqa: E402
+from artifact_name_policy import indexed_audio_filename  # noqa: E402
 
 import numpy as np
 import soundfile as sf
@@ -22,7 +23,7 @@ from scipy import signal
 
 EPS = 1.0e-9
 MAX_ALLOWED_PROJECTION_GAIN = 512.0
-LEAKAGE_BLOCKERS = {"severe_vocal_bleed_in_minus", "vocal_leakage_in_minus"}
+LEAKAGE_BLOCKERS = {"severe_vocal_bleed_in_minus", "vocal_bleed_in_minus", "vocal_leakage_in_minus", "residual_vocal_watch"}
 SELF_JUDGE_LEAKAGE_ISSUES = {"vocal_projection_proxy", "vocal_stem_corr_proxy"}
 
 
@@ -69,7 +70,10 @@ def read_judge_rows(path: Path) -> list[dict[str, Any]]:
     raw_text = path.read_text(encoding="utf-8-sig")
     stripped = raw_text.lstrip()
     if stripped.startswith("{"):
-        payload = json.loads(raw_text)
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return read_jsonl(path)
         if not isinstance(payload, dict):
             raise ValueError(f"Expected JSON object at {path}")
         if isinstance(payload.get("segments"), list):
@@ -116,6 +120,7 @@ def has_leakage_blocker(window: dict[str, Any]) -> bool:
         set(as_list(window.get("minus_blockers")))
         | set(as_list(window.get("reasons")))
         | set(as_list(window.get("issues")))
+        | {str(window.get("minus_dominant_defect") or ""), str(window.get("dominant_defect") or "")}
     )
     return bool(labels & (LEAKAGE_BLOCKERS | SELF_JUDGE_LEAKAGE_ISSUES))
 
@@ -524,6 +529,7 @@ def build_manifest(
         "deliverable": False,
         "can_mark_release_ready": False,
         "requires_post_judge": True,
+        "rendered_minus_candidate_path": str(output_path),
         "no_per_track_hardcoded_timestamps": True,
         "uses_judge_windows": True,
         "raw_audio_path": str(raw_audio_path),
@@ -531,6 +537,7 @@ def build_manifest(
         "primary_vocals_path": str(primary_vocals_path),
         "judge_jsonl_path": str(judge_jsonl_path),
         "candidate_row_jsonl": str(candidate_row_jsonl),
+        "manifest_path": "",
         "candidate_row": candidate_row,
         "artifacts": {
             "minus_judge_guided_leakage_repair_flac": str(output_path),
@@ -565,6 +572,96 @@ def build_manifest(
     }
 
 
+def build_blocked_no_match_manifest(
+    *,
+    track_id: str,
+    candidate_id: str,
+    raw_audio_path: Path,
+    base_minus_path: Path,
+    primary_vocals_path: Path,
+    judge_jsonl_path: Path,
+    output_path: Path,
+    candidate_row_jsonl: Path,
+    manifest_path: Path,
+    short_output_names: bool,
+) -> dict[str, Any]:
+    manifest = {
+        "schema_version": 1,
+        "mode": "judge_guided_minus_vocal_leakage_repair",
+        "stem_type": "minus",
+        "track_id": str(track_id),
+        "candidate_id": str(candidate_id),
+        "candidate_only": False,
+        "delivery_status": "blocked",
+        "delivery_allowed": False,
+        "presentation_status": "blocked_no_matching_repair_windows",
+        "release_status": "not_release_ready",
+        "release_ready": False,
+        "can_publish_as_result": False,
+        "listenable": False,
+        "deliverable": False,
+        "can_mark_release_ready": False,
+        "requires_post_judge": False,
+        "rendered_minus_candidate_path": "",
+        "no_per_track_hardcoded_timestamps": True,
+        "uses_judge_windows": True,
+        "raw_audio_path": str(raw_audio_path),
+        "base_minus_path": str(base_minus_path),
+        "primary_vocals_path": str(primary_vocals_path),
+        "judge_jsonl_path": str(judge_jsonl_path),
+        "candidate_row_jsonl": str(candidate_row_jsonl),
+        "manifest_path": str(manifest_path),
+        "candidate_row": {},
+        "artifacts": {
+            "minus_judge_guided_leakage_repair_flac": "",
+            "minus_base_flac": str(base_minus_path),
+            "primary_vocals_flac": str(primary_vocals_path),
+            "raw_ref_audio": str(raw_audio_path),
+        },
+        "audio": {},
+        "repair": {
+            "selected_window_count": 0,
+            "selected_windows": [],
+            "metrics": {
+                "status": "no_matching_repair_windows",
+                "projection_mode": "",
+                "window_projection_count": 0,
+            },
+        },
+        "failed_checks": ["no_matching_repair_windows"],
+        "safety": {
+            "reference_required": False,
+            "human_csv_required": False,
+            "training_started": False,
+            "fine_tune_started": False,
+            "models_changed": False,
+            "model_registry_edited": False,
+            "cleanup_routes_added": False,
+            "thresholds_relaxed": False,
+            "release_ready": False,
+        },
+        "forbidden_actions": [
+            "do_not_export_as_delivery_without_post_judge_acceptance",
+            "do_not_mark_release_ready_from_repair_manifest",
+            "do_not_relax_gates",
+            "do_not_require_reference_stems",
+            "do_not_start_training",
+            "do_not_emit_audio_without_matching_repair_windows",
+        ],
+    }
+    if short_output_names:
+        manifest["short_output_names"] = True
+        manifest["artifact_name_policy"] = {
+            "schema": "short_windows_safe_artifact_names.v1",
+            "audio_filename": output_path.name,
+            "manifest_filename": manifest_path.name,
+            "rows_filename": candidate_row_jsonl.name,
+            "raw_track_or_candidate_ids_in_path": False,
+            "provenance_in_manifest": True,
+        }
+    return manifest
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -594,15 +691,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--band-low-hz", type=float, default=160.0)
     parser.add_argument("--band-high-hz", type=float, default=8000.0)
     parser.add_argument("--projection-mode", choices=("global", "segment_local"), default="global")
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
 def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "minus_judge_guided_leakage_repair.flac"
-    manifest_path = output_dir / "judge_guided_minus_vocal_leakage_repair_manifest.json"
-    candidate_row_jsonl = output_dir / "candidate_pair.jsonl"
+    short_output_names = bool(getattr(args, "short_output_names", False))
+    output_path = output_dir / (indexed_audio_filename("m", 1) if short_output_names else "minus_judge_guided_leakage_repair.flac")
+    manifest_path = output_dir / ("manifest.json" if short_output_names else "judge_guided_minus_vocal_leakage_repair_manifest.json")
+    candidate_row_jsonl = output_dir / ("rows.jsonl" if short_output_names else "candidate_pair.jsonl")
 
     progress(
         "start",
@@ -621,7 +720,36 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
         leak_threshold=float(args.leak_threshold),
     )
     if not selected_windows:
-        raise ValueError("No judge windows matched candidate/path and vocal leakage threshold")
+        manifest = build_blocked_no_match_manifest(
+            track_id=str(args.track_id or Path(args.raw_audio_path).stem),
+            candidate_id=str(args.candidate_id or Path(args.base_minus_path).stem),
+            raw_audio_path=Path(args.raw_audio_path),
+            base_minus_path=Path(args.base_minus_path),
+            primary_vocals_path=Path(args.primary_vocals_path),
+            judge_jsonl_path=Path(args.windowed_judge_jsonl),
+            output_path=output_path,
+            candidate_row_jsonl=candidate_row_jsonl,
+            manifest_path=manifest_path,
+            short_output_names=short_output_names,
+        )
+        write_jsonl(candidate_row_jsonl, [])
+        write_json(manifest_path, manifest)
+        (output_dir / "summary.md").write_text(
+            "# judge-guided minus vocal-leakage repair\n\n"
+            "- delivery_status: `blocked`\n"
+            "- failed_checks: `no_matching_repair_windows`\n"
+            "- selected_window_count: `0`\n",
+            encoding="utf-8",
+        )
+        progress(
+            "end",
+            delivery_status="blocked",
+            delivery_allowed=False,
+            selected_window_count=0,
+            failed_checks=manifest["failed_checks"],
+            output_manifest_path=str(manifest_path),
+        )
+        return manifest
     progress("judge_windows_selected", selected_window_count=len(selected_windows))
 
     raw, raw_rate = read_audio(args.raw_audio_path)
@@ -694,6 +822,17 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
         selected_windows=selected_windows,
         repair_metrics=repair_metrics,
     )
+    manifest["manifest_path"] = str(manifest_path)
+    manifest["short_output_names"] = short_output_names
+    if short_output_names:
+        manifest["artifact_name_policy"] = {
+            "schema": "short_windows_safe_artifact_names.v1",
+            "audio_filename": output_path.name,
+            "manifest_filename": manifest_path.name,
+            "rows_filename": candidate_row_jsonl.name,
+            "raw_track_or_candidate_ids_in_path": False,
+            "provenance_in_manifest": True,
+        }
     write_jsonl(candidate_row_jsonl, [manifest["candidate_row"]])
     write_json(manifest_path, manifest)
     progress(
@@ -715,7 +854,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "manifest_path": str(Path(args.output_dir) / "judge_guided_minus_vocal_leakage_repair_manifest.json"),
+                "manifest_path": str(manifest.get("manifest_path") or Path(args.output_dir) / "judge_guided_minus_vocal_leakage_repair_manifest.json"),
                 "candidate_audio_path": manifest["artifacts"]["minus_judge_guided_leakage_repair_flac"],
                 "candidate_row_jsonl": manifest["candidate_row_jsonl"],
                 "selected_window_count": manifest["repair"]["selected_window_count"],
@@ -727,7 +866,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sort_keys=True,
         )
     )
-    return 0
+    return 0 if not manifest.get("failed_checks") else 2
 
 
 if __name__ == "__main__":

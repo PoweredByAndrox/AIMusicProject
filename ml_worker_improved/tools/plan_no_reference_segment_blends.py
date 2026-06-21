@@ -24,6 +24,7 @@ SEVERE_BLOCKERS = {
     "thin_or_overcleaned_vocal",
     "transient_damage",
     "phase_or_stereo_inconsistency",
+    "minus_detail_gate_blocked",
     "low_no_reference_score",
 }
 

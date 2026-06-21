@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from tools.validate_generic_audio_finetune_holdout import validate_generic_audio_finetune_holdout
+from tools.validate_generic_audio_finetune_holdout import select_holdout_examples, validate_generic_audio_finetune_holdout
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> Path:
@@ -31,6 +31,43 @@ def _write_audio(path: Path, audio: np.ndarray, sample_rate: int = 8_000) -> Pat
 
 def _stem_path(manifest: dict, stem: str = "vocal") -> Path:
     return Path(manifest["stems"][stem]["path"])
+
+
+def test_select_holdout_examples_filters_source_candidate_family(tmp_path: Path) -> None:
+    source_a = _write_audio(tmp_path / "scnet" / "source.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    target_a = _write_audio(tmp_path / "scnet" / "target.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    source_b = _write_audio(tmp_path / "melband" / "source.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    target_b = _write_audio(tmp_path / "melband" / "target.flac", _stereo(np.zeros(128, dtype=np.float32)))
+    rows = [
+        {
+            "id": "holdout-scnet",
+            "track_id": "track-a",
+            "stem_type": "vocal",
+            "source_candidate_family": "scnet",
+            "source_audio_path": str(source_a),
+            "target_audio_path": str(target_a),
+            "trainable": True,
+        },
+        {
+            "id": "holdout-melband",
+            "track_id": "track-b",
+            "stem_type": "vocal",
+            "source_candidate_family": "melband",
+            "source_audio_path": str(source_b),
+            "target_audio_path": str(target_b),
+            "trainable": True,
+        },
+    ]
+
+    selected = select_holdout_examples(
+        rows,
+        stem="vocal",
+        forbidden_track_ids=set(),
+        max_holdouts=4,
+        source_candidate_family_filter="scnet",
+    )
+
+    assert [row["id"] for row in selected] == ["holdout-scnet"]
 
 
 def test_holdout_evaluates_only_cross_track_examples_and_blocks_delivery(tmp_path: Path, monkeypatch) -> None:
@@ -91,7 +128,7 @@ def test_holdout_evaluates_only_cross_track_examples_and_blocks_delivery(tmp_pat
         ],
     )
 
-    def fake_apply(*, source_mix_path, checkpoint_path, output_dir, stem_name, device, command_args=None):
+    def fake_apply(*, source_mix_path, checkpoint_path, output_dir, stem_name, device, command_args=None, **kwargs):
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"01_teacher_mask_checkpoint_{stem_name}.flac"
         _write_audio(output_path, holdout_target, sample_rate)
@@ -167,7 +204,7 @@ def test_holdout_fails_closed_when_checkpoint_does_not_improve_source_baseline(t
         ],
     )
 
-    def fake_apply(*, source_mix_path, checkpoint_path, output_dir, stem_name, device, command_args=None):
+    def fake_apply(*, source_mix_path, checkpoint_path, output_dir, stem_name, device, command_args=None, **kwargs):
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"01_teacher_mask_checkpoint_{stem_name}.flac"
         _write_audio(output_path, source, sample_rate)
@@ -247,7 +284,7 @@ def test_holdout_excludes_all_training_track_ids_for_shared_checkpoints(tmp_path
         ],
     )
 
-    def fake_apply(*, source_mix_path, checkpoint_path, output_dir, stem_name, device, command_args=None):
+    def fake_apply(*, source_mix_path, checkpoint_path, output_dir, stem_name, device, command_args=None, **kwargs):
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"01_teacher_mask_checkpoint_{stem_name}.flac"
         _write_audio(output_path, target_c, sample_rate)
@@ -274,3 +311,92 @@ def test_holdout_excludes_all_training_track_ids_for_shared_checkpoints(tmp_path
     rows = _read_jsonl(Path(manifest["holdout_rows_jsonl"]))
     assert [row["holdout_track_id"] for row in rows] == ["track-c"]
     assert rows[0]["status"] == "passed"
+
+
+def test_holdout_records_source_feature_memory_cost_guard(tmp_path: Path, monkeypatch) -> None:
+    sample_rate = 8_000
+    t = np.arange(sample_rate, dtype=np.float64) / sample_rate
+    source = _stereo(0.26 * np.sin(2.0 * np.pi * 440.0 * t))
+    target = _stereo(0.18 * np.sin(2.0 * np.pi * 660.0 * t))
+    source_path = _write_audio(tmp_path / "source.flac", source, sample_rate)
+    target_path = _write_audio(tmp_path / "target.flac", target, sample_rate)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    run_rows = _write_jsonl(
+        tmp_path / "run_rows.jsonl",
+        [
+            {
+                "scope": "vocal_teacher_mask_adapter",
+                "status": "executed",
+                "example_id": "train-example",
+                "track_id": "track-a",
+                "checkpoint_path": str(checkpoint_path),
+                "device_used": 1.0,
+                "progress_first_event": "start",
+                "progress_last_event": "finish",
+            }
+        ],
+    )
+    examples = _write_jsonl(
+        tmp_path / "examples.jsonl",
+        [
+            {
+                "id": "holdout-example",
+                "track_id": "track-b",
+                "stem_type": "vocal",
+                "source_audio_path": str(source_path),
+                "target_audio_path": str(target_path),
+                "trainable": True,
+            }
+        ],
+    )
+
+    import tools.validate_generic_audio_finetune_holdout as module
+
+    def fake_apply(
+        *,
+        source_mix_path,
+        checkpoint_path,
+        output_dir,
+        stem_name,
+        device,
+        command_args=None,
+        progress_path=None,
+        progress_context=None,
+        max_source_feature_memory_distance_ops=None,
+        **kwargs,
+    ):
+        assert progress_path is not None
+        module.progress(
+            progress_path,
+            "source_feature_memory_search_blocked",
+            device=device,
+            **dict(progress_context or {}),
+            reason="source_feature_memory_cost_guard",
+            estimated_distance_ops=2,
+            max_source_feature_memory_distance_ops=max_source_feature_memory_distance_ops,
+        )
+        raise RuntimeError("source_feature_memory_cost_guard: estimated_distance_ops=2 exceeds max=1")
+
+    monkeypatch.setattr(module, "apply_teacher_mask_checkpoint_to_source", fake_apply)
+
+    manifest = validate_generic_audio_finetune_holdout(
+        run_rows_jsonl=run_rows,
+        audio_training_examples_jsonl=examples,
+        output_dir=tmp_path / "holdout_eval",
+        scope="vocal_teacher_mask_adapter",
+        stem="vocal",
+        device="cuda",
+        max_source_feature_memory_distance_ops=1,
+    )
+
+    rows = _read_jsonl(Path(manifest["holdout_rows_jsonl"]))
+    assert rows[0]["status"] == "failed"
+    assert "application_or_metric_error" in rows[0]["failed_checks"]
+    assert "source_feature_memory_cost_guard" in rows[0]["failed_checks"]
+    assert rows[0]["delivery_allowed"] is False
+    assert rows[0]["release_ready"] is False
+    progress_rows = _read_jsonl(Path(manifest["progress_jsonl"]))
+    assert any(row["event"] == "source_feature_memory_search_blocked" for row in progress_rows)
+    assert any(row["event"] == "holdout_application_failed" for row in progress_rows)
+    assert progress_rows[-1]["event"] == "finish"

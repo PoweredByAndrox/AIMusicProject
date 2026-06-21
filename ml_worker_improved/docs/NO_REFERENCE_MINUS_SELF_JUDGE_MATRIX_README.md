@@ -23,10 +23,14 @@ correlation/projection proxies.
 
 ## Output Files
 
-- `no_reference_minus_self_judge_matrix.jsonl`
-- `no_reference_minus_self_judge_matrix_manifest.json`
-- `no_reference_minus_self_judge_matrix_summary.md`
-- `no_reference_minus_self_judge_matrix_progress.jsonl`
+- `rows.jsonl`
+- `manifest.json`
+- `summary.md`
+- `progress.jsonl`
+
+Nested self-judge artifacts use short aliases (`tNNN/cNNN/manifest.json`).
+Raw track and candidate ids stay in `rows.jsonl` / `manifest.json`
+provenance fields, not path segments.
 
 Rows with `self_judge_status=proxy_pass` and `blocker_count=0` get
 `listen_candidate_eligible=true`. All other rows stay blocked.

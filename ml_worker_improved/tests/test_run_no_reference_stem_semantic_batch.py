@@ -62,6 +62,156 @@ def write_listen_manifest(root: Path, *, track_id: str, stem_type: str, audio_pa
     return manifest
 
 
+def write_short_stem_pack(root: Path) -> Path:
+    bass = write_audio(root / "audio" / "t001" / "bass.flac", freq_hz=80.0)
+    vocal = write_audio(root / "audio" / "t001" / "vocal.flac", freq_hz=440.0)
+    pack = root / "pack.json"
+    payload = {
+        "schema": "music_intelligence_stem_listen_pack_manifest.v1",
+        "delivery_status": "accepted",
+        "delivery_allowed": True,
+        "presentation_status": "accepted_for_listen_pack",
+        "release_ready": False,
+        "can_publish_as_result": False,
+        "failed_checks": [],
+        "listen_audio_files": [
+            {
+                "schema": "music_intelligence_stem_listen_audio.v1",
+                "track_id": "raw_source_track_id_is_manifest_only",
+                "source_track_id": "raw_source_track_id_is_manifest_only",
+                "track_alias": "t001",
+                "stem_type": "bass",
+                "audio_path": "audio/t001/bass.flac",
+                "listen_audio_path": str(bass),
+                "duration_sec": 2.0,
+                "delivery_status": "accepted",
+                "delivery_allowed": True,
+                "presentation_status": "accepted_for_listen_pack",
+                "release_ready": False,
+                "can_publish_as_result": False,
+            },
+            {
+                "schema": "music_intelligence_stem_listen_audio.v1",
+                "track_id": "raw_source_track_id_is_manifest_only",
+                "source_track_id": "raw_source_track_id_is_manifest_only",
+                "track_alias": "t001",
+                "stem_type": "vocal",
+                "audio_path": "audio/t001/vocal.flac",
+                "listen_audio_path": str(vocal),
+                "duration_sec": 2.0,
+                "delivery_status": "accepted",
+                "delivery_allowed": True,
+                "presentation_status": "accepted_for_listen_pack",
+                "release_ready": False,
+                "can_publish_as_result": False,
+            },
+        ],
+    }
+    pack.write_text(json.dumps(payload), encoding="utf-8")
+    return pack
+
+
+def write_short_pair_pack(root: Path) -> Path:
+    sample_rate = 16_000
+    t = np.arange(sample_rate * 2, dtype=np.float32) / float(sample_rate)
+    vocal_data = np.sin(2.0 * np.pi * 440.0 * t).astype(np.float32) * 0.05
+    minus_data = np.sin(2.0 * np.pi * 120.0 * t).astype(np.float32) * 0.10
+    mix = root / "audio" / "t001" / "mix.flac"
+    vocal = root / "audio" / "t001" / "vocal.flac"
+    minus = root / "audio" / "t001" / "minus.flac"
+    for path, mono in ((mix, vocal_data + minus_data), (vocal, vocal_data), (minus, minus_data)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(path, np.column_stack([mono, mono]), sample_rate)
+    pack = root / "pack.json"
+    common = {
+        "schema": "music_intelligence_stem_listen_audio.v1",
+        "track_id": "raw_source_track_id_is_manifest_only",
+        "source_track_id": "raw_source_track_id_is_manifest_only",
+        "track_alias": "t001",
+        "duration_sec": 2.0,
+        "delivery_status": "accepted",
+        "delivery_allowed": True,
+        "presentation_status": "accepted_for_listen_pack",
+        "release_ready": False,
+        "can_publish_as_result": False,
+        "mix_path": str(mix),
+    }
+    payload = {
+        "schema": "music_intelligence_stem_listen_pack_manifest.v1",
+        "delivery_status": "accepted",
+        "delivery_allowed": True,
+        "presentation_status": "accepted_for_listen_pack",
+        "release_ready": False,
+        "can_publish_as_result": False,
+        "failed_checks": [],
+        "listen_audio_files": [
+            {
+                **common,
+                "stem_type": "vocal",
+                "audio_path": "audio/t001/vocal.flac",
+                "listen_audio_path": str(vocal),
+            },
+            {
+                **common,
+                "stem_type": "minus",
+                "audio_path": "audio/t001/minus.flac",
+                "listen_audio_path": str(minus),
+            },
+        ],
+    }
+    pack.write_text(json.dumps(payload), encoding="utf-8")
+    return pack
+
+
+def write_short_pair_pack_with_upstream_mix_manifest(root: Path) -> Path:
+    sample_rate = 16_000
+    t = np.arange(sample_rate * 2, dtype=np.float32) / float(sample_rate)
+    vocal_data = np.sin(2.0 * np.pi * 440.0 * t).astype(np.float32) * 0.05
+    minus_data = np.sin(2.0 * np.pi * 120.0 * t).astype(np.float32) * 0.10
+    mix = root / "src" / "mix.flac"
+    vocal = root / "audio" / "t001" / "vocal.flac"
+    minus = root / "audio" / "t001" / "minus.flac"
+    for path, mono in ((mix, vocal_data + minus_data), (vocal, vocal_data), (minus, minus_data)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(path, np.column_stack([mono, mono]), sample_rate)
+    stem_manifest = root / "src" / "stem_manifest.json"
+    stem_manifest.write_text(json.dumps({"audio_path": str(mix), "stems": {}}), encoding="utf-8")
+    upstream_pack = root / "src" / "pack.json"
+    upstream_pack.write_text(json.dumps({"schema": "stem_manifest_audio_pack_manifest.v1", "stem_manifest_json": str(stem_manifest)}), encoding="utf-8")
+    aggregate_pack_dir = root / "aggregate"
+    aggregate_pack_dir.mkdir(parents=True, exist_ok=True)
+    pack = root / "pack.json"
+    common = {
+        "schema": "music_intelligence_stem_listen_audio.v1",
+        "track_id": "raw_source_track_id_is_manifest_only",
+        "source_track_id": "raw_source_track_id_is_manifest_only",
+        "track_alias": "t001",
+        "duration_sec": 2.0,
+        "delivery_status": "accepted",
+        "delivery_allowed": True,
+        "presentation_status": "accepted_for_listen_pack",
+        "release_ready": False,
+        "can_publish_as_result": False,
+        "source_manifest": str(aggregate_pack_dir),
+        "upstream_source_manifest": str(upstream_pack),
+    }
+    payload = {
+        "schema": "music_intelligence_stem_listen_pack_manifest.v1",
+        "delivery_status": "accepted",
+        "delivery_allowed": True,
+        "presentation_status": "accepted_for_listen_pack",
+        "release_ready": False,
+        "can_publish_as_result": False,
+        "failed_checks": [],
+        "listen_audio_files": [
+            {**common, "stem_type": "vocal", "audio_path": "audio/t001/vocal.flac", "listen_audio_path": str(vocal)},
+            {**common, "stem_type": "minus", "audio_path": "audio/t001/minus.flac", "listen_audio_path": str(minus)},
+        ],
+    }
+    pack.write_text(json.dumps(payload), encoding="utf-8")
+    return pack
+
+
 def test_batch_runs_semantic_judge_and_matrix_per_track(tmp_path: Path) -> None:
     listen_root = tmp_path / "listen"
     audio_root = tmp_path / "audio"
@@ -81,6 +231,69 @@ def test_batch_runs_semantic_judge_and_matrix_per_track(tmp_path: Path) -> None:
     assert (output_root / "track-b" / "stem_score_matrix" / "no_reference_stem_candidate_score_matrix.json").exists()
     assert not list(output_root.rglob("*.wav"))
     assert not list(output_root.rglob("*.flac"))
+
+
+def test_batch_accepts_short_stem_pack_and_writes_short_review_artifacts(tmp_path: Path) -> None:
+    pack = write_short_stem_pack(tmp_path / "sem_pack")
+    output_root = tmp_path / "batch"
+
+    summary = run_batch(listen_manifest_roots=[], input_pack_jsons=[pack], output_root=output_root)
+
+    assert summary["batch_status"] == "completed"
+    assert summary["track_count"] == 1
+    assert summary["candidate_count"] == 2
+    assert summary["release_ready"] is False
+    assert summary["short_output_names"] is True
+    assert Path(summary["semantic_review_json"]).relative_to(output_root).as_posix() == "review/review.json"
+    review = json.loads(Path(summary["semantic_review_json"]).read_text(encoding="utf-8"))
+    assert review["schema"] == "semantic_stem_quality_review.v1"
+    assert review["review_status"] == "completed"
+    assert review["pending_item_count"] == 0
+    assert review["semantic_quality_verified_item_count"] == 1
+    assert "stem_semantic_blocked:t001:vocal:mode_specific_judge_evidence_missing" in review["failed_checks"]
+    assert not list(output_root.rglob("*.wav"))
+    assert not list(output_root.rglob("*.flac"))
+    assert all(len(path.name) <= 32 for path in output_root.rglob("*") if path.is_file())
+
+
+def test_batch_builds_mode_specific_evidence_for_short_vocal_minus_pack(tmp_path: Path) -> None:
+    pack = write_short_pair_pack(tmp_path / "sem_pack")
+    output_root = tmp_path / "batch"
+
+    summary = run_batch(listen_manifest_roots=[], input_pack_jsons=[pack], output_root=output_root)
+
+    assert summary["batch_status"] == "completed"
+    assert summary["candidate_count"] == 2
+    assert summary["accepted_candidates"] == 2
+    review = json.loads(Path(summary["semantic_review_json"]).read_text(encoding="utf-8"))
+    assert review["failed_checks"] == []
+    assert review["semantic_quality_verified_item_count"] == 2
+    rows = [
+        json.loads(line)
+        for line in (output_root / "t001" / "judge" / "rows.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert {row["score_mode"] for row in rows} == {"vocal", "minus"}
+    assert {row["decision"] for row in rows} == {"accept_candidate"}
+    assert all(row["mode_specific_quality_verified"] is True for row in rows)
+    assert all(row["release_ready"] is False for row in rows)
+    assert all(len(path.name) <= 32 for path in output_root.rglob("*") if path.is_file())
+
+
+def test_batch_uses_upstream_stem_manifest_mix_not_aggregate_directory(tmp_path: Path) -> None:
+    pack = write_short_pair_pack_with_upstream_mix_manifest(tmp_path / "sem_pack")
+    output_root = tmp_path / "batch"
+
+    summary = run_batch(listen_manifest_roots=[], input_pack_jsons=[pack], output_root=output_root)
+
+    assert summary["accepted_candidates"] == 2
+    rows = [
+        json.loads(line)
+        for line in (output_root / "t001" / "judge" / "rows.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert {row["mode_specific_judge"]["mix_path"] for row in rows} == {str(tmp_path / "sem_pack" / "src" / "mix.flac")}
+    assert all("LibsndfileError" not in ",".join(row["stem_semantic_blockers"]) for row in rows)
 
 
 def test_batch_track_filter_limits_processed_groups(tmp_path: Path) -> None:

@@ -151,6 +151,25 @@ def test_cli_writes_merged_manifest(tmp_path: Path) -> None:
     assert manifest["outputs"]["merged_audio_training_examples_jsonl"].endswith("merged_audio_training_examples.jsonl")
 
 
+def test_short_output_names_are_available_for_new_artifacts(tmp_path: Path) -> None:
+    base = write_jsonl(tmp_path / "base.jsonl", [audio_row(tmp_path, "v1", "track-a", "vocal")])
+
+    manifest = merge_generic_audio_training_examples(
+        base_audio_training_examples_jsonls=[base],
+        approved_audio_training_examples_jsonls=[],
+        output_dir=tmp_path / "out",
+        short_output_names=True,
+    )
+
+    assert manifest["short_output_names"] is True
+    assert Path(manifest["outputs"]["manifest_json"]).name == "merge.json"
+    assert Path(manifest["outputs"]["merged_audio_training_examples_jsonl"]).name == "rows.jsonl"
+    assert Path(manifest["outputs"]["rejected_audio_training_examples_jsonl"]).name == "rej.jsonl"
+    assert Path(manifest["outputs"]["duplicate_audio_training_examples_jsonl"]).name == "dup.jsonl"
+    assert Path(manifest["outputs"]["progress_jsonl"]).name == "progress.jsonl"
+    assert all(len(path.name) <= 32 for path in (tmp_path / "out").iterdir() if path.is_file())
+
+
 def test_direct_script_entrypoint_writes_merged_manifest(tmp_path: Path) -> None:
     base = write_jsonl(tmp_path / "base.jsonl", [audio_row(tmp_path, "v1", "track-a", "vocal")])
     script = Path(__file__).resolve().parents[1] / "tools" / "merge_generic_audio_training_examples.py"

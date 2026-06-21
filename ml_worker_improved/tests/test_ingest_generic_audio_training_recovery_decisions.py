@@ -116,6 +116,30 @@ def test_invalid_decision_is_rejected(tmp_path: Path) -> None:
         )
 
 
+def test_recovery_decision_ingest_can_write_short_output_names(tmp_path: Path) -> None:
+    queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a")])
+    decisions = write_jsonl(
+        tmp_path / "decisions.jsonl",
+        [{"recovery_row_id": "row-a", "decision": "approve_for_training", "permission_status": "project_owned"}],
+    )
+
+    manifest = ingest_generic_audio_training_recovery_decisions(
+        recovery_queue_jsonl=queue,
+        decisions_jsonl=decisions,
+        output_dir=tmp_path / "out",
+        short_output_names=True,
+    )
+
+    assert manifest["short_output_names"] is True
+    assert Path(manifest["outputs"]["approved_audio_training_examples_jsonl"]).name == "audio.jsonl"
+    assert Path(manifest["outputs"]["rejected_rows_jsonl"]).name == "rej.jsonl"
+    assert Path(manifest["outputs"]["manifest_json"]).name == "ingest.json"
+    assert Path(manifest["outputs"]["progress_jsonl"]).name == "progress.jsonl"
+    assert all(len(Path(path).name) <= 32 for path in manifest["outputs"].values())
+    assert (tmp_path / "out" / "audio.jsonl").exists()
+    assert not (tmp_path / "out" / "approved_audio_training_examples.jsonl").exists()
+
+
 def test_cli_writes_decision_manifest(tmp_path: Path) -> None:
     queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a", blockers=[])])
 
@@ -125,3 +149,24 @@ def test_cli_writes_decision_manifest(tmp_path: Path) -> None:
     assert manifest["summary"]["approved_audio_training_examples"] == 1
     assert manifest["decisions_jsonl"] == ""
     assert manifest["training_started"] is False
+
+
+def test_cli_can_write_short_decision_ingest_outputs(tmp_path: Path) -> None:
+    queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a", blockers=[])])
+
+    assert (
+        main(
+            [
+                "--recovery-queue-jsonl",
+                str(queue),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--short-output-names",
+            ]
+        )
+        == 0
+    )
+
+    manifest = read_json(tmp_path / "out" / "ingest.json")
+    assert manifest["short_output_names"] is True
+    assert Path(manifest["outputs"]["approved_audio_training_examples_jsonl"]).name == "audio.jsonl"

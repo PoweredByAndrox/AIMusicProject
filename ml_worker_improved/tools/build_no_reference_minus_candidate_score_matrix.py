@@ -120,6 +120,14 @@ def candidate_manifest_route_id(path_text: str) -> str:
     return parent_candidate_id(path_text)
 
 
+def source_model_id_from_route_id(route_id: str) -> str:
+    prefix = "local_registered__"
+    text = str(route_id or "")
+    if not text.startswith(prefix):
+        return ""
+    return text[len(prefix):].split("__", 1)[0].strip()
+
+
 def manifest_gpu_proof(payload: dict[str, Any]) -> dict[str, Any]:
     execution_contract = payload.get("execution_contract") if isinstance(payload.get("execution_contract"), dict) else {}
     runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
@@ -228,6 +236,8 @@ def result_judge_entry(row: dict[str, Any], source_path: Path) -> dict[str, Any]
         reasons = stable_unique([*reasons, "pair_incompatible"])
     decision = str(row.get("minus_decision") or row.get("decision") or "")
     score_mode = str(row.get("score_mode") or "")
+    route_id = str(row.get("route_id") or "")
+    source_model_id = str(row.get("source_model_id") or row.get("model_name") or source_model_id_from_route_id(route_id) or "")
     accepted = (
         score_mode == "minus"
         and decision == "accept_candidate"
@@ -240,6 +250,10 @@ def result_judge_entry(row: dict[str, Any], source_path: Path) -> dict[str, Any]
         "track_id": str(row.get("track_id") or ""),
         "candidate_id": str(row.get("candidate_id") or ""),
         "candidate_manifest": str(row.get("candidate_manifest") or ""),
+        "candidate_config_id": str(row.get("candidate_config_id") or ""),
+        "route_id": route_id,
+        "route_family": str(row.get("route_family") or ""),
+        "source_model_id": source_model_id,
         "mix_path": str(row.get("mix_path") or ""),
         "vocal_path": str(row.get("vocal_path") or ""),
         "minus_path": minus_path,
@@ -580,7 +594,11 @@ def matrix_row(record: dict[str, Any]) -> dict[str, Any]:
         "candidate_manifest": record.get("candidate_manifest") or "",
         "manifest_kind": manifest_info.get("manifest_kind") or "",
         "manifest_readable": manifest_info.get("manifest_readable") is True,
-        "model_name": manifest_info.get("model_name") or "",
+        "model_name": manifest_info.get("model_name") or result_judge.get("source_model_id") or "",
+        "source_model_id": result_judge.get("source_model_id") or manifest_info.get("model_name") or "",
+        "route_id": result_judge.get("route_id") or "",
+        "route_family": result_judge.get("route_family") or "",
+        "candidate_config_id": result_judge.get("candidate_config_id") or "",
         "target_stem": manifest_info.get("target_stem") or "",
         "minus_path": record.get("minus_path") or "",
         "vocal_path": record.get("vocal_path") or "",

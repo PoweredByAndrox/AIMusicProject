@@ -33,6 +33,7 @@ def fake_judge(*, status: str, blocker_count: int):
     def _judge(**kwargs):
         output_dir = Path(kwargs["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = output_dir / ("manifest.json" if kwargs.get("short_output_names") else "instrumental_self_judge_manifest.json")
         manifest = {
             "mode": "instrumental_self_judge_gate",
             "source_audio_path": str(kwargs["source_audio_path"]),
@@ -56,8 +57,9 @@ def fake_judge(*, status: str, blocker_count: int):
                 "expected_acceleration_mode": "cpu_dsp_self_judge",
                 "gpu_inference_skipped": True,
             },
+            "manifest_path": str(manifest_path),
         }
-        matrix.write_json(output_dir / "instrumental_self_judge_manifest.json", manifest)
+        matrix.write_json(manifest_path, manifest)
         return manifest
 
     return _judge
@@ -144,15 +146,46 @@ def test_self_judge_matrix_writes_outputs_and_safety_flags(tmp_path: Path) -> No
         judge_runner=fake_judge(status="proxy_pass", blocker_count=0),
     )
 
-    assert (output_root / "no_reference_minus_self_judge_matrix.jsonl").exists()
-    assert (output_root / "no_reference_minus_self_judge_matrix_manifest.json").exists()
-    assert (output_root / "no_reference_minus_self_judge_matrix_summary.md").exists()
+    assert (output_root / "rows.jsonl").exists()
+    assert (output_root / "manifest.json").exists()
+    assert (output_root / "summary.md").exists()
+    assert (output_root / "progress.jsonl").exists()
+    assert result["manifest"]["output_files"]["matrix_jsonl"].endswith("rows.jsonl")
+    assert result["manifest"]["output_files"]["manifest_json"].endswith("manifest.json")
+    assert result["manifest"]["output_files"]["summary_md"].endswith("summary.md")
+    assert result["manifest"]["output_files"]["progress_jsonl"].endswith("progress.jsonl")
     assert result["summary"]["expected_acceleration_mode"] == "cpu_dsp_self_judge_matrix"
     assert result["summary"]["gpu_inference_skipped"] is True
     assert result["manifest"]["training_started"] is False
     assert result["manifest"]["fine_tune_started"] is False
     assert result["manifest"]["models_changed"] is False
     assert result["manifest"]["thresholds_relaxed"] is False
+
+
+def test_self_judge_matrix_uses_short_alias_dirs_for_nested_artifacts(tmp_path: Path) -> None:
+    raw_candidate_id = "very_long_raw_candidate_identifier_that_must_not_be_in_artifact_paths"
+    row = candidate_row(tmp_path, candidate_id=raw_candidate_id)
+    row["track_id"] = "very_long_raw_track_identifier_that_must_not_be_in_artifact_paths"
+    rows_path = write_jsonl(tmp_path / "candidates.jsonl", [row])
+    output_root = tmp_path / "matrix"
+
+    result = matrix.run_self_judge_matrix(
+        candidate_jsonl=rows_path,
+        output_root=output_root,
+        judge_runner=fake_judge(status="proxy_pass", blocker_count=0),
+    )
+
+    self_judge_manifest = Path(result["rows"][0]["self_judge_manifest"])
+    relative_parts = self_judge_manifest.relative_to(output_root).parts
+    assert relative_parts[:2] == ("t001", "c001")
+    assert all(len(part) <= 32 for part in relative_parts)
+    assert raw_candidate_id not in str(self_judge_manifest)
+    assert row["track_id"] not in str(self_judge_manifest)
+    assert result["rows"][0]["track_id"] == row["track_id"]
+    assert result["rows"][0]["candidate_id"] == raw_candidate_id
+    assert result["rows"][0]["self_judge_alias"] == {"track_alias": "t001", "candidate_alias": "c001"}
+    assert result["manifest"]["artifact_name_policy"]["raw_ids_in_paths"] is False
+    assert result["manifest"]["artifact_name_policy"]["provenance_in_manifest"] is True
 
 
 def test_self_judge_matrix_filters_by_track_id(tmp_path: Path) -> None:

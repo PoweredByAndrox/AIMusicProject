@@ -147,6 +147,13 @@ def test_run_candidate_wave_jobs_reuses_existing_execution_contract(tmp_path: Pa
 
     disk_manifest = read_json(tmp_path / "execution" / CANDIDATE_WAVE_EXECUTION_MANIFEST_NAME)
     assert disk_manifest["manifest"]["execution_status"] == "completed"
+    top_level_files = {path.name for path in (tmp_path / "execution").iterdir() if path.is_file()}
+    assert top_level_files == {
+        CANDIDATE_WAVE_EXECUTION_JOB_MATRIX_NAME,
+        CANDIDATE_WAVE_EXECUTION_MANIFEST_NAME,
+        CANDIDATE_WAVE_EXECUTION_PROGRESS_NAME,
+    }
+    assert all(len(name) <= 32 for name in top_level_files)
     assert [row["event"] for row in read_jsonl(tmp_path / "execution" / CANDIDATE_WAVE_EXECUTION_PROGRESS_NAME)] == [
         "start",
         "normalize_jobs",

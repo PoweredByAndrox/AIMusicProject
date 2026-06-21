@@ -31,6 +31,11 @@ status is trainable. `user_owned` is normalized to `project_owned`. If the
 ground-truth contract says the source mix cannot be claimed as a one-to-one sum
 of imported stems, the example remains trainable but carries
 `source_mix_1_to_1_claim_allowed=false` for downstream evaluators.
+Reference intake and raw-reference recovery material builders also reject
+non-production artifact roots such as `dbg_loop`, `dbg_loop_tmp`, `test_*`,
+smoke, debug, or fixture paths under `lab_artifacts`; those rows stay forensic
+evidence with `candidate_root_non_production_artifact` and cannot become
+trainable ground truth.
 
 Auto-discovered feedback paths are recorded in
 `generic_finetuning_corpus_manifest.json` under `inputs`. Use
@@ -60,6 +65,80 @@ are missing from the model, if eval examples overlap training manifest paths, or
 if accuracy is below threshold. Passing this gate still does not edit model
 registries; it only marks the controller artifact as ready for the next runtime
 smoke-replay step.
+
+`tools/build_qwen_controller_sft_dataset.py` converts
+`controller_decision_examples.jsonl` plus an optional external eval JSONL into a
+Qwen chat SFT dataset for a future controller fine-tune. It writes short
+Windows-safe artifact names (`train.jsonl`, `eval.jsonl`, `excluded.jsonl`,
+`manifest.json`, `progress.jsonl`) and remains metadata-only:
+`training_started=false`, `fine_tune_started=false`,
+`delivery_allowed=false`, and `release_ready=false`. The builder blocks
+train/eval manifest overlap by normalized manifest path before any Qwen/QLoRA
+training can start, excludes source rows with an unexpected controller schema or
+with top-level/nested `delivery_allowed=true` / `release_ready=true` claims, and
+preserves manifest provenance in each example.
+
+`tools/cache_qwen_controller_model.py` is the reproducible Docker-side cache
+gate for `Qwen/Qwen3-4B-Thinking-2507`. By default it performs an offline
+local-cache check only. Passing `--allow-network` explicitly allows the tool to
+override `HF_HUB_OFFLINE` for that process, call Hugging Face
+`snapshot_download`, and validate the resulting snapshot before training is
+eligible to start. It writes short artifact names (`manifest.json`,
+`progress.jsonl`), records network/offline state, emits download heartbeats
+during network runs, validates `config.json`, tokenizer files, and weight files,
+and remains metadata-only: `training_started=false`,
+`model_registry_edited=false`, `delivery_allowed=false`, and
+`release_ready=false`.
+
+`tools/qwen_controller_qlora_preflight.py` is the fail-closed runtime gate for
+that future Qwen controller fine-tune. It reads the Qwen SFT dataset manifest,
+recomputes train/eval manifest-path overlap, checks required QLoRA Python
+modules (`transformers`, `datasets`, `accelerate`, `peft`, `bitsandbytes`,
+`trl`, `sentencepiece`, `protobuf`, and `torch`), verifies the PyTorch-only
+Transformers/TRL API surface needed by the trainer, and checks CUDA
+availability plus a configurable free-memory guard. The Qwen route sets
+`USE_TF=0` and `TRANSFORMERS_NO_TF=1` before importing Transformers/TRL so the
+shared TensorFlow/Keras worker environment does not break a PyTorch-only
+controller fine-tune. It also verifies that the target Qwen model snapshot is
+already available in the local Hugging Face cache with offline/local-files-only
+semantics, so training cannot start and then fail on a missing model download
+while `HF_HUB_OFFLINE=1`. Non-CUDA requested devices and out-of-range `cuda:N`
+requests block with a structured manifest instead of falling through to device 0
+or crashing. It writes short artifact names
+(`manifest.json`, `preflight.json`, `progress.jsonl`) and remains preflight-only:
+`training_started=false`, `fine_tune_started=false`,
+`models_changed=false`, `delivery_allowed=false`, and `release_ready=false`.
+If the Docker image has not been rebuilt with the QLoRA requirements, the
+preflight must return `preflight_status=blocked` instead of starting training or
+falling back to CPU. If the Qwen snapshot is not cached, it must return
+`model_cache_unavailable` instead of allowing training to attempt a network
+download. If the installed QLoRA libraries drift away from the expected trainer
+API, it must return `qlora_runtime_api_incompatible`.
+
+The minimal 12GB-class GPU smoke route uses `--min-cuda-free-memory-mb 10000`,
+`--max-length 256`, `--lora-r 8`, `--lora-alpha 16`, and `--max-steps 1` to
+prove the Docker/GPU QLoRA loop is runnable before any longer training run. A
+smoke-trained adapter is still accepted only if the external eval gate beats the
+base-model baseline; otherwise it remains a blocked training artifact.
+
+`tools/qwen_controller_qlora_train.py` is the gated QLoRA training entrypoint
+for the Qwen controller adapter. It requires both the Qwen SFT dataset manifest
+and a `qwen_controller_qlora_preflight` manifest with `preflight_status=passed`.
+If either gate fails, it writes short artifact names (`manifest.json`,
+`metrics.json`, `progress.jsonl`, `adapter/`, `trainer/`) with
+`training_status=blocked` and does not import the QLoRA runtime. A completed run
+still remains a training artifact only: `model_registry_edited=false`,
+`delivery_allowed=false`, `release_ready=false`, and promotion stays blocked
+until an external eval gate accepts the adapter.
+
+`tools/qwen_controller_qlora_eval.py` is that external eval gate. It requires a
+`qwen_controller_qlora_training` manifest with `training_status=trained`, an
+existing `adapter/` directory, and non-overlapping eval rows from the Qwen SFT
+dataset. The gate evaluates the base model and the adapter on the same eval
+rows, writes `manifest.json`, `rows.jsonl`, and `progress.jsonl`, and only
+passes when adapter accuracy meets threshold and is strictly better than the
+base-model baseline. Passing eval still does not edit model registries or mark
+anything release/listen-ready.
 
 `tools/build_generic_controller_external_eval_from_hard_cases.py` converts
 `hard_eval_cases.jsonl` into a controller external-eval JSONL. It includes only
@@ -157,9 +236,11 @@ model.
 Ready job commands call `train_teacher_mask_separator.py` with the real trainer
 CLI (`--source-mix`, `--teacher-target`, `--output-dir`, `--stem`,
 `--device cuda`). The trainer writes `teacher_mask_separator_progress.jsonl`
-with start, audio-load, epoch, apply, artifact, and finish events. It also
-records `training.sample_rate_alignment`; if a teacher target has a different
-sample rate than the source mix, the target is resampled to the source rate via
+with start, CUDA memory guard, explicit CUDA sync phase markers, pre-compute
+epoch/permutation/batch markers, batch compute subphase markers, batch
+heartbeat, per-epoch, apply, artifact, and finish events. It also records
+`training.sample_rate_alignment`; if a teacher target has a different sample
+rate than the source mix, the target is resampled to the source rate via
 `scipy.signal.resample_poly` and the manifest explicitly marks
 `teacher_target_resampled=true`.
 
@@ -183,6 +264,39 @@ remain blocked from listen/release delivery:
 `delivery_allowed=false`, `presentation_status=holdout_training_artifact_not_for_listen_pack`,
 and `release_ready=false`.
 
+Checkpoint application is observable inside the holdout progress log. The
+validator records checkpoint application start, audio load, checkpoint load,
+feature extraction, source-feature-memory search, chunk progress, blocked
+guards, and finish/failure events. Source-feature-memory KNN application is
+fail-closed by `--max-source-feature-memory-distance-ops` to prevent a
+cross-track holdout from running an unbounded `torch.cdist` search without a
+phase trail. If the guard trips, the holdout row fails with
+`source_feature_memory_cost_guard`; no candidate audio is published, no fallback
+is used, and `release_ready=false` remains unchanged.
+
+The shared teacher-mask adapter also supports bounded source-feature memory for
+matrix experiments:
+
+- `mask_output_mode=magnitude_residual` uses an identity-centered magnitude
+  mask head. The output starts at no-op (`mask=1.0`) and is bounded by
+  `mask_ceiling` around identity, so a config can test small corrective deltas
+  without the sigmoid attenuation bias of the default `magnitude` mode. It is
+  still a training/evaluation candidate only; holdout improvement gates remain
+  unchanged.
+- `source_preservation_weight` adds an explicit loss term against moving the
+  learned mask away from source identity. It is intended for candidate-
+  conditioned stems that are already strong baselines and must not be damaged by
+  a shared adapter. The default is `0.0`; enabling it does not lower any holdout
+  gate and does not publish fallback/no-op audio.
+- `source_feature_memory_projection_dim` stores a deterministic seed-derived
+  projection matrix in the checkpoint and applies KNN in that projected space.
+- `source_feature_memory_max_frames` stores only a deterministic frame subset
+  for source-feature memory.
+
+These fields are part of the adapter fingerprint and manifest config. They do
+not bypass holdout gates; they only make a memory route operationally bounded
+enough to evaluate.
+
 The first vocal holdout run on the recovered candidate-map corpus is:
 
 `/app/lab_artifacts/generic_finetuning_playbook_20260613/vocal_holdout_eval_candidate_map_recovered_v2_device_traced/generic_audio_finetune_holdout_manifest.json`
@@ -202,19 +316,162 @@ holdout gate. The route can enable KNN source-feature memory with
 `--source-feature-memory-neighbors`; complex source memory remains disabled in
 the shared trainer because it is reconstructive per-source state.
 
+The shared adapter can also train `--mask-output-mode complex`. In that mode the
+network predicts a bounded complex ratio mask and the training loss includes
+complex STFT reconstruction error instead of only magnitude-mask error. This is
+a training/evaluation route only: it still writes `delivery_allowed=false`,
+requires the same locked holdout gate, and cannot mark `release_ready`.
+
+Complex mask output can be combined with explicit source-feature memory by
+setting `--source-feature-memory-neighbors`. In that route the checkpoint stores
+bounded frame-level complex masks under
+`source_feature_memory_complex_frame_mask_real/imag`, optionally projected by
+`source_feature_memory_projection_dim` and capped by
+`source_feature_memory_max_frames`. Application records
+`source_feature_memory_complex_frame_mask_available/used` and remains guarded by
+`--max-source-feature-memory-distance-ops`. This is an explicit matrix
+candidate, not a silent fallback or release path.
+
 `tools/run_generic_audio_finetune_matrix.py` is the reproducible config-matrix
 wrapper for that shared adapter. It reads a JSON matrix, trains each config into
 its own subdirectory, immediately runs the cross-track holdout gate for that
 config, and writes `generic_audio_finetune_matrix_manifest.json`,
-`generic_audio_finetune_matrix_rows.jsonl`, and a structured progress log. The
+`generic_audio_finetune_matrix_rows.jsonl`, and a structured progress log. Each
+nested training run emits dataset feature-stack, chunk-release, model-init
+subphase (network construction, move-to-device, optimizer), training-index,
+`dataset_train_loop_start`, pre-compute epoch/permutation/batch start rows,
+explicit pre-loop CUDA sync rows, batch feature-gather/forward/loss/backward/
+optimizer subphase rows, post-step batch heartbeat rows, and `dataset_train_epoch`
+for every epoch, not just a percentage stride, so long GPU runs keep a
+reproducible phase trail.
+The matrix wrapper also emits `cuda_phase_cleanup_start` and
+`cuda_phase_cleanup_finish` between training, holdout, and the next config. The
+cleanup synchronizes CUDA work, releases cached allocator blocks, runs IPC
+cleanup when available, records free/total CUDA memory, and stays fail-closed:
+if cleanup fails during a required GPU matrix run, the current config fails
+instead of falling back to CPU or hiding the allocator state from the next
+config.
+Index-order permutation and batch index select are CPU-resident orchestration
+metadata. Large precomputed feature, STFT, mask, and weight tensors are also
+kept CPU-resident. CUDA dataset runs store the precomputed magnitude/features in
+compact `float16` and convert the current batch back to `float32` on the
+requested training device. Magnitude-mode training does not store full STFT or
+complex-mask tensors; those are only kept for explicit complex-mask training.
+Dataset feature normalization is chunked: the trainer computes feature
+mean/std across CPU chunks, normalizes each chunk separately, and only then
+stacks the compact normalized features. Progress rows include
+`dataset_feature_stats_*`, `dataset_feature_normalize_*`, and
+`normalization_strategy=chunked_cpu_low_peak` so large matrix runs do not hide
+multi-GB feature-stack phases.
+Each batch emits `dataset_train_batch_to_device_start` /
+`dataset_train_batch_to_device_finish` while moving only the current batch to
+the requested training device. Forward, loss, backward, and optimizer steps
+still run on that requested device. This prevents hidden multi-minute CUDA sync
+work before the first batch and reduces CPU/GPU allocation pressure while
+keeping long runs observable. The shared adapter
+initializes and moves the model to the requested device before training, then
+releases per-pair chunk references after stacking to reduce allocation pressure.
+Magnitude-mode networks scale their sigmoid output by `mask_ceiling`, matching
+the existing `oracle_mask = target_mag / source_mag` training target when
+`mask_ceiling > 1.0`; the application gate still clamps masks to the same
+configured ceiling.
+If CUDA free memory is below the configured `min_cuda_free_memory_mb` guard,
+training fails closed before allocation instead of falling back to CPU. The
 matrix chooses a best config only from configs whose holdout manifest passed; if
 none pass, `matrix_validation_status=failed` and `best_config_id=""`. Matrix
 also recomputes the row-level holdout contract from `holdout_rows_jsonl` instead
-of trusting a single aggregate status field. Matrix artifacts are still
+of trusting a single aggregate status field. The matrix runner passes the same
+source-feature-memory application cost guard through to each nested holdout so a
+single high-KNN config cannot become an unobservable long-running run. Matrix
+artifacts are still
 training/evaluation evidence only:
 `delivery_allowed=false`,
 `presentation_status=training_matrix_artifact_not_for_listen_pack`, and
 `release_ready=false`.
+
+`tools/build_candidate_conditioned_audio_training_view.py` creates a training
+view where a completed registered candidate stem becomes the source and the
+verified corpus stem remains the target. The candidate source is explicitly
+marked `source_candidate_is_ground_truth=false`, missing candidates are blocked
+instead of replaced with the raw mix, and the route is metadata-only.
+
+`tools/build_multi_candidate_conditioned_audio_training_view.py` extends that
+contract to multiple registered source families. Each `--candidate-root
+LABEL=PATH` emits at most one source row per verified example, with ids such as
+`candidate_conditioned__htd6__<example_id>`. This lets a matrix train on several
+registered model families without pretending any candidate is a target stem.
+The output manifest records `family_counts`, keeps
+`delivery_allowed=false`, and forces `release_ready=false`.
+When the source rows are accepted no-reference teacher targets rather than
+verified references, use `--output-pseudo-teacher-rows`. That mode writes
+`generic_finetuning_pseudo_teacher_audio_training_example.v1` rows with
+`pseudo_teacher=true`, `pseudo_teacher_targets_are_ground_truth=false`,
+`human_verified=false`, and `reference_verified=false`, so the rows can be used
+only through `--pseudo-teacher-examples-jsonl` and cannot become holdout
+references.
+
+`tools/build_pseudo_teacher_audio_training_examples.py` is the train-safe route
+for using accepted no-reference runtime stems as weak training targets without
+calling them ground truth. It reads run roots containing:
+
+- `run_manifest.json`
+- `selected_candidates.jsonl`
+- `music_intelligence_input_manifest.json`
+
+and writes:
+
+- `pseudo_teacher_audio_training_examples.jsonl`
+- `pseudo_teacher_audio_training_blocked_candidates.jsonl`
+- `pseudo_teacher_audio_training_manifest.json`
+- `pseudo_teacher_audio_training_progress.jsonl`
+
+Rows use schema
+`generic_finetuning_pseudo_teacher_audio_training_example.v1` and must carry
+`pseudo_teacher=true`, `human_verified=false`, `reference_verified=false`,
+`permission_status=pseudo_teacher_runtime_artifact`,
+`pseudo_teacher_targets_are_ground_truth=false`, `delivery_allowed=false`, and
+`release_ready=false`. The builder only includes selected stems that also appear
+as `quality_status=accepted`, `analysis_allowed=true` Music Intelligence stems
+and whose source/target audio files exist. Publishable or release-ready runtime
+candidates are blocked instead of reused.
+
+`tools/train_generic_audio_teacher_mask_adapter.py` accepts pseudo rows only
+through the explicit `--pseudo-teacher-examples-jsonl` argument. The verified
+training JSONL remains separate, and the adapter manifest records
+`pseudo_teacher_training_example_count`, `pseudo_teacher_track_ids`, and a
+contract stating `dirty_stems_never_ground_truth=true`.
+For candidate-conditioned specialists, both the trainer and the matrix support
+`source_candidate_family_filter`. It filters training rows by
+`source_candidate_family`, carries the filter into the holdout gate, and records
+the selected source families in the adapter manifest. This prevents a specialist
+config from training on one registered model family while being evaluated on a
+different family.
+
+`tools/run_generic_audio_finetune_matrix.py` forwards
+`--pseudo-teacher-examples-jsonl` only to the training stage. Holdout validation
+continues to read the verified `--audio-training-examples-jsonl`, so pseudo
+teacher rows cannot become the reference target for locked eval. This route is
+not a fallback and cannot lower thresholds, edit runtime gates, promote a model,
+or mark `release_ready`.
+
+`tools/run_candidate_family_blend_matrix.py` is a trainable no-reference adapter
+for candidate-conditioned views with two or more source families for the same
+verified example, such as `scnet` and `melband`. It learns convex blend weights
+only from non-holdout verified groups, writes a JSON adapter checkpoint, renders
+bounded holdout evaluation audio, and emits the same matrix/row contract shape
+used by `build_train_ready_audio_model_decision.py`. Holdout improvement is
+measured against `baseline_policy=best_family`, meaning the blend must beat the
+best individual candidate family for that holdout group; it cannot pass by
+choosing a weaker source as baseline. The route is CPU/DSP by design because it
+does no neural inference or separator training. Its progress log still records
+`gpu_inference_skipped=true`, `gpu_training_skipped=true`, and explicit skip
+reasons. It never uses pseudo-teacher rows, never relaxes thresholds, never
+edits runtime gates or model registries, and always writes `release_ready=false`.
+Use `tools/build_candidate_family_blend_locked_split.py` before the train-ready
+decision when the split is assigned downstream rather than encoded in the input
+JSONL. The split builder writes a locked leakage manifest with train and holdout
+track ids, requires complete source-family groups, rejects dirty/release-ready
+input rows, and keeps `release_ready=false`.
 
 The first shared vocal adapter waves excluded `nothing-can-wait` from training
 and evaluated it as holdout:
@@ -294,6 +551,17 @@ their source/target audio paths have been recovered, while still requiring an
 explicit `approve_for_training` decision and a trainable permission status
 before ingestion.
 
+`tools/build_project_owned_audio_permission_decisions.py` is the non-CSV
+attestation route for local project-owned ground-truth bundles. It only writes
+`approve_for_training` decisions for recovery rows that are
+`source_domain=user_supplied_flstudio_music`,
+`source_type=ground_truth_manifest`, `reference_verified=true`, have existing
+source and target audio, and are blocked only by a permission-status blocker.
+Human feedback audio pairs and synthetic fixtures are not auto-approved. The
+output is still metadata-only and must be passed through
+`tools/ingest_generic_audio_training_recovery_decisions.py` before merge and
+validation.
+
 ## Merged Audio Training Dataset
 
 `tools/merge_generic_audio_training_examples.py` bridges recovery decisions
@@ -308,6 +576,19 @@ The output `merged_audio_training_examples.jsonl` is the single input that
 metadata-only: it does not start training, does not edit model registries, and
 does not create listen or release artifacts.
 
+Before a merged corpus enters GPU training, validate it with
+`tools/validate_verified_audio_training_corpus.py`. This gate requires every
+training row to have existing source/target audio, trainable permission, and
+either human or reference verification. It also blocks track leakage across
+split labels and never marks any artifact release-ready.
+
+After a shared adapter matrix finishes, use
+`tools/build_train_ready_audio_model_decision.py` to decide whether the TRAIN
+result is actually verified. The decision is strict: the best matrix config
+must pass safety and holdout checks and its success rate must be greater than
+`0.90`. The decision artifact is still not a promotion and keeps
+`release_ready=false`.
+
 ## Docker Commands
 
 ```bash
@@ -320,6 +601,41 @@ python /app/tools/train_generic_finetuning_controller_model.py \
   --controller-examples-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260613/corpus_v1/controller_decision_examples.jsonl \
   --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_model_v1 \
   --min-examples-per-route 2
+
+python /app/tools/build_qwen_controller_sft_dataset.py \
+  --controller-examples-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260613/corpus_v1/controller_decision_examples.jsonl \
+  --eval-examples-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_eval_v1/controller_decision_examples.jsonl \
+  --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_sft_v1
+
+python /app/tools/cache_qwen_controller_model.py \
+  --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_model_cache_v1 \
+  --allow-network \
+  --max-workers 4
+
+python /app/tools/qwen_controller_qlora_preflight.py \
+  --sft-dataset-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_sft_v1/manifest.json \
+  --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_qlora_preflight_v1 \
+  --requested-device cuda:0 \
+  --min-cuda-free-memory-mb 10000
+
+python /app/tools/qwen_controller_qlora_train.py \
+  --sft-dataset-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_sft_v1/manifest.json \
+  --preflight-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_qlora_preflight_v1/manifest.json \
+  --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_qlora_train_v1 \
+  --per-device-train-batch-size 1 \
+  --gradient-accumulation-steps 1 \
+  --max-length 256 \
+  --lora-r 8 \
+  --lora-alpha 16 \
+  --max-steps 1
+
+python /app/tools/qwen_controller_qlora_eval.py \
+  --sft-dataset-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_sft_v1/manifest.json \
+  --training-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_qlora_train_v1/manifest.json \
+  --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/qwen_qlora_eval_v1 \
+  --min-eval-examples 20 \
+  --min-adapter-accuracy 0.7 \
+  --min-accuracy-improvement 0.0
 
 python /app/tools/validate_generic_audio_finetune_holdout.py \
   --run-rows-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260613/vocal_gpu_training_run_candidate_map_recovered_v3_runner_validated/generic_audio_finetune_run_rows.jsonl \
@@ -371,6 +687,26 @@ python /app/tools/run_generic_audio_finetune_matrix.py \
   --min-sdr-db 3.0 \
   --min-improvement-db 0.5 \
   --max-holdouts-per-checkpoint 1
+
+python /app/tools/run_candidate_family_blend_matrix.py \
+  --audio-training-examples-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260616/gt90_cycle_001/multi_candidate_conditioned_vocal_training_view_v13_strong_scnet_melband_all_verified_no_melody/candidate_conditioned_audio_training_examples.jsonl \
+  --config-matrix-json /app/lab_artifacts/generic_finetuning_playbook_20260616/gt90_cycle_001/vocal_candidate_family_blend_matrix_v32_configs.json \
+  --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260616/gt90_cycle_001/vocal_candidate_family_blend_matrix_v32_001 \
+  --stem vocal \
+  --scope vocal_candidate_family_blend_matrix_gt90_cycle_001_v32 \
+  --exclude-holdout-track-id nothing-can-wait \
+  --min-sdr-db 3.0 \
+  --min-improvement-db 0.5 \
+  --max-holdouts-per-config 2
+
+python /app/tools/build_candidate_family_blend_locked_split.py \
+  --audio-training-examples-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260616/gt90_cycle_001/multi_candidate_conditioned_vocal_training_view_v13_strong_scnet_melband_all_verified_no_melody/candidate_conditioned_audio_training_examples.jsonl \
+  --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260616/gt90_cycle_001/candidate_family_blend_locked_split_v33_001 \
+  --stem vocal \
+  --family scnet \
+  --family melband \
+  --holdout-track-id nothing-can-wait \
+  --holdout-track-id 3404a02f61d017a1ea0a3776f7db6f3abf7cd1969133e9bc87e7f879f6f71273
 
 python /app/tools/eval_generic_finetuning_controller_model.py \
   --controller-model-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_model_v1/generic_finetuning_controller_model.json \
@@ -442,13 +778,13 @@ python /app/tools/plan_generic_controller_selector_candidate_wave.py \
   --max-sources-per-route 1
 
 python /app/tools/run_generic_controller_selector_candidate_wave_jobs.py \
-  --candidate-wave-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_candidate_wave_plan_v1/generic_controller_selector_candidate_wave_manifest.json \
+  --candidate-wave-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_candidate_wave_plan_v1/plan.json \
   --output-root /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_candidate_wave_execution_v1_dry_run \
   --max-jobs 3 \
   --dry-run
 
 python /app/tools/run_generic_controller_selector_candidate_wave_jobs.py \
-  --candidate-wave-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_candidate_wave_plan_v1/generic_controller_selector_candidate_wave_manifest.json \
+  --candidate-wave-manifest-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_candidate_wave_plan_v1/plan.json \
   --output-root /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_candidate_wave_execution_v1 \
   --max-jobs 1 \
   --fail-fast

@@ -16,6 +16,15 @@ or change separator models.
 - Outputs remain diagnostic/model-routing artifacts and never set
   `release_ready=true`.
 
+## Production Audio Quality Critic Boundary
+
+This local no-reference critic is not the production semantic audio authority.
+It learns from existing proxy/script decisions and remains a diagnostic or
+model-routing baseline. Production semantic scoring must use the
+`audio_quality_critic_v1` contract in `PRODUCTION_AUDIO_QUALITY_CRITIC.md`,
+where a torch critic consumes audio/tensor evidence and can only become runtime
+authoritative after locked promotion gates.
+
 ## Files
 
 - Dataset builder: `tools/build_no_reference_ml_dataset.py`
