@@ -64,6 +64,23 @@ declared vocal-band component from non-vocal stems into `vocals`, then rebuilds
 the unchanged reconstruction gate runs. This route does not relax contamination
 thresholds: it must still pass the explicit `minus` / `vocals` check.
 
+Late default candidates may also declare:
+
+```json
+{
+  "vocal_projection_debleed": {
+    "strength": 1.0,
+    "target_stems": ["drums", "bass", "guitar", "piano", "other"]
+  }
+}
+```
+
+This projects each target non-vocal stem onto the current `vocals` waveform,
+moves the correlated component back into `vocals`, and then rebuilds `minus`.
+It is meant for leaked vocal waveform in individual non-vocal stems, not for
+acceptance by metric bypass. The same reconstruction and full forbidden-source
+matrix gates still run after the transfer.
+
 ## Listen Pack
 
 When the run is accepted, the runner concatenates the accepted candidate stems

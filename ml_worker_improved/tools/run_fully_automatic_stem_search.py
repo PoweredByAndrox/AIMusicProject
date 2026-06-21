@@ -351,6 +351,10 @@ def build_default_from_scratch_recipe(
                 "high_hz": 1200.0,
                 "target_stems": list(NON_VOCAL_STEMS),
             }
+            candidate["vocal_projection_debleed"] = {
+                "strength": debleed_strength,
+                "target_stems": list(NON_VOCAL_STEMS),
+            }
         return candidate
 
     return {
@@ -761,6 +765,120 @@ def apply_minus_vocal_debleed(
     }
 
 
+def apply_vocal_projection_debleed(
+    *,
+    stem_paths: Mapping[str, str],
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    strength = float(config.get("strength", 1.0))
+    max_projection_coeff = float(config.get("max_projection_coeff", 1.5))
+    min_abs_coeff = float(config.get("min_abs_coeff", 1e-4))
+    target_stems_raw = config.get("target_stems")
+    target_stems = (
+        [str(stem) for stem in target_stems_raw]
+        if isinstance(target_stems_raw, list) and target_stems_raw
+        else list(NON_VOCAL_STEMS)
+    )
+    blockers: list[str] = []
+    if not 0.0 <= strength <= 1.0:
+        blockers.append("invalid_projection_debleed_strength")
+    if max_projection_coeff <= 0.0:
+        blockers.append("invalid_projection_debleed_max_coeff")
+    if min_abs_coeff < 0.0:
+        blockers.append("invalid_projection_debleed_min_coeff")
+    invalid_targets = [stem for stem in target_stems if stem not in NON_VOCAL_STEMS]
+    if invalid_targets:
+        blockers.extend(f"invalid_projection_debleed_target:{stem}" for stem in invalid_targets)
+    vocals_path = stem_paths.get("vocals")
+    if not vocals_path:
+        blockers.append("missing_vocals_stem")
+    if blockers:
+        return {
+            "applied": False,
+            "repair_owner": "runner_vocal_projection_debleed_v1",
+            "reason": "invalid_projection_debleed_config",
+            "blockers": blockers,
+        }
+
+    vocals_audio, sample_rate = _read_audio(Path(str(vocals_path)))
+    vocal_energy = float(np.sum(np.square(vocals_audio.astype(np.float64))))
+    if vocal_energy <= 1e-12:
+        return {
+            "applied": False,
+            "repair_owner": "runner_vocal_projection_debleed_v1",
+            "reason": "vocal_projection_floor",
+            "target_stems": target_stems,
+            "moved_rms": 0.0,
+        }
+
+    stem_audios: dict[str, np.ndarray] = {}
+    for stem in target_stems:
+        stem_path = stem_paths.get(stem)
+        if not stem_path:
+            blockers.append(f"missing_projection_debleed_stem:{stem}")
+            continue
+        stem_audio, stem_rate = _read_audio(Path(str(stem_path)))
+        if stem_rate != sample_rate:
+            blockers.append(f"sample_rate_mismatch:{stem}:{stem_rate}!={sample_rate}")
+            continue
+        if stem_audio.shape != vocals_audio.shape:
+            blockers.append(f"shape_mismatch:{stem}:{stem_audio.shape}!={vocals_audio.shape}")
+            continue
+        stem_audios[stem] = stem_audio
+    if blockers:
+        return {
+            "applied": False,
+            "repair_owner": "runner_vocal_projection_debleed_v1",
+            "reason": "projection_debleed_inputs_invalid",
+            "blockers": blockers,
+        }
+
+    moved_total = np.zeros_like(vocals_audio, dtype=np.float32)
+    per_stem: dict[str, dict[str, float]] = {}
+    for stem, stem_audio in stem_audios.items():
+        projection_coeff = float(
+            np.sum(stem_audio.astype(np.float64) * vocals_audio.astype(np.float64)) / vocal_energy
+        )
+        projection_coeff = max(0.0, min(max_projection_coeff, projection_coeff))
+        if abs(projection_coeff) < min_abs_coeff:
+            projection_coeff = 0.0
+            moved = np.zeros_like(vocals_audio, dtype=np.float32)
+        else:
+            moved = (vocals_audio.astype(np.float32) * np.float32(projection_coeff * strength)).astype(np.float32)
+        moved_total = moved_total + moved
+        per_stem[stem] = {
+            "projection_coeff": round(projection_coeff, 8),
+            "moved_rms": round(_rms(moved), 8),
+        }
+
+    moved_rms = _rms(moved_total)
+    if moved_rms <= 1e-12:
+        return {
+            "applied": False,
+            "repair_owner": "runner_vocal_projection_debleed_v1",
+            "reason": "projection_debleed_floor",
+            "target_stems": target_stems,
+            "moved_rms": 0.0,
+            "per_stem": per_stem,
+        }
+
+    for stem, stem_audio in stem_audios.items():
+        projection_coeff = float(per_stem[stem]["projection_coeff"])
+        moved = (vocals_audio.astype(np.float32) * np.float32(projection_coeff * strength)).astype(np.float32)
+        _write_audio(Path(str(stem_paths[stem])), stem_audio.astype(np.float32) - moved, sample_rate)
+    _write_audio(Path(str(vocals_path)), vocals_audio.astype(np.float32) + moved_total, sample_rate)
+    return {
+        "applied": True,
+        "repair_owner": "runner_vocal_projection_debleed_v1",
+        "strength": strength,
+        "max_projection_coeff": max_projection_coeff,
+        "min_abs_coeff": min_abs_coeff,
+        "target_stems": target_stems,
+        "moved_rms": round(moved_rms, 8),
+        "per_stem": per_stem,
+    }
+
+
 def _find_window_candidate(window: Mapping[str, Any], candidate_id: str) -> Mapping[str, Any]:
     for candidate in window.get("candidates", []):
         if str(candidate.get("candidate_id") or "") == candidate_id and candidate.get("verdict") == "auto_accept":
@@ -1049,6 +1167,14 @@ def execute_recipe_candidate(
     if isinstance(debleed_config, dict):
         minus_vocal_debleed = apply_minus_vocal_debleed(stem_paths=stem_paths, config=debleed_config)
 
+    projection_debleed_config = candidate.get("vocal_projection_debleed")
+    vocal_projection_debleed: dict[str, Any] | None = None
+    if isinstance(projection_debleed_config, dict):
+        vocal_projection_debleed = apply_vocal_projection_debleed(
+            stem_paths=stem_paths,
+            config=projection_debleed_config,
+        )
+
     repair_stem = str(candidate.get("conservation_repair_stem") or "").strip()
     reconstruction_repair: dict[str, Any] | None = None
     if repair_stem:
@@ -1073,6 +1199,7 @@ def execute_recipe_candidate(
                 "reconstruction": reconstruction,
                 "reconstruction_repair": reconstruction_repair,
                 "minus_vocal_debleed": minus_vocal_debleed,
+                "vocal_projection_debleed": vocal_projection_debleed,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
                 "delivery_allowed": False,
@@ -1086,6 +1213,7 @@ def execute_recipe_candidate(
                 "reconstruction": reconstruction,
                 "reconstruction_repair": reconstruction_repair,
                 "minus_vocal_debleed": minus_vocal_debleed,
+                "vocal_projection_debleed": vocal_projection_debleed,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
             },
@@ -1110,6 +1238,7 @@ def execute_recipe_candidate(
             "reconstruction": reconstruction,
             "reconstruction_repair": reconstruction_repair,
             "minus_vocal_debleed": minus_vocal_debleed,
+            "vocal_projection_debleed": vocal_projection_debleed,
             "target_specific_composition": target_specific_composition,
             "contamination_score": score,
             "next_action": next_action,

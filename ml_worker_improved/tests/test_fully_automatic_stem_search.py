@@ -171,6 +171,7 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     assert all("contamination_checks" not in candidate for candidate in recipe["candidates"])
     assert len(recipe["candidates"]) == 10
     assert any(candidate.get("minus_vocal_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
+    assert any(candidate.get("vocal_projection_debleed", {}).get("strength") == 1.0 for candidate in recipe["candidates"])
     assert any(
         "--residual-correction-stem" in route["command_template"]
         for candidate in recipe["candidates"]
@@ -939,6 +940,68 @@ def test_minus_vocal_debleed_does_not_publish_without_full_matrix_proof(tmp_path
     assert candidate["minus_vocal_debleed"]["moved_rms"] > 0.0
     assert candidate["reconstruction"]["ok"] is True
     assert candidate["contamination_score"]["verdict"] == "blocked_unknown"
+
+
+def test_vocal_projection_debleed_moves_correlated_vocal_leak_back_to_vocals(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, seconds=0.5, amp=0.04),
+        "drums": sine(110.0, seconds=0.5, amp=0.12),
+        "bass": sine(220.0, seconds=0.5, amp=0.08),
+        "guitar": sine(330.0, seconds=0.5, amp=0.06),
+        "piano": sine(440.0, seconds=0.5, amp=0.05),
+        "other": sine(550.0, seconds=0.5, amp=0.03),
+    }
+    drum_leak = 0.3 * source_audio["vocals"]
+    guitar_leak = 0.2 * source_audio["vocals"]
+    mix = write_wav(tmp_path / "mix.wav", sum(source_audio.values()))
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-projection-debleed", "{window_mix}"],
+                        "vocal_projection_debleed": {
+                            "strength": 1.0,
+                            "target_stems": ["drums", "guitar"],
+                        },
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        sf.write(stems_dir / "vocals.flac", (source_audio["vocals"] - drum_leak - guitar_leak)[: len(window_audio)], mix_rate)
+        sf.write(stems_dir / "drums.flac", (source_audio["drums"] + drum_leak)[: len(window_audio)], mix_rate)
+        sf.write(stems_dir / "bass.flac", source_audio["bass"][: len(window_audio)], mix_rate)
+        sf.write(stems_dir / "guitar.flac", (source_audio["guitar"] + guitar_leak)[: len(window_audio)], mix_rate)
+        sf.write(stems_dir / "piano.flac", source_audio["piano"][: len(window_audio)], mix_rate)
+        sf.write(stems_dir / "other.flac", source_audio["other"][: len(window_audio)], mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "auto_accept"
+    assert candidate["vocal_projection_debleed"]["applied"] is True
+    assert candidate["vocal_projection_debleed"]["per_stem"]["drums"]["projection_coeff"] == pytest.approx(0.6, abs=0.03)
+    assert candidate["vocal_projection_debleed"]["per_stem"]["guitar"]["projection_coeff"] == pytest.approx(0.4, abs=0.03)
+    assert candidate["reconstruction"]["ok"] is True
 
 
 def test_recipe_candidate_missing_stem_blocks_candidate(tmp_path: Path) -> None:
