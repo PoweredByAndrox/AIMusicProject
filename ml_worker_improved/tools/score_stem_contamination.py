@@ -74,6 +74,110 @@ def _no_reference_vocal_in_minus_score(
     return verdict, leak_audio, leak_dbfs
 
 
+def _bass_in_drums_acoustic_evidence(leak_audio: np.ndarray, sample_rate: int) -> dict[str, Any]:
+    mono = np.asarray(leak_audio, dtype=np.float32)
+    if mono.ndim == 2:
+        mono = np.mean(mono, axis=1).astype(np.float32)
+    if mono.size <= 1:
+        return {
+            "bass_like_sustained": False,
+            "bass_low_active_ratio": 0.0,
+            "bass_low_peak_share": 0.0,
+            "bass_low_transient_ratio": 0.0,
+            "bass_low_envelope_cv": 0.0,
+            "bass_low_crest_db": 0.0,
+        }
+    frame = max(128, int(sample_rate * 0.05))
+    hop = max(1, frame // 2)
+    if mono.size < frame:
+        envelope = np.asarray([_rms(mono)], dtype=np.float32)
+    else:
+        envelope = np.asarray(
+            [_rms(mono[start : start + frame]) for start in range(0, len(mono) - frame + 1, hop)],
+            dtype=np.float32,
+        )
+    envelope_mean = float(np.mean(envelope) + 1.0e-12)
+    envelope_max = float(np.max(envelope) + 1.0e-12)
+    envelope_cv = float(np.std(envelope) / envelope_mean)
+    transient_ratio = float(np.mean(np.abs(np.diff(envelope))) / envelope_mean) if len(envelope) > 1 else 0.0
+    active_ratio = float(np.mean(envelope > 0.3 * envelope_max))
+    spectrum = np.abs(np.fft.rfft(mono * np.hanning(len(mono)))).astype(np.float64)
+    freqs = np.fft.rfftfreq(len(mono), d=1.0 / float(sample_rate))
+    band = spectrum[(freqs >= 40.0) & (freqs <= 300.0)]
+    peak_share = float(np.max(band) / (np.sum(band) + 1.0e-12)) if band.size else 0.0
+    crest_db = _dbfs(float(np.max(np.abs(mono)))) - _dbfs(_rms(mono))
+    bass_like_sustained = active_ratio >= 0.80 and peak_share >= 0.08 and transient_ratio <= 0.40
+    return {
+        "bass_like_sustained": bool(bass_like_sustained),
+        "bass_low_active_ratio": round(active_ratio, 6),
+        "bass_low_peak_share": round(peak_share, 6),
+        "bass_low_transient_ratio": round(transient_ratio, 6),
+        "bass_low_envelope_cv": round(envelope_cv, 6),
+        "bass_low_crest_db": round(crest_db, 6),
+    }
+
+
+def _sustained_melodic_in_drums_acoustic_evidence(leak_audio: np.ndarray, sample_rate: int) -> dict[str, Any]:
+    mono = np.asarray(leak_audio, dtype=np.float32)
+    if mono.ndim == 2:
+        mono = np.mean(mono, axis=1).astype(np.float32)
+    if mono.size <= 1:
+        return {
+            "melodic_like_sustained": False,
+            "melodic_active_ratio": 0.0,
+            "melodic_peak_share": 0.0,
+            "melodic_transient_ratio": 0.0,
+            "melodic_envelope_cv": 0.0,
+            "melodic_crest_db": 0.0,
+        }
+    frame = max(128, int(sample_rate * 0.05))
+    hop = max(1, frame // 2)
+    if mono.size < frame:
+        envelope = np.asarray([_rms(mono)], dtype=np.float32)
+    else:
+        envelope = np.asarray(
+            [_rms(mono[start : start + frame]) for start in range(0, len(mono) - frame + 1, hop)],
+            dtype=np.float32,
+        )
+    envelope_mean = float(np.mean(envelope) + 1.0e-12)
+    envelope_max = float(np.max(envelope) + 1.0e-12)
+    envelope_cv = float(np.std(envelope) / envelope_mean)
+    transient_ratio = float(np.mean(np.abs(np.diff(envelope))) / envelope_mean) if len(envelope) > 1 else 0.0
+    active_ratio = float(np.mean(envelope > 0.3 * envelope_max))
+    spectrum = np.abs(np.fft.rfft(mono * np.hanning(len(mono)))).astype(np.float64)
+    peak_share = float(np.max(spectrum) / (np.sum(spectrum) + 1.0e-12)) if spectrum.size else 0.0
+    crest_db = _dbfs(float(np.max(np.abs(mono)))) - _dbfs(_rms(mono))
+    melodic_like_sustained = active_ratio >= 0.70 and peak_share >= 0.025 and transient_ratio <= 0.35
+    return {
+        "melodic_like_sustained": bool(melodic_like_sustained),
+        "melodic_active_ratio": round(active_ratio, 6),
+        "melodic_peak_share": round(peak_share, 6),
+        "melodic_transient_ratio": round(transient_ratio, 6),
+        "melodic_envelope_cv": round(envelope_cv, 6),
+        "melodic_crest_db": round(crest_db, 6),
+    }
+
+
+def _no_reference_acoustic_leak_failed(
+    *,
+    tested_stem: str,
+    foreign_source: str,
+    leak_audio: np.ndarray,
+    leak_dbfs: float,
+    sample_rate: int,
+    detection_floor_db: float,
+) -> tuple[bool, dict[str, Any]]:
+    if leak_dbfs <= detection_floor_db:
+        return False, {}
+    if tested_stem == "drums" and foreign_source == "bass":
+        evidence = _bass_in_drums_acoustic_evidence(leak_audio, sample_rate)
+        return bool(evidence["bass_like_sustained"]), evidence
+    if tested_stem == "drums" and foreign_source in {"guitar", "piano", "other"}:
+        evidence = _sustained_melodic_in_drums_acoustic_evidence(leak_audio, sample_rate)
+        return bool(evidence["melodic_like_sustained"]), evidence
+    return True, {}
+
+
 def _blocked_unknown_result(
     *,
     tested_stem: str,
@@ -169,7 +273,14 @@ def score_stem_contamination(
             probability = float(prediction["probability"])
             threshold = float(prediction["threshold"])
             probability_failed = probability >= threshold
-            acoustic_leak_failed = leak_dbfs > detection_floor_db
+            acoustic_leak_failed, acoustic_evidence = _no_reference_acoustic_leak_failed(
+                tested_stem=tested_stem,
+                foreign_source=foreign_source,
+                leak_audio=leak_audio,
+                leak_dbfs=leak_dbfs,
+                sample_rate=stem_rate,
+                detection_floor_db=detection_floor_db,
+            )
             verdict = "fail" if probability_failed and acoustic_leak_failed else "pass"
             return _write_no_reference_result(
                 tested_stem=tested_stem,
@@ -188,6 +299,7 @@ def score_stem_contamination(
                     "probability_threshold": threshold,
                     "probability_failed": probability_failed,
                     "acoustic_leak_failed": acoustic_leak_failed,
+                    "acoustic_evidence": acoustic_evidence,
                     "model_id": prediction["model_id"],
                     "model_manifest": prediction["model_manifest"],
                     "features": prediction["features"],

@@ -51,6 +51,47 @@ def kick_drum_like(seconds: float = 0.75) -> np.ndarray:
     return audio.astype(np.float32)
 
 
+def boomy_kick_drum_like(seconds: float = 0.75) -> np.ndarray:
+    frames = int(SAMPLE_RATE * seconds)
+    audio = np.zeros(frames, dtype=np.float32)
+    pulse_spacing = int(SAMPLE_RATE * 0.19)
+    decay_len = int(SAMPLE_RATE * 0.16)
+    t = np.arange(decay_len, dtype=np.float32) / float(SAMPLE_RATE)
+    pitch = 92.0 - 36.0 * np.minimum(t / 0.11, 1.0)
+    phase = np.cumsum(2.0 * math.pi * pitch / float(SAMPLE_RATE)).astype(np.float32)
+    kick = 0.42 * np.sin(phase) * np.exp(-t * 18.0)
+    click = np.zeros(decay_len, dtype=np.float32)
+    click[: max(1, int(SAMPLE_RATE * 0.003))] = 0.24
+    for start in range(0, frames, pulse_spacing):
+        end = min(frames, start + decay_len)
+        audio[start:end] += (kick[: end - start] + click[: end - start]).astype(np.float32)
+    return audio.astype(np.float32)
+
+
+def sustained_bass_tone(seconds: float = 0.75) -> np.ndarray:
+    t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
+    return (0.16 * np.sin(2.0 * math.pi * 74.0 * t)).astype(np.float32)
+
+
+def cymbal_like_drums(seconds: float = 0.75) -> np.ndarray:
+    frames = int(SAMPLE_RATE * seconds)
+    audio = np.zeros(frames, dtype=np.float32)
+    rng = np.random.default_rng(4242)
+    pulse_spacing = int(SAMPLE_RATE * 0.16)
+    decay_len = int(SAMPLE_RATE * 0.05)
+    decay = np.exp(-np.arange(decay_len, dtype=np.float32) / float(SAMPLE_RATE * 0.008))
+    for start in range(0, frames, pulse_spacing):
+        end = min(frames, start + decay_len)
+        noise = rng.normal(0.0, 0.25, end - start).astype(np.float32)
+        audio[start:end] += noise * decay[: end - start]
+    return audio.astype(np.float32)
+
+
+def sustained_mid_tone(freq: float, seconds: float = 0.75) -> np.ndarray:
+    t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
+    return (0.12 * np.sin(2.0 * math.pi * freq * t)).astype(np.float32)
+
+
 def write_wav(path: Path, audio: np.ndarray) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(path, audio.astype(np.float32), SAMPLE_RATE)
@@ -582,3 +623,96 @@ def test_full_matrix_detector_treats_clean_kick_drum_as_negative_for_bass(tmp_pa
 
     assert result["verdict"] == "pass", result
     assert result["leak_audio"] == ""
+
+
+def test_full_matrix_detector_separates_boomy_kick_from_sustained_bass_leak(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    clean_pairs_manifest = build_procedural_stem_clean_pairs(
+        output_dir=tmp_path / "pairs",
+        sample_rate=SAMPLE_RATE,
+        duration_sec=0.75,
+        examples_per_pair=10,
+    )
+    rows_path = build_dataset_from_manifest(clean_pairs_manifest, tmp_path / "dataset", contamination_db=-24.0)
+    model_dir = tmp_path / "boom_model"
+    train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=220,
+        hidden_size=24,
+        min_positive_rows=10,
+    )
+
+    clean_result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "boomy_clean_kick.flac", boomy_kick_drum_like()),
+        tested_stem="drums",
+        foreign_source="bass",
+        output_dir=tmp_path / "clean_boom_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+    dirty_result = score_stem_contamination(
+        tested_stem_path=write_wav(
+            tmp_path / "boomy_kick_with_sustained_bass.flac",
+            boomy_kick_drum_like() + sustained_bass_tone(),
+        ),
+        tested_stem="drums",
+        foreign_source="bass",
+        output_dir=tmp_path / "dirty_boom_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    assert clean_result["verdict"] == "pass", clean_result
+    assert clean_result["leak_audio"] == ""
+    assert dirty_result["verdict"] == "fail", dirty_result
+    assert dirty_result["leak_audio"]
+
+
+def test_full_matrix_detector_separates_cymbal_drums_from_sustained_melodic_leak(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    clean_pairs_manifest = build_procedural_stem_clean_pairs(
+        output_dir=tmp_path / "pairs",
+        sample_rate=SAMPLE_RATE,
+        duration_sec=0.75,
+        examples_per_pair=10,
+    )
+    rows_path = build_dataset_from_manifest(clean_pairs_manifest, tmp_path / "dataset", contamination_db=-24.0)
+    model_dir = tmp_path / "cymbal_model"
+    train_stem_contamination_detector(
+        rows_jsonl=rows_path,
+        output_dir=model_dir,
+        device="cpu",
+        epochs=220,
+        hidden_size=24,
+        min_positive_rows=10,
+    )
+
+    clean_path = write_wav(tmp_path / "cymbal_clean_drums.flac", cymbal_like_drums())
+    for foreign_source in ("guitar", "piano", "other"):
+        clean_result = score_stem_contamination(
+            tested_stem_path=clean_path,
+            tested_stem="drums",
+            foreign_source=foreign_source,
+            output_dir=tmp_path / "clean_cymbal_score",
+            foreign_reference_path=None,
+            model_manifest_path=model_dir / "manifest.json",
+        )
+        assert clean_result["verdict"] == "pass", clean_result
+        assert clean_result["leak_audio"] == ""
+
+    dirty_result = score_stem_contamination(
+        tested_stem_path=write_wav(
+            tmp_path / "cymbal_with_sustained_guitar.flac",
+            cymbal_like_drums() + sustained_mid_tone(440.0),
+        ),
+        tested_stem="drums",
+        foreign_source="guitar",
+        output_dir=tmp_path / "dirty_cymbal_score",
+        foreign_reference_path=None,
+        model_manifest_path=model_dir / "manifest.json",
+    )
+
+    assert dirty_result["verdict"] == "fail", dirty_result
+    assert dirty_result["leak_audio"]

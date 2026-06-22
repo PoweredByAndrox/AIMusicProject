@@ -34,6 +34,7 @@ CommandRunner = Callable[[list[str], int], None]
 TARGET_SPECIFIC_ROLE_OUTPUTS = {
     "six_stems": tuple(STEMS),
     "vocals": ("vocals",),
+    "four_stem_non_vocal": ("drums", "bass", "other"),
     "non_vocal_stems": tuple(NON_VOCAL_STEMS),
 }
 DEFAULT_VOCAL_ROUTE_ORDER = (
@@ -338,6 +339,28 @@ def build_default_from_scratch_recipe(
                         shifts=shifts,
                         residual_stem=residual_stem,
                     ),
+                },
+                {
+                    "role": "four_stem_non_vocal",
+                    "route_id": "scnet_xl_ihf_musdb18_non_vocal",
+                    "command_template": [
+                        "python",
+                        "tools/run_registered_non_vocal_candidate.py",
+                        "--input-audio",
+                        "{input_audio}",
+                        "--stems-dir",
+                        "{stems_dir}",
+                        "--work-dir",
+                        "{output_dir}/work",
+                        "--manifest",
+                        "{output_dir}/registered_non_vocal.json",
+                        "--model-id",
+                        "scnet_xl_ihf_musdb18",
+                        "--device",
+                        "cuda",
+                        "--timeout-sec",
+                        "900",
+                    ],
                 },
                 {
                     "role": "vocals",

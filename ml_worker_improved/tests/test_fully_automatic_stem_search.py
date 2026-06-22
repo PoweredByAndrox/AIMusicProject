@@ -173,10 +173,16 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     assert recipe["candidates"][0]["candidate_id"] == "c001"
     assert recipe["candidates"][0]["route_family"] == "target_specific_demucs_6s_audio_separator_bs_roformer_vocals"
     assert recipe["candidates"][0]["required_stems"] == list(STEMS)
-    assert [route["role"] for route in recipe["candidates"][0]["target_specific_commands"]] == ["six_stems", "vocals"]
+    assert [route["role"] for route in recipe["candidates"][0]["target_specific_commands"]] == [
+        "six_stems",
+        "four_stem_non_vocal",
+        "vocals",
+    ]
     first_commands = recipe["candidates"][0]["target_specific_commands"]
     assert "run_demucs_six_stem_candidate.py" in " ".join(first_commands[0]["command_template"])
-    assert "export_audio_separator_vocal_full.py" in " ".join(first_commands[1]["command_template"])
+    assert "run_registered_non_vocal_candidate.py" in " ".join(first_commands[1]["command_template"])
+    assert "export_audio_separator_vocal_full.py" in " ".join(first_commands[2]["command_template"])
+    assert first_commands[1]["command_template"][first_commands[1]["command_template"].index("--model-id") + 1] == "scnet_xl_ihf_musdb18"
     assert [candidate["vocal_route_id"] for candidate in recipe["candidates"][:2]] == [
         "audio_separator_bs_roformer_vocals",
         "mdx23c_vocals",
@@ -193,6 +199,11 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     assert any(
         "run_registered_six_stem_candidate.py" in " ".join(candidate.get("command_template") or [])
         for candidate in recipe["candidates"]
+    )
+    assert any(
+        route.get("role") == "four_stem_non_vocal"
+        for candidate in recipe["candidates"]
+        for route in candidate.get("target_specific_commands", [])
     )
     c009 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c009")
     c010 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c010")
@@ -214,6 +225,45 @@ def test_default_from_scratch_recipe_blocks_without_specialized_vocal_route() ->
     assert recipe["available"] is False
     assert recipe["unavailable_reason"] == "missing_target_specific_vocal_route"
     assert recipe["candidates"] == []
+
+
+def test_four_stem_non_vocal_role_overwrites_only_drums_bass_other(tmp_path: Path) -> None:
+    role_dir = tmp_path / "role" / "stems"
+    final_dir = tmp_path / "final"
+    original = {
+        "vocals": sine(880.0, amp=0.02),
+        "drums": sine(100.0, amp=0.03),
+        "bass": sine(140.0, amp=0.04),
+        "guitar": sine(330.0, amp=0.05),
+        "piano": sine(440.0, amp=0.06),
+        "other": sine(550.0, amp=0.07),
+    }
+    replacement = {
+        "drums": sine(111.0, amp=0.11),
+        "bass": sine(155.0, amp=0.12),
+        "other": sine(600.0, amp=0.13),
+    }
+    for stem, audio in original.items():
+        write_wav(final_dir / f"{stem}.flac", audio)
+    for stem, audio in replacement.items():
+        write_wav(role_dir / f"{stem}.flac", audio)
+
+    blockers = _copy_target_specific_outputs(
+        role="four_stem_non_vocal",
+        role_stems_dir=role_dir,
+        final_stems_dir=final_dir,
+        target_sample_rate=SAMPLE_RATE,
+        target_sample_count=len(next(iter(original.values()))),
+        target_channel_count=1,
+    )
+
+    assert blockers == []
+    for stem, audio in replacement.items():
+        actual, _ = sf.read(final_dir / f"{stem}.flac", dtype="float32", always_2d=False)
+        np.testing.assert_allclose(actual, audio, atol=2e-4)
+    for stem in ("vocals", "guitar", "piano"):
+        actual, _ = sf.read(final_dir / f"{stem}.flac", dtype="float32", always_2d=False)
+        np.testing.assert_allclose(actual, original[stem], atol=2e-4)
 
 
 def test_contamination_model_manifest_applies_to_full_matrix() -> None:
