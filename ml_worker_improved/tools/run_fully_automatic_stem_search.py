@@ -412,6 +412,7 @@ def build_default_from_scratch_recipe(
                 "low_hz": 700.0,
                 "high_hz": 1200.0,
                 "target_stems": list(NON_VOCAL_STEMS),
+                "passes": 2 if candidate_id == "c010" else 1,
             }
             candidate["vocal_projection_debleed"] = {
                 "strength": debleed_strength,
@@ -477,6 +478,7 @@ def build_default_from_scratch_recipe(
                 "low_hz": 700.0,
                 "high_hz": 1200.0,
                 "target_stems": list(NON_VOCAL_STEMS),
+                "passes": 1,
             }
             candidate["vocal_projection_debleed"] = {
                 "strength": debleed_strength,
@@ -522,6 +524,7 @@ def build_default_from_scratch_recipe(
                 "low_hz": 700.0,
                 "high_hz": 1200.0,
                 "target_stems": list(NON_VOCAL_STEMS),
+                "passes": 2 if candidate_id == "c010" else 1,
             }
             candidate["vocal_projection_debleed"] = {
                 "strength": debleed_strength,
@@ -579,6 +582,13 @@ def build_default_from_scratch_recipe(
                     "reason": "aggressive_melody_first_harmonic_bus",
                 }
             ]
+            candidate["post_minus_vocal_debleed"] = {
+                "strength": 1.0,
+                "low_hz": 700.0,
+                "high_hz": 1200.0,
+                "target_stems": list(NON_VOCAL_STEMS),
+                "passes": 1,
+            }
     if contamination_model_manifest is not None:
         recipe["contamination_model_manifest"] = str(contamination_model_manifest)
     return recipe
@@ -1000,6 +1010,10 @@ def apply_minus_vocal_debleed(
     low_hz = float(config.get("low_hz", 700.0))
     high_hz = float(config.get("high_hz", 1200.0))
     strength = float(config.get("strength", 1.0))
+    try:
+        passes = int(config.get("passes", 1))
+    except (TypeError, ValueError):
+        passes = 0
     target_stems_raw = config.get("target_stems")
     target_stems = (
         [str(stem) for stem in target_stems_raw]
@@ -1011,6 +1025,8 @@ def apply_minus_vocal_debleed(
         blockers.append("invalid_debleed_strength")
     if low_hz <= 0.0 or high_hz <= low_hz:
         blockers.append("invalid_debleed_band")
+    if passes < 1 or passes > 4:
+        blockers.append("invalid_debleed_passes")
     invalid_targets = [stem for stem in target_stems if stem not in NON_VOCAL_STEMS]
     if invalid_targets:
         blockers.extend(f"invalid_debleed_target:{stem}" for stem in invalid_targets)
@@ -1028,6 +1044,7 @@ def apply_minus_vocal_debleed(
     vocals_audio, sample_rate = _read_audio(Path(str(vocals_path)))
     stem_audios: dict[str, np.ndarray] = {}
     moved_total = np.zeros_like(vocals_audio, dtype=np.float32)
+    moved_by_stem: dict[str, np.ndarray] = {}
     per_stem: dict[str, dict[str, float]] = {}
     for stem in target_stems:
         stem_path = stem_paths.get(stem)
@@ -1041,7 +1058,8 @@ def apply_minus_vocal_debleed(
         if stem_audio.shape != vocals_audio.shape:
             blockers.append(f"shape_mismatch:{stem}:{stem_audio.shape}!={vocals_audio.shape}")
             continue
-        stem_audios[stem] = stem_audio
+        stem_audios[stem] = stem_audio.astype(np.float32)
+        moved_by_stem[stem] = np.zeros_like(stem_audio, dtype=np.float32)
     if blockers:
         return {
             "applied": False,
@@ -1050,10 +1068,15 @@ def apply_minus_vocal_debleed(
             "blockers": blockers,
         }
 
-    for stem, stem_audio in stem_audios.items():
-        moved = band_limited_audio(stem_audio, sample_rate, low_hz, high_hz) * np.float32(strength)
-        moved_total = moved_total + moved
-        per_stem[stem] = {"moved_rms": round(_rms(moved), 8)}
+    for _pass_index in range(passes):
+        pass_moved_total = np.zeros_like(vocals_audio, dtype=np.float32)
+        for stem, stem_audio in list(stem_audios.items()):
+            moved = band_limited_audio(stem_audio, sample_rate, low_hz, high_hz) * np.float32(strength)
+            stem_audios[stem] = (stem_audio.astype(np.float32) - moved).astype(np.float32)
+            moved_by_stem[stem] = moved_by_stem[stem] + moved
+            pass_moved_total = pass_moved_total + moved
+        moved_total = moved_total + pass_moved_total
+        vocals_audio = (vocals_audio.astype(np.float32) + pass_moved_total).astype(np.float32)
 
     moved_rms = _rms(moved_total)
     if moved_rms <= 1e-12:
@@ -1063,17 +1086,22 @@ def apply_minus_vocal_debleed(
             "reason": "debleed_floor",
             "target_stems": target_stems,
             "moved_rms": 0.0,
+            "passes": passes,
         }
     for stem, stem_audio in stem_audios.items():
-        moved = band_limited_audio(stem_audio, sample_rate, low_hz, high_hz) * np.float32(strength)
-        _write_audio(Path(str(stem_paths[stem])), stem_audio.astype(np.float32) - moved, sample_rate)
-    _write_audio(Path(str(vocals_path)), vocals_audio.astype(np.float32) + moved_total, sample_rate)
+        _write_audio(Path(str(stem_paths[stem])), stem_audio.astype(np.float32), sample_rate)
+        per_stem[stem] = {
+            "moved_rms": round(_rms(moved_by_stem[stem]), 8),
+            "passes": passes,
+        }
+    _write_audio(Path(str(vocals_path)), vocals_audio.astype(np.float32), sample_rate)
     return {
         "applied": True,
         "repair_owner": "runner_minus_vocal_debleed_v1",
         "low_hz": low_hz,
         "high_hz": high_hz,
         "strength": strength,
+        "passes": passes,
         "target_stems": target_stems,
         "moved_rms": round(moved_rms, 8),
         "per_stem": per_stem,
@@ -1538,6 +1566,46 @@ def execute_recipe_candidate(
             _write_json(candidate_dir / "manifest.json", manifest)
             return manifest
 
+    post_debleed_config = candidate.get("post_minus_vocal_debleed")
+    post_minus_vocal_debleed: dict[str, Any] | None = None
+    if isinstance(post_debleed_config, dict):
+        post_minus_vocal_debleed = apply_minus_vocal_debleed(stem_paths=stem_paths, config=post_debleed_config)
+        if post_minus_vocal_debleed.get("blockers"):
+            next_action = choose_next_action(
+                {
+                    "verdict": "blocked_unknown",
+                    "reason": ",".join(post_minus_vocal_debleed.get("blockers") or []),
+                }
+            )
+            manifest.update(
+                {
+                    "execution_status": "completed",
+                    "candidate_untrusted": True,
+                    "verdict": "blocked_unknown",
+                    "stem_paths": stem_paths,
+                    "missing_stems": [],
+                    "reconstruction_repair": reconstruction_repair,
+                    "minus_vocal_debleed": minus_vocal_debleed,
+                    "vocal_projection_debleed": vocal_projection_debleed,
+                    "stem_merges": stem_merges,
+                    "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                    "target_specific_composition": target_specific_composition,
+                    "next_action": next_action,
+                    "delivery_allowed": False,
+                    "presentation_status": "blocked_from_listen_pack",
+                }
+            )
+            _write_json(
+                candidate_dir / "score.json",
+                {
+                    "verdict": "blocked_unknown",
+                    "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                    "next_action": next_action,
+                },
+            )
+            _write_json(candidate_dir / "manifest.json", manifest)
+            return manifest
+
     minus_path = build_minus_from_non_vocal_stems({stem: Path(path) for stem, path in stem_paths.items()}, stems_dir / "minus.flac")
     stem_paths["minus"] = str(minus_path)
     reconstruction = validate_mix_conservation(mix_path=Path(str(window["mix_path"])), stem_paths=stem_paths)
@@ -1555,6 +1623,7 @@ def execute_recipe_candidate(
                 "minus_vocal_debleed": minus_vocal_debleed,
                 "vocal_projection_debleed": vocal_projection_debleed,
                 "stem_merges": stem_merges,
+                "post_minus_vocal_debleed": post_minus_vocal_debleed,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
                 "delivery_allowed": False,
@@ -1570,6 +1639,7 @@ def execute_recipe_candidate(
                 "minus_vocal_debleed": minus_vocal_debleed,
                 "vocal_projection_debleed": vocal_projection_debleed,
                 "stem_merges": stem_merges,
+                "post_minus_vocal_debleed": post_minus_vocal_debleed,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
             },
@@ -1596,6 +1666,7 @@ def execute_recipe_candidate(
             "minus_vocal_debleed": minus_vocal_debleed,
             "vocal_projection_debleed": vocal_projection_debleed,
             "stem_merges": stem_merges,
+            "post_minus_vocal_debleed": post_minus_vocal_debleed,
             "target_specific_composition": target_specific_composition,
             "contamination_score": score,
             "next_action": next_action,

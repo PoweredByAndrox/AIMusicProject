@@ -13,6 +13,7 @@ from tools.run_fully_automatic_stem_search import (
     _candidate_contamination_checks,
     _copy_target_specific_outputs,
     _discover_default_contamination_model_manifest,
+    apply_minus_vocal_debleed,
     apply_stem_merges,
     build_candidate_manifest,
     build_default_from_scratch_recipe,
@@ -27,6 +28,7 @@ from tools.stem_contamination_common import (
     missing_required_stems,
     validate_no_artifact_rag_output,
 )
+from tools.stem_contamination_model import band_limited_audio
 from tools.train_stem_contamination_detector import train_stem_contamination_detector
 
 
@@ -243,6 +245,8 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     assert c010["route_family"] == "registered_six_stem_hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first"
     assert c010["registered_model_id"] == "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first"
     assert c010["conservation_repair_stem"] == "guitar"
+    assert c010["minus_vocal_debleed"]["passes"] == 2
+    assert c010["post_minus_vocal_debleed"]["passes"] == 1
     assert c010["stem_merges"] == [
         {
             "source_stem": "other",
@@ -1150,6 +1154,127 @@ def test_minus_vocal_debleed_does_not_publish_without_full_matrix_proof(tmp_path
     assert candidate["minus_vocal_debleed"]["moved_rms"] > 0.0
     assert candidate["reconstruction"]["ok"] is True
     assert candidate["contamination_score"]["verdict"] == "blocked_unknown"
+
+
+def test_minus_vocal_debleed_passes_iteratively_reduce_vocal_band(tmp_path: Path) -> None:
+    vocals = sine(880.0, seconds=0.5, amp=0.03)
+    drums = sine(110.0, seconds=0.5, amp=0.08)
+    bass = sine(55.0, seconds=0.5, amp=0.04)
+    vocal_residue = sine(900.0, seconds=0.5, amp=0.05)
+    paths = {
+        "vocals": str(write_wav(tmp_path / "vocals.flac", vocals)),
+        "drums": str(write_wav(tmp_path / "drums.flac", drums + vocal_residue)),
+        "bass": str(write_wav(tmp_path / "bass.flac", bass)),
+    }
+    for stem in ("guitar", "piano", "other"):
+        paths[stem] = str(write_wav(tmp_path / f"{stem}.flac", np.zeros_like(vocals, dtype=np.float32)))
+
+    result = apply_minus_vocal_debleed(
+        stem_paths=paths,
+        config={
+            "strength": 1.0,
+            "low_hz": 700.0,
+            "high_hz": 1200.0,
+            "target_stems": ["drums"],
+            "passes": 2,
+        },
+    )
+
+    cleaned_drums, _ = sf.read(paths["drums"], dtype="float32", always_2d=False)
+    before_band_rms = np.sqrt(np.mean(np.square(vocal_residue.astype(np.float64))))
+    after_band_input = cleaned_drums[:, None] if cleaned_drums.ndim == 1 else cleaned_drums
+    after_band = band_limited_audio(after_band_input, SAMPLE_RATE, 700.0, 1200.0)
+    after_band_rms = np.sqrt(np.mean(np.square(after_band.astype(np.float64))))
+    assert result["applied"] is True
+    assert result["passes"] == 2
+    assert result["per_stem"]["drums"]["passes"] == 2
+    assert after_band_rms < before_band_rms * 0.05
+
+
+def test_minus_vocal_debleed_invalid_passes_blocks_fail_closed(tmp_path: Path) -> None:
+    audio = sine(880.0, seconds=0.25, amp=0.03)
+    paths = {
+        "vocals": str(write_wav(tmp_path / "vocals.flac", audio)),
+        "drums": str(write_wav(tmp_path / "drums.flac", audio)),
+    }
+
+    result = apply_minus_vocal_debleed(
+        stem_paths=paths,
+        config={
+            "strength": 1.0,
+            "low_hz": 700.0,
+            "high_hz": 1200.0,
+            "target_stems": ["drums"],
+            "passes": 0,
+        },
+    )
+
+    assert result["applied"] is False
+    assert result["reason"] == "invalid_debleed_config"
+    assert "invalid_debleed_passes" in result["blockers"]
+
+
+def test_recipe_candidate_applies_post_debleed_before_rebuilt_minus_scoring(tmp_path: Path) -> None:
+    vocal_residue = sine(900.0, seconds=0.25, amp=0.05)
+    drums = sine(110.0, seconds=0.25, amp=0.08)
+    source_audio = {
+        "vocals": vocal_residue,
+        "drums": drums,
+        "bass": np.zeros_like(vocal_residue, dtype=np.float32),
+        "guitar": np.zeros_like(vocal_residue, dtype=np.float32),
+        "piano": np.zeros_like(vocal_residue, dtype=np.float32),
+        "other": np.zeros_like(vocal_residue, dtype=np.float32),
+    }
+    mix = write_wav(tmp_path / "mix.wav", drums + vocal_residue)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "command_template": ["fixture-write-post-debleedable", "{window_mix}"],
+                        "post_minus_vocal_debleed": {
+                            "strength": 1.0,
+                            "low_hz": 700.0,
+                            "high_hz": 1200.0,
+                            "target_stems": ["drums"],
+                            "passes": 1,
+                        },
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        sf.write(stems_dir / "vocals.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+        sf.write(stems_dir / "drums.flac", (drums + vocal_residue)[: len(window_audio)], mix_rate)
+        for stem in ("bass", "guitar", "piano", "other"):
+            sf.write(stems_dir / f"{stem}.flac", np.zeros_like(window_audio, dtype=np.float32), mix_rate)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    assert result["verdict"] == "auto_accept"
+    assert candidate["post_minus_vocal_debleed"]["applied"] is True
+    assert candidate["post_minus_vocal_debleed"]["passes"] == 1
+    assert candidate["reconstruction"]["ok"] is True
+    assert candidate["contamination_score"]["verdict"] == "auto_accept"
 
 
 def test_vocal_projection_debleed_moves_correlated_vocal_leak_back_to_vocals(tmp_path: Path) -> None:
