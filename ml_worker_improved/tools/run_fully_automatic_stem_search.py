@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 import time
@@ -31,6 +33,10 @@ from tools.stem_contamination_model import band_limited_audio
 
 
 CommandRunner = Callable[[list[str], int], None]
+DEFAULT_CONTAMINATION_MODEL_SEARCH_ROOTS = (
+    Path("/host_artifacts/stem_eval"),
+    Path("artifacts/stem_eval"),
+)
 TARGET_SPECIFIC_ROLE_OUTPUTS = {
     "six_stems": tuple(STEMS),
     "vocals": ("vocals",),
@@ -188,6 +194,36 @@ def _available_default_vocal_routes(available_vocal_routes: tuple[str, ...] | No
     return tuple(route for route in DEFAULT_VOCAL_ROUTE_ORDER if _default_vocal_route_available(route))
 
 
+def _contamination_manifest_sort_key(path: Path) -> tuple[int, float, str]:
+    cycle_name = path.parent.parent.name
+    match = re.search(r"(\d+)$", cycle_name)
+    cycle_number = int(match.group(1)) if match else -1
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return cycle_number, mtime, str(path)
+
+
+def _discover_default_contamination_model_manifest(
+    search_roots: tuple[Path, ...] = DEFAULT_CONTAMINATION_MODEL_SEARCH_ROOTS,
+) -> Path | None:
+    env_path = os.environ.get("STEM_CONTAMINATION_MODEL_MANIFEST", "").strip()
+    if env_path:
+        path = Path(env_path)
+        if path.is_file():
+            return path
+
+    candidates: list[Path] = []
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        candidates.extend(path for path in root.glob("cycle*/model/manifest.json") if path.is_file())
+    if not candidates:
+        return None
+    return sorted(candidates, key=_contamination_manifest_sort_key)[-1]
+
+
 def _demucs_six_stem_command_template(
     *,
     segment: str,
@@ -278,6 +314,7 @@ def build_default_from_scratch_recipe(
     *,
     demucs_available: bool | None = None,
     available_vocal_routes: tuple[str, ...] | None = None,
+    contamination_model_manifest: Path | str | None = None,
 ) -> dict[str, Any]:
     if demucs_available is None:
         demucs_available = shutil.which("demucs") is not None
@@ -451,12 +488,13 @@ def build_default_from_scratch_recipe(
         candidate_id: str,
         model_id: str,
         debleed_strength: float,
+        conservation_repair_stem: str = "other",
     ) -> dict[str, Any]:
         candidate = {
             "candidate_id": candidate_id,
             "route_family": f"registered_six_stem_{model_id}",
             "registered_model_id": model_id,
-            "conservation_repair_stem": "other",
+            "conservation_repair_stem": conservation_repair_stem,
             "max_conservation_repair_ratio": 0.30,
             "required_stems": list(STEMS),
             "command_template": [
@@ -491,7 +529,7 @@ def build_default_from_scratch_recipe(
             }
         return candidate
 
-    return {
+    recipe = {
         "schema": "stem_search_recipe.v1",
         "recipe_source": "from_scratch_default",
         "available": True,
@@ -522,14 +560,28 @@ def build_default_from_scratch_recipe(
             if spec[0] == "c009"
             else registered_six_stem_candidate(
                 spec[0],
-                "hybrid_htdemucs_ft_bs_roformer_6s",
+                "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first",
                 spec[5],
+                "guitar",
             )
             if spec[0] == "c010"
             else demucs_candidate(*spec)
             for spec in variant_specs
         ],
     }
+    for candidate in recipe["candidates"]:
+        if candidate["candidate_id"] == "c010":
+            candidate["stem_merges"] = [
+                {
+                    "source_stem": "other",
+                    "target_stem": "guitar",
+                    "mode": "move",
+                    "reason": "aggressive_melody_first_harmonic_bus",
+                }
+            ]
+    if contamination_model_manifest is not None:
+        recipe["contamination_model_manifest"] = str(contamination_model_manifest)
+    return recipe
 
 
 def split_audio_windows(mix_path: Path, output_dir: Path, window_sec: float) -> list[dict[str, Any]]:
@@ -877,6 +929,66 @@ def apply_mix_conservation_repair(
         "pre_repair_mix_rms": round(mix_rms, 8),
         "pre_repair_residual_ratio": round(residual_ratio, 8),
         "max_residual_ratio": round(float(max_residual_ratio), 8) if max_residual_ratio is not None else None,
+    }
+
+
+def apply_stem_merges(
+    *,
+    stem_paths: Mapping[str, str],
+    merge_specs: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    blocker_reasons: list[str] = []
+    operations: list[dict[str, str]] = []
+    for spec in merge_specs:
+        source_stem = str(spec.get("source_stem") or "").strip()
+        target_stem = str(spec.get("target_stem") or "").strip()
+        mode = str(spec.get("mode") or "move").strip()
+        if source_stem not in STEMS:
+            blocker_reasons.append(f"invalid_merge_source_stem:{source_stem}")
+            continue
+        if target_stem not in STEMS:
+            blocker_reasons.append(f"invalid_merge_target_stem:{target_stem}")
+            continue
+        if source_stem == target_stem:
+            blocker_reasons.append(f"invalid_merge_same_stem:{source_stem}")
+            continue
+        if mode != "move":
+            blocker_reasons.append(f"unsupported_merge_mode:{mode}")
+            continue
+        source_path = stem_paths.get(source_stem)
+        target_path = stem_paths.get(target_stem)
+        if not source_path:
+            blocker_reasons.append(f"missing_merge_source_path:{source_stem}")
+            continue
+        if not target_path:
+            blocker_reasons.append(f"missing_merge_target_path:{target_stem}")
+            continue
+        source_audio, source_rate = _read_audio(Path(source_path))
+        target_audio, target_rate = _read_audio(Path(target_path))
+        if source_rate != target_rate:
+            blocker_reasons.append(f"merge_sample_rate_mismatch:{source_stem}:{target_stem}:{source_rate}!={target_rate}")
+            continue
+        if source_audio.shape != target_audio.shape:
+            blocker_reasons.append(f"merge_shape_mismatch:{source_stem}:{target_stem}:{source_audio.shape}!={target_audio.shape}")
+            continue
+        _write_audio(Path(target_path), target_audio.astype(np.float32) + source_audio.astype(np.float32), target_rate)
+        _write_audio(Path(source_path), np.zeros_like(source_audio, dtype=np.float32), source_rate)
+        operation = {
+            "source_stem": source_stem,
+            "target_stem": target_stem,
+            "mode": mode,
+            "source_path": str(source_path),
+            "target_path": str(target_path),
+        }
+        reason = str(spec.get("reason") or "").strip()
+        if reason:
+            operation["reason"] = reason
+        operations.append(operation)
+    return {
+        "applied": bool(operations),
+        "repair_owner": "runner_stem_merge_v1",
+        "operations": operations,
+        "blocker_reasons": blocker_reasons,
     }
 
 
@@ -1390,6 +1502,42 @@ def execute_recipe_candidate(
             max_residual_ratio=max_repair_ratio,
         )
 
+    stem_merges: dict[str, Any] | None = None
+    merge_specs = candidate.get("stem_merges")
+    if isinstance(merge_specs, list) and merge_specs:
+        stem_merges = apply_stem_merges(stem_paths=stem_paths, merge_specs=merge_specs)
+        if stem_merges.get("blocker_reasons"):
+            next_action = choose_next_action(
+                {"verdict": "blocked_unknown", "reason": ",".join(stem_merges.get("blocker_reasons") or [])}
+            )
+            manifest.update(
+                {
+                    "execution_status": "completed",
+                    "candidate_untrusted": True,
+                    "verdict": "blocked_unknown",
+                    "stem_paths": stem_paths,
+                    "missing_stems": [],
+                    "reconstruction_repair": reconstruction_repair,
+                    "minus_vocal_debleed": minus_vocal_debleed,
+                    "vocal_projection_debleed": vocal_projection_debleed,
+                    "stem_merges": stem_merges,
+                    "target_specific_composition": target_specific_composition,
+                    "next_action": next_action,
+                    "delivery_allowed": False,
+                    "presentation_status": "blocked_from_listen_pack",
+                }
+            )
+            _write_json(
+                candidate_dir / "score.json",
+                {
+                    "verdict": "blocked_unknown",
+                    "stem_merges": stem_merges,
+                    "next_action": next_action,
+                },
+            )
+            _write_json(candidate_dir / "manifest.json", manifest)
+            return manifest
+
     minus_path = build_minus_from_non_vocal_stems({stem: Path(path) for stem, path in stem_paths.items()}, stems_dir / "minus.flac")
     stem_paths["minus"] = str(minus_path)
     reconstruction = validate_mix_conservation(mix_path=Path(str(window["mix_path"])), stem_paths=stem_paths)
@@ -1406,6 +1554,7 @@ def execute_recipe_candidate(
                 "reconstruction_repair": reconstruction_repair,
                 "minus_vocal_debleed": minus_vocal_debleed,
                 "vocal_projection_debleed": vocal_projection_debleed,
+                "stem_merges": stem_merges,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
                 "delivery_allowed": False,
@@ -1420,6 +1569,7 @@ def execute_recipe_candidate(
                 "reconstruction_repair": reconstruction_repair,
                 "minus_vocal_debleed": minus_vocal_debleed,
                 "vocal_projection_debleed": vocal_projection_debleed,
+                "stem_merges": stem_merges,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
             },
@@ -1445,6 +1595,7 @@ def execute_recipe_candidate(
             "reconstruction_repair": reconstruction_repair,
             "minus_vocal_debleed": minus_vocal_debleed,
             "vocal_projection_debleed": vocal_projection_debleed,
+            "stem_merges": stem_merges,
             "target_specific_composition": target_specific_composition,
             "contamination_score": score,
             "next_action": next_action,
@@ -1552,6 +1703,7 @@ def run_fully_automatic_stem_search(
     command_runner: CommandRunner | None = None,
     allow_default_recipe: bool = True,
     demucs_available: bool | None = None,
+    contamination_model_manifest: Path | None = None,
 ) -> dict[str, Any]:
     if no_artifact_rag:
         validate_no_artifact_rag_output(output_dir)
@@ -1577,7 +1729,13 @@ def run_fully_automatic_stem_search(
     if recipe_path is not None:
         recipe = json.loads(recipe_path.read_text(encoding="utf-8-sig"))
     elif allow_default_recipe:
-        recipe = build_default_from_scratch_recipe(demucs_available=demucs_available)
+        model_manifest = contamination_model_manifest or _discover_default_contamination_model_manifest()
+        recipe = build_default_from_scratch_recipe(
+            demucs_available=demucs_available,
+            contamination_model_manifest=model_manifest,
+        )
+    if recipe is not None and contamination_model_manifest is not None and not recipe.get("contamination_model_manifest"):
+        recipe["contamination_model_manifest"] = str(contamination_model_manifest)
 
     if recipe is not None and recipe.get("available", True) is False:
         run_manifest = {
@@ -1767,6 +1925,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-gpu", default="true")
     parser.add_argument("--no-artifact-rag", action="store_true")
     parser.add_argument("--recipe")
+    parser.add_argument("--contamination-model-manifest")
     parser.add_argument("--disable-default-recipe", action="store_true")
     return parser.parse_args()
 
@@ -1786,6 +1945,7 @@ def main() -> None:
         no_artifact_rag=args.no_artifact_rag,
         recipe_path=Path(args.recipe) if args.recipe else None,
         allow_default_recipe=not args.disable_default_recipe,
+        contamination_model_manifest=Path(args.contamination_model_manifest) if args.contamination_model_manifest else None,
     )
     print(json.dumps(result, sort_keys=True))
 

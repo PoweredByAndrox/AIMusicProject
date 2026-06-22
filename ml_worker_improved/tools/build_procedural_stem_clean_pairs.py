@@ -74,9 +74,20 @@ def _speech_like_vocal(t: np.ndarray, sample_rate: int, variant: int) -> np.ndar
     vibrato = 1.0 + 0.035 * np.sin(2.0 * math.pi * (4.2 + 0.15 * variant) * t)
     phase = np.cumsum(2.0 * math.pi * f0 * vibrato / float(sample_rate)).astype(np.float32)
     audio = np.zeros_like(t, dtype=np.float32)
-    for harmonic, gain in ((1, 0.13), (2, 0.09), (3, 0.07), (4, 0.052), (5, 0.038), (7, 0.026), (9, 0.018)):
+    for harmonic in range(1, 18):
+        harmonic_hz = float(harmonic) * f0
+        gain = 0.13 / float(harmonic) ** 0.82
+        if 650.0 <= harmonic_hz <= 1150.0:
+            gain *= 1.45
+        if 1800.0 <= harmonic_hz <= 3400.0:
+            gain *= 0.78
         audio += gain * np.sin(float(harmonic) * phase + 0.19 * float(variant + harmonic)).astype(np.float32)
     syllables = 0.48 + 0.52 * np.sin(2.0 * math.pi * (1.9 + 0.13 * variant) * t) ** 2
+    if variant % 3 == 2:
+        rng = np.random.default_rng(10_000 + int(variant))
+        fricative = rng.normal(0.0, 0.010, len(t)).astype(np.float32)
+        fricative *= (np.sin(2.0 * math.pi * (5.5 + 0.2 * variant) * t) > 0.45).astype(np.float32)
+        audio += fricative
     return (audio * syllables).astype(np.float32)
 
 

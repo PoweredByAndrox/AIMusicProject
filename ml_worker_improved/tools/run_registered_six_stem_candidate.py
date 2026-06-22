@@ -24,6 +24,9 @@ from stem_contamination_common import STEMS, normalize_stem_name  # noqa: E402
 CommandRunner = Callable[[list[str], int], Any]
 EXECUTION_MANIFEST_NAME = "registry_candidate_execution_manifest.json"
 DEFAULT_MODEL_ID = "hybrid_htdemucs_ft_bs_roformer_6s"
+OPTIONAL_SOURCE_STEM_MERGE_TARGETS = {
+    "melody": "guitar",
+}
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
@@ -137,6 +140,58 @@ def _copy_required_stem(
     return str(_write_audio(target_path, audio, sample_rate))
 
 
+def _source_stems_from_entry(entry: Any) -> list[str]:
+    if not isinstance(entry, dict):
+        return []
+    source_stems = entry.get("source_stems")
+    if not isinstance(source_stems, list):
+        return []
+    return [normalize_stem_name(stem) for stem in source_stems if str(stem).strip()]
+
+
+def _declared_target_source_stems(candidate_manifest: Mapping[str, Any], stems: Mapping[str, Any]) -> list[str]:
+    declared: list[str] = []
+    target_artifact = candidate_manifest.get("target_stem_artifact")
+    declared.extend(_source_stems_from_entry(target_artifact))
+    for alias in ("minus", "instrumental"):
+        declared.extend(_source_stems_from_entry(stems.get(alias)))
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for stem in declared:
+        if stem and stem not in seen:
+            seen.add(stem)
+            unique.append(stem)
+    return unique
+
+
+def _merge_optional_source_stem(
+    *,
+    source_path: Path,
+    target_path: Path,
+    target_sample_rate: int,
+    target_sample_count: int,
+    target_channel_count: int,
+) -> None:
+    source_audio, source_rate = _read_audio(source_path)
+    source_audio, source_rate = _match_audio_shape(
+        source_audio,
+        source_rate,
+        target_sample_rate=target_sample_rate,
+        target_sample_count=target_sample_count,
+        target_channel_count=target_channel_count,
+    )
+    target_audio, target_rate = _read_audio(target_path)
+    target_audio, target_rate = _match_audio_shape(
+        target_audio,
+        target_rate,
+        target_sample_rate=target_sample_rate,
+        target_sample_count=target_sample_count,
+        target_channel_count=target_channel_count,
+    )
+    _write_audio(target_path, target_audio + source_audio, target_sample_rate)
+
+
 def _candidate_manifest_path(execution_manifest: Mapping[str, Any], registered_dir: Path) -> Path | None:
     candidate_manifest = execution_manifest.get("candidate_manifest")
     if isinstance(candidate_manifest, dict) and candidate_manifest.get("path"):
@@ -214,6 +269,9 @@ def run_registered_six_stem_candidate(
     raw_stems = candidate_manifest.get("stems")
     stems = _normalized_stem_entries(raw_stems) if isinstance(raw_stems, dict) else {}
     missing_stems: list[str] = []
+    missing_declared_extra_stems: list[str] = []
+    unmapped_declared_extra_stems: list[str] = []
+    merged_extra_stems: list[dict[str, str]] = []
     stem_paths: dict[str, str] = {}
     manifest_dir = candidate_manifest_path.parent
     for stem in STEMS:
@@ -237,13 +295,58 @@ def run_registered_six_stem_candidate(
             target_channel_count=target_channel_count,
         )
 
+    declared_target_source_stems = _declared_target_source_stems(candidate_manifest, stems)
+    declared_extra_source_stems = [stem for stem in declared_target_source_stems if stem not in STEMS]
+    for source_stem in declared_extra_source_stems:
+        target_stem = OPTIONAL_SOURCE_STEM_MERGE_TARGETS.get(source_stem)
+        if target_stem is None:
+            unmapped_declared_extra_stems.append(source_stem)
+            continue
+        entry = stems.get(source_stem)
+        if entry is None:
+            missing_declared_extra_stems.append(source_stem)
+            continue
+        try:
+            source_path = _stem_audio_path(entry, manifest_dir=manifest_dir)
+        except ValueError:
+            missing_declared_extra_stems.append(source_stem)
+            continue
+        if not source_path.is_file():
+            missing_declared_extra_stems.append(source_stem)
+            continue
+        target_path_text = stem_paths.get(target_stem)
+        if not target_path_text:
+            missing_declared_extra_stems.append(source_stem)
+            continue
+        target_path = Path(target_path_text)
+        _merge_optional_source_stem(
+            source_path=source_path,
+            target_path=target_path,
+            target_sample_rate=target_sample_rate,
+            target_sample_count=target_sample_count,
+            target_channel_count=target_channel_count,
+        )
+        merged_extra_stems.append(
+            {
+                "source_stem": source_stem,
+                "target_stem": target_stem,
+                "source_path": str(source_path),
+                "target_path": str(target_path),
+            }
+        )
+
     candidate_manifest_entry = execution_manifest.get("candidate_manifest")
     registered_target_source = ""
     if isinstance(candidate_manifest_entry, dict):
         registered_target_source = str(candidate_manifest_entry.get("target_source") or "")
+    generation_status = "completed"
+    if missing_stems or missing_declared_extra_stems:
+        generation_status = "failed_missing_stem"
+    elif unmapped_declared_extra_stems:
+        generation_status = "failed_unmapped_extra_stem"
     manifest = {
         "schema": "registered_six_stem_candidate.v1",
-        "generation_status": "completed" if not missing_stems else "failed_missing_stem",
+        "generation_status": generation_status,
         "input_audio": str(input_audio),
         "stems_dir": str(stems_dir),
         "model_id": model_id,
@@ -253,6 +356,12 @@ def run_registered_six_stem_candidate(
         "registered_manifest_path": str(execution_manifest_path),
         "candidate_manifest_path": str(candidate_manifest_path),
         "registered_target_source": registered_target_source,
+        "declared_target_source_stems": declared_target_source_stems,
+        "declared_extra_source_stems": declared_extra_source_stems,
+        "merged_extra_stems": merged_extra_stems,
+        "missing_declared_extra_stems": missing_declared_extra_stems,
+        "unmapped_declared_extra_stems": unmapped_declared_extra_stems,
+        "optional_source_stem_merge_targets": dict(OPTIONAL_SOURCE_STEM_MERGE_TARGETS),
         "stem_paths": stem_paths,
         "missing_stems": missing_stems,
         "required_stems": list(STEMS),

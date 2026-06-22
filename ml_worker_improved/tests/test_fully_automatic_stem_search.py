@@ -12,6 +12,8 @@ import tools.run_fully_automatic_stem_search as stem_search
 from tools.run_fully_automatic_stem_search import (
     _candidate_contamination_checks,
     _copy_target_specific_outputs,
+    _discover_default_contamination_model_manifest,
+    apply_stem_merges,
     build_candidate_manifest,
     build_default_from_scratch_recipe,
     choose_next_action,
@@ -59,6 +61,35 @@ def find_leak_result(candidate: dict, tested_stem: str, foreign_source: str) -> 
         for result in candidate["contamination_score"]["leak_results"]
         if result["tested_stem"] == tested_stem and result["foreign_source"] == foreign_source
     )
+
+
+def test_apply_stem_merges_moves_other_into_guitar(tmp_path: Path) -> None:
+    guitar_audio = sine(330.0, amp=0.05)
+    other_audio = sine(550.0, amp=0.02)
+    guitar_path = write_wav(tmp_path / "guitar.wav", guitar_audio)
+    other_path = write_wav(tmp_path / "other.wav", other_audio)
+
+    result = apply_stem_merges(
+        stem_paths={"guitar": str(guitar_path), "other": str(other_path)},
+        merge_specs=[{"source_stem": "other", "target_stem": "guitar", "mode": "move"}],
+    )
+
+    merged_guitar, _ = sf.read(guitar_path, dtype="float32", always_2d=False)
+    emptied_other, _ = sf.read(other_path, dtype="float32", always_2d=False)
+
+    assert result["applied"] is True
+    assert result["blocker_reasons"] == []
+    assert result["operations"] == [
+        {
+            "source_stem": "other",
+            "target_stem": "guitar",
+            "mode": "move",
+            "source_path": str(other_path),
+            "target_path": str(guitar_path),
+        }
+    ]
+    np.testing.assert_allclose(merged_guitar, guitar_audio + other_audio, atol=1e-4)
+    np.testing.assert_allclose(emptied_other, np.zeros_like(other_audio), atol=1e-4)
 
 
 def test_all_six_stems_are_required() -> None:
@@ -190,6 +221,7 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     assert all(
         candidate["conservation_repair_stem"] == "other"
         for candidate in recipe["candidates"]
+        if candidate["candidate_id"] != "c010"
     )
     assert all(candidate["max_conservation_repair_ratio"] == 0.30 for candidate in recipe["candidates"])
     assert all("contamination_checks" not in candidate for candidate in recipe["candidates"])
@@ -208,15 +240,53 @@ def test_default_from_scratch_recipe_uses_target_specific_real_routes() -> None:
     c009 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c009")
     c010 = next(candidate for candidate in recipe["candidates"] if candidate["candidate_id"] == "c010")
     assert c009["vocal_route_id"] == "audio_separator_bs_roformer_vocals"
-    assert c010["route_family"] == "registered_six_stem_hybrid_htdemucs_ft_bs_roformer_6s"
-    assert c010["registered_model_id"] == "hybrid_htdemucs_ft_bs_roformer_6s"
-    assert c010["conservation_repair_stem"] == "other"
-    assert c010["command_template"][c010["command_template"].index("--model-id") + 1] == "hybrid_htdemucs_ft_bs_roformer_6s"
+    assert c010["route_family"] == "registered_six_stem_hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first"
+    assert c010["registered_model_id"] == "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first"
+    assert c010["conservation_repair_stem"] == "guitar"
+    assert c010["stem_merges"] == [
+        {
+            "source_stem": "other",
+            "target_stem": "guitar",
+            "mode": "move",
+            "reason": "aggressive_melody_first_harmonic_bus",
+        }
+    ]
+    assert (
+        c010["command_template"][c010["command_template"].index("--model-id") + 1]
+        == "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first"
+    )
     assert any(
         "--residual-correction-stem" in route["command_template"]
         for candidate in recipe["candidates"]
         for route in candidate.get("target_specific_commands", [])
     )
+
+
+def test_default_from_scratch_recipe_records_contamination_model_manifest(tmp_path: Path) -> None:
+    model_manifest = tmp_path / "cycle001" / "model" / "manifest.json"
+    model_manifest.parent.mkdir(parents=True)
+    model_manifest.write_text("{}", encoding="utf-8")
+
+    recipe = build_default_from_scratch_recipe(
+        demucs_available=True,
+        available_vocal_routes=("audio_separator_bs_roformer_vocals",),
+        contamination_model_manifest=model_manifest,
+    )
+
+    assert recipe["contamination_model_manifest"] == str(model_manifest)
+
+
+def test_default_contamination_model_manifest_discovery_uses_latest_cycle(tmp_path: Path) -> None:
+    old_manifest = tmp_path / "stem_eval" / "cycle002" / "model" / "manifest.json"
+    new_manifest = tmp_path / "stem_eval" / "cycle010" / "model" / "manifest.json"
+    old_manifest.parent.mkdir(parents=True)
+    new_manifest.parent.mkdir(parents=True)
+    old_manifest.write_text("{}", encoding="utf-8")
+    new_manifest.write_text("{}", encoding="utf-8")
+
+    discovered = _discover_default_contamination_model_manifest((tmp_path / "stem_eval",))
+
+    assert discovered == new_manifest
 
 
 def test_default_from_scratch_recipe_blocks_without_specialized_vocal_route() -> None:

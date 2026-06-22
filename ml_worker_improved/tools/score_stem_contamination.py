@@ -158,10 +158,134 @@ def _sustained_melodic_in_drums_acoustic_evidence(leak_audio: np.ndarray, sample
     }
 
 
+def _foreign_in_vocals_acoustic_evidence(
+    stem_audio: np.ndarray,
+    leak_audio: np.ndarray,
+    sample_rate: int,
+    foreign_source: str,
+) -> dict[str, Any]:
+    mono = np.asarray(stem_audio, dtype=np.float32)
+    if mono.ndim == 2:
+        mono = np.mean(mono, axis=1).astype(np.float32)
+    leak_mono = np.asarray(leak_audio, dtype=np.float32)
+    if leak_mono.ndim == 2:
+        leak_mono = np.mean(leak_mono, axis=1).astype(np.float32)
+    if mono.size <= 1 or leak_mono.size <= 1:
+        return {
+            "foreign_like_in_vocal": False,
+            "vocal_foreign_peak_share": 0.0,
+            "vocal_transient_ratio": 0.0,
+            "vocal_spectral_centroid_hz": 0.0,
+        }
+    frame = max(128, int(sample_rate * 0.05))
+    hop = max(1, frame // 2)
+    if mono.size < frame:
+        envelope = np.asarray([_rms(mono)], dtype=np.float32)
+    else:
+        envelope = np.asarray(
+            [_rms(mono[start : start + frame]) for start in range(0, len(mono) - frame + 1, hop)],
+            dtype=np.float32,
+        )
+    envelope_mean = float(np.mean(envelope) + 1.0e-12)
+    transient_ratio = float(np.mean(np.abs(np.diff(envelope))) / envelope_mean) if len(envelope) > 1 else 0.0
+    spectrum = np.abs(np.fft.rfft(mono * np.hanning(len(mono)))).astype(np.float64)
+    freqs = np.fft.rfftfreq(len(mono), d=1.0 / float(sample_rate))
+    centroid = float(np.sum(freqs * spectrum) / (np.sum(spectrum) + 1.0e-12)) if spectrum.size else 0.0
+    leak_spectrum = np.abs(np.fft.rfft(leak_mono * np.hanning(len(leak_mono)))).astype(np.float64)
+    leak_freqs = np.fft.rfftfreq(len(leak_mono), d=1.0 / float(sample_rate))
+    peak_share = float(np.max(leak_spectrum) / (np.sum(leak_spectrum) + 1.0e-12)) if leak_spectrum.size else 0.0
+    high_band = leak_spectrum[(leak_freqs >= 1200.0) & (leak_freqs <= 6000.0)]
+    high_peak_share = float(np.max(high_band) / (np.sum(high_band) + 1.0e-12)) if high_band.size else 0.0
+    if foreign_source == "bass":
+        foreign_like = peak_share >= 0.09 and transient_ratio <= 0.12
+    elif foreign_source in {"guitar", "piano", "other"}:
+        foreign_like = peak_share >= 0.04 and transient_ratio <= 0.12
+    elif foreign_source == "drums":
+        foreign_like = high_peak_share >= 0.02 and (transient_ratio >= 0.20 or centroid >= 2500.0)
+    else:
+        foreign_like = True
+    return {
+        "foreign_like_in_vocal": bool(foreign_like),
+        "vocal_foreign_peak_share": round(peak_share, 6),
+        "vocal_high_peak_share": round(high_peak_share, 6),
+        "vocal_transient_ratio": round(transient_ratio, 6),
+        "vocal_spectral_centroid_hz": round(centroid, 6),
+    }
+
+
+def _foreign_in_bass_acoustic_evidence(
+    stem_audio: np.ndarray,
+    leak_audio: np.ndarray,
+    sample_rate: int,
+    foreign_source: str,
+) -> dict[str, Any]:
+    low_audio = _band_limited_audio(stem_audio, sample_rate, 40.0, 300.0)
+    low_dbfs = _dbfs(_rms(low_audio))
+    foreign_dbfs = _dbfs(_rms(leak_audio))
+    foreign_to_low_db = foreign_dbfs - low_dbfs
+    mono = np.asarray(stem_audio, dtype=np.float32)
+    if mono.ndim == 2:
+        mono = np.mean(mono, axis=1).astype(np.float32)
+    spectrum = np.abs(np.fft.rfft(mono * np.hanning(len(mono)))).astype(np.float64) if mono.size else np.asarray([])
+    freqs = np.fft.rfftfreq(len(mono), d=1.0 / float(sample_rate)) if mono.size else np.asarray([])
+    centroid = float(np.sum(freqs * spectrum) / (np.sum(spectrum) + 1.0e-12)) if spectrum.size else 0.0
+    foreign_like = foreign_source in {"guitar", "piano", "other"} and foreign_to_low_db >= -6.0
+    return {
+        "foreign_like_in_bass": bool(foreign_like),
+        "bass_low_dbfs": round(low_dbfs, 6),
+        "bass_foreign_dbfs": round(foreign_dbfs, 6),
+        "bass_foreign_to_low_db": round(foreign_to_low_db, 6),
+        "bass_spectral_centroid_hz": round(centroid, 6),
+    }
+
+
+def _source_band_peak_share(audio: np.ndarray, sample_rate: int, foreign_source: str) -> float:
+    mono = np.asarray(audio, dtype=np.float32)
+    if mono.ndim == 2:
+        mono = np.mean(mono, axis=1).astype(np.float32)
+    if mono.size <= 1:
+        return 0.0
+    low_hz, high_hz = SOURCE_BANDS_HZ.get(foreign_source, (700.0, 1200.0))
+    spectrum = np.abs(np.fft.rfft(mono * np.hanning(len(mono)))).astype(np.float64)
+    freqs = np.fft.rfftfreq(len(mono), d=1.0 / float(sample_rate))
+    band = spectrum[(freqs >= low_hz) & (freqs <= high_hz)]
+    return float(np.max(band) / (np.sum(band) + 1.0e-12)) if band.size else 0.0
+
+
+def _foreign_in_guitar_acoustic_evidence(
+    stem_audio: np.ndarray,
+    leak_audio: np.ndarray,
+    sample_rate: int,
+    foreign_source: str,
+) -> dict[str, Any]:
+    total_dbfs = _dbfs(_rms(stem_audio))
+    foreign_dbfs = _dbfs(_rms(leak_audio))
+    foreign_to_total_db = foreign_dbfs - total_dbfs
+    peak_share = _source_band_peak_share(stem_audio, sample_rate, foreign_source)
+    if foreign_source in {"piano", "other"}:
+        foreign_like = foreign_to_total_db >= -2.0 and peak_share >= 0.25
+    elif foreign_source == "vocals":
+        foreign_like = foreign_to_total_db >= -10.0 and peak_share >= 0.35
+    elif foreign_source == "drums":
+        foreign_like = foreign_to_total_db >= -12.0 and peak_share >= 0.08
+    elif foreign_source == "bass":
+        foreign_like = foreign_to_total_db >= -1.0
+    else:
+        foreign_like = True
+    return {
+        "foreign_like_in_guitar": bool(foreign_like),
+        "guitar_foreign_dbfs": round(foreign_dbfs, 6),
+        "guitar_total_dbfs": round(total_dbfs, 6),
+        "guitar_foreign_to_total_db": round(foreign_to_total_db, 6),
+        "guitar_foreign_peak_share": round(peak_share, 6),
+    }
+
+
 def _no_reference_acoustic_leak_failed(
     *,
     tested_stem: str,
     foreign_source: str,
+    stem_audio: np.ndarray,
     leak_audio: np.ndarray,
     leak_dbfs: float,
     sample_rate: int,
@@ -175,6 +299,15 @@ def _no_reference_acoustic_leak_failed(
     if tested_stem == "drums" and foreign_source in {"guitar", "piano", "other"}:
         evidence = _sustained_melodic_in_drums_acoustic_evidence(leak_audio, sample_rate)
         return bool(evidence["melodic_like_sustained"]), evidence
+    if tested_stem == "vocals":
+        evidence = _foreign_in_vocals_acoustic_evidence(stem_audio, leak_audio, sample_rate, foreign_source)
+        return bool(evidence["foreign_like_in_vocal"]), evidence
+    if tested_stem == "bass" and foreign_source in {"guitar", "piano", "other"}:
+        evidence = _foreign_in_bass_acoustic_evidence(stem_audio, leak_audio, sample_rate, foreign_source)
+        return bool(evidence["foreign_like_in_bass"]), evidence
+    if tested_stem == "guitar":
+        evidence = _foreign_in_guitar_acoustic_evidence(stem_audio, leak_audio, sample_rate, foreign_source)
+        return bool(evidence["foreign_like_in_guitar"]), evidence
     return True, {}
 
 
@@ -276,6 +409,7 @@ def score_stem_contamination(
             acoustic_leak_failed, acoustic_evidence = _no_reference_acoustic_leak_failed(
                 tested_stem=tested_stem,
                 foreign_source=foreign_source,
+                stem_audio=stem_audio,
                 leak_audio=leak_audio,
                 leak_dbfs=leak_dbfs,
                 sample_rate=stem_rate,

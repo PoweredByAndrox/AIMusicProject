@@ -180,6 +180,160 @@ def test_registered_six_stem_candidate_accepts_hyb001_shaped_extra_stems(tmp_pat
     assert set(manifest["stem_paths"]) == set(STEMS)
 
 
+def test_registered_six_stem_candidate_merges_declared_melody_into_guitar(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, amp=0.04),
+        "drums": sine(110.0, amp=0.12),
+        "bass": sine(220.0, amp=0.08),
+        "guitar": sine(330.0, amp=0.06),
+        "piano": sine(440.0, amp=0.05),
+        "other": sine(550.0, amp=0.03),
+    }
+    melody = sine(660.0, amp=0.02)
+    mix_path = write_audio(tmp_path / "mix.flac", sum(source_audio.values()) + melody)
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        registered_dir = Path(command[3])
+        registered_dir.mkdir(parents=True, exist_ok=True)
+        stem_paths = {
+            stem: write_audio(registered_dir / f"{stem}.flac", audio)
+            for stem, audio in source_audio.items()
+        }
+        melody_path = write_audio(registered_dir / "melody.flac", melody)
+        minus_path = write_audio(
+            registered_dir / "minus.flac",
+            sum(source_audio[stem] for stem in STEMS if stem != "vocals") + melody,
+        )
+        stem_manifest = registered_dir / "stem_manifest.json"
+        stem_manifest.write_text(
+            json.dumps(
+                {
+                    "stems": {
+                        **{stem: {"path": str(path)} for stem, path in stem_paths.items()},
+                        "melody": {"path": str(melody_path)},
+                        "minus": {
+                            "path": str(minus_path),
+                            "source": "sum_non_vocal_stems",
+                            "source_stems": ["drums", "bass", "other", "guitar", "piano", "melody"],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (registered_dir / "registry_candidate_execution_manifest.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "candidate_manifest": {
+                        "path": str(stem_manifest),
+                        "exists": True,
+                        "target_stem": "minus",
+                        "target_audio_path": str(minus_path),
+                        "target_source": "sum_non_vocal_stems",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    manifest = run_registered_six_stem_candidate(
+        input_audio=mix_path,
+        stems_dir=tmp_path / "stems",
+        work_dir=tmp_path / "work",
+        manifest_path=tmp_path / "manifest.json",
+        command_runner=fake_runner,
+        timeout_sec=120,
+        model_id="hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first",
+    )
+
+    assert manifest["generation_status"] == "completed"
+    assert manifest["merged_extra_stems"] == [
+        {
+            "source_stem": "melody",
+            "target_stem": "guitar",
+            "source_path": str(tmp_path / "work" / "registered" / "melody.flac"),
+            "target_path": str(tmp_path / "stems" / "guitar.flac"),
+        }
+    ]
+    np.testing.assert_allclose(
+        read_audio(tmp_path / "stems" / "guitar.flac"),
+        source_audio["guitar"] + melody,
+        atol=2e-4,
+    )
+
+
+def test_registered_six_stem_candidate_blocks_unmapped_declared_extra_stem(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, amp=0.04),
+        "drums": sine(110.0, amp=0.12),
+        "bass": sine(220.0, amp=0.08),
+        "guitar": sine(330.0, amp=0.06),
+        "piano": sine(440.0, amp=0.05),
+        "other": sine(550.0, amp=0.03),
+    }
+    lead = sine(660.0, amp=0.02)
+    mix_path = write_audio(tmp_path / "mix.flac", sum(source_audio.values()) + lead)
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        registered_dir = Path(command[3])
+        registered_dir.mkdir(parents=True, exist_ok=True)
+        stem_paths = {
+            stem: write_audio(registered_dir / f"{stem}.flac", audio)
+            for stem, audio in source_audio.items()
+        }
+        lead_path = write_audio(registered_dir / "lead.flac", lead)
+        minus_path = write_audio(
+            registered_dir / "minus.flac",
+            sum(source_audio[stem] for stem in STEMS if stem != "vocals") + lead,
+        )
+        stem_manifest = registered_dir / "stem_manifest.json"
+        stem_manifest.write_text(
+            json.dumps(
+                {
+                    "stems": {
+                        **{stem: {"path": str(path)} for stem, path in stem_paths.items()},
+                        "lead": {"path": str(lead_path)},
+                        "minus": {
+                            "path": str(minus_path),
+                            "source": "sum_non_vocal_stems",
+                            "source_stems": ["drums", "bass", "other", "guitar", "piano", "lead"],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (registered_dir / "registry_candidate_execution_manifest.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "candidate_manifest": {
+                        "path": str(stem_manifest),
+                        "exists": True,
+                        "target_stem": "minus",
+                        "target_audio_path": str(minus_path),
+                        "target_source": "sum_non_vocal_stems",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    manifest = run_registered_six_stem_candidate(
+        input_audio=mix_path,
+        stems_dir=tmp_path / "stems",
+        work_dir=tmp_path / "work",
+        manifest_path=tmp_path / "manifest.json",
+        command_runner=fake_runner,
+        timeout_sec=120,
+    )
+
+    assert manifest["generation_status"] == "failed_unmapped_extra_stem"
+    assert manifest["unmapped_declared_extra_stems"] == ["lead"]
+    assert manifest["merged_extra_stems"] == []
+
+
 def test_registered_six_stem_candidate_blocks_missing_required_stem(tmp_path: Path) -> None:
     source_audio = {
         "vocals": sine(880.0, amp=0.04),
