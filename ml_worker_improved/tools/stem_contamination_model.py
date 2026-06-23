@@ -255,6 +255,17 @@ def _trained_pair_set(manifest: dict[str, Any]) -> set[tuple[str, str]]:
     return {(tested_stem, foreign_source)} if tested_stem and foreign_source else set()
 
 
+def _resolve_model_file_from_manifest(manifest: dict[str, Any], model_manifest_path: Path) -> Path:
+    raw_model_file = str(manifest.get("model_file") or "").strip()
+    model_file = Path(raw_model_file)
+    if model_file.is_file():
+        return model_file
+    local_model_file = model_manifest_path.parent / model_file.name if model_file.name else model_manifest_path.parent / "model.pt"
+    if local_model_file.is_file():
+        return local_model_file
+    raise FileNotFoundError(f"missing model file: {model_file}")
+
+
 if TORCH_AVAILABLE:
 
     class StemContaminationNet(nn.Module):
@@ -291,9 +302,7 @@ def predict_no_reference_probability(
         raise ValueError(f"invalid_forbidden_pair:{tested_stem}:{foreign_source}")
     if (tested_stem, foreign_source) not in _trained_pair_set(manifest):
         raise ValueError(f"model_pair_untrained:{tested_stem}:{foreign_source}")
-    model_file = Path(str(manifest.get("model_file") or ""))
-    if not model_file.is_file():
-        raise FileNotFoundError(f"missing model file: {model_file}")
+    model_file = _resolve_model_file_from_manifest(manifest, model_manifest_path)
     try:
         bundle = torch.load(model_file, map_location="cpu", weights_only=True)
     except TypeError:  # pragma: no cover - older torch compatibility.

@@ -418,6 +418,10 @@ def test_trainable_no_reference_detector_scores_dirty_and_clean_minus(tmp_path: 
     assert manifest["detector_mode"] == "no_reference_neural_v1"
     assert manifest["shadow_only"] is True
     assert Path(manifest["model_file"]).exists()
+    manifest_path = model_dir / "manifest.json"
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_payload["model_file"] = "/stale_artifact_mount/stem_eval/cycle999/model/model.pt"
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
 
     dirty_minus = sine(110.0, amp=0.18) + sine(880.0, amp=0.05)
     dirty_result = score_stem_contamination(
@@ -426,7 +430,7 @@ def test_trainable_no_reference_detector_scores_dirty_and_clean_minus(tmp_path: 
         foreign_source="vocals",
         output_dir=tmp_path / "dirty_score",
         foreign_reference_path=None,
-        model_manifest_path=model_dir / "manifest.json",
+        model_manifest_path=manifest_path,
     )
 
     clean_minus = sine(110.0, amp=0.18) + sine(220.0, amp=0.04)
@@ -436,7 +440,7 @@ def test_trainable_no_reference_detector_scores_dirty_and_clean_minus(tmp_path: 
         foreign_source="vocals",
         output_dir=tmp_path / "clean_score",
         foreign_reference_path=None,
-        model_manifest_path=model_dir / "manifest.json",
+        model_manifest_path=manifest_path,
     )
 
     assert dirty_result["verdict"] == "fail"

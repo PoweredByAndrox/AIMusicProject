@@ -132,6 +132,13 @@ reference is provided through `foreign_references`, the scorer uses reference
 projection. If no reference is provided, the scorer may use a supported
 no-reference detector.
 
+Default no-reference detector discovery checks the Docker artifact mount
+`/project_artifacts/stem_eval` before legacy host-style roots, so full-track
+Docker runs can reuse the latest `cycle*/model/manifest.json` without a manual
+environment override. If an older detector manifest stores a stale absolute
+`model_file`, the scorer resolves `model.pt` next to the manifest before
+blocking as unavailable.
+
 The default from-scratch candidates are target-specific, not a Demucs-only
 shortcut. Each default candidate starts with a Demucs `htdemucs_6s` six-stem
 route, then replaces `vocals` with a specialized vocal/instrumental model route
@@ -150,16 +157,22 @@ all-purpose candidate as the source of every delivered stem:
   `mdx23c_vocals:instrumental`, `htdemucs_ft:instrumental`;
 - stem lane: `htdemucs_6s`, `hybrid_htdemucs_ft_bs_roformer_6s`,
   `hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first`;
+- bass-support lane: `scnet_xl_ihf_musdb18:bass`;
 - SCNet remains auxiliary non-vocal evidence, not the delivered full six-stem
-  owner in this profile.
+  owner in this profile. It can replace only `bass` in bounded composite
+  candidates, and the same reconstruction, damage, voice-presence, and
+  contamination gates still decide delivery.
 
 The listen pack is assembled from lane-specific outputs. `vocals` must come
 from the vocal lane, `minus` from the minus lane, and `drums`, `bass`,
 `guitar`, `piano`, and `other` from the stem lane. If no atomic lane combination
 passes, V2 builds bounded composite candidates from already generated
 per-lane route outputs, then runs the same reconstruction, damage,
-voice-presence, and contamination gates on the composite. Route manifests record
-lane and output-map provenance, and accepted listen packs include
+voice-presence, and contamination gates on the composite. If a composite passes
+`vocals + minus` reconstruction but the stem lane damages `bass`, V2 may try the
+bounded bass-support lane as a bass-only source; this does not make SCNet the
+owner of the delivered stem set and does not bypass any gate. Route manifests
+record lane and output-map provenance, and accepted listen packs include
 `lane_provenance` plus per-window lane provenance.
 
 The minus lane may emit `instrumental.flac`; candidates can map that output to
@@ -177,6 +190,12 @@ Route ids remain in manifests for provenance. Runtime route directories use a
 sanitized `route_alias`, so ids such as `audio_separator_bs_roformer_vocals:instrumental`
 do not create Windows-unsafe path segments.
 
+Within one window, repeated target-specific routes are cached by role, lane,
+route id, rendered command, and output map. Reused route manifests set
+`reused_route=true` and record the source candidate/route paths; this reduces
+duplicate GPU inference but does not reuse accepted verdicts or skip any
+reconstruction, damage, voice-presence, or contamination gate.
+
 Unlike the default profile, `model_split_v2` does not use the mixed final stem
 set (`vocals` from vocal lane plus non-vocal stems from stem lane) as the
 delivery reconstruction surface. That would combine outputs from independent
@@ -191,6 +210,9 @@ it is not allowed to rebuild or publish `minus`.
   accepted success routes;
 - stereo width collapse blocks the candidate when the mix has measurable stereo
   width but the delivered stem collapses it;
+- bass stereo width is compared against the mix bass-band reference, not the
+  full-band mix width, so mono/narrow low end is not falsely treated as damage
+  just because guitars, cymbals, or vocals make the full mix wide;
 - each non-vocal stem, including `other`, must carry non-empty detail above the
   configured floor;
 - a full-band voice-presence projection gate blocks vocal-like evidence in
