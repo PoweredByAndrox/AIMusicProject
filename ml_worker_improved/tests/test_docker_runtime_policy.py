@@ -63,6 +63,7 @@ REQUIRED_DOCKER_ONLY_ENTRYPOINTS = (
     TOOLS_ROOT / "export_bs_mamba2_minus_preview.py",
     TOOLS_ROOT / "export_bs_mamba2_vocal_full.py",
     TOOLS_ROOT / "export_bs_mamba2_vocal_preview.py",
+    TOOLS_ROOT / "probe_bs_mamba2_runtime.py",
     TOOLS_ROOT / "export_demucs_minus_preview.py",
     TOOLS_ROOT / "export_drums_plus_percussive_fx_aux.py",
     TOOLS_ROOT / "export_dereverb_vocal_preview.py",

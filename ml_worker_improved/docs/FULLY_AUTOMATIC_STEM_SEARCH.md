@@ -150,9 +150,10 @@ the final non-vocal stems after all target-specific routes finish.
 `--profile model_split_v2` builds a separate lane search instead of using one
 all-purpose candidate as the source of every delivered stem:
 
-- vocal lane: `audio_separator_bs_roformer_vocals`, `mdx23c_vocals`,
-  `melband_roformer_vocals`;
-- minus lane: `becruily_instrumental_vocals`,
+- vocal lane: `bs_mamba2_vocals`, `audio_separator_bs_roformer_vocals`,
+  `mdx23c_vocals`, `melband_roformer_vocals`;
+- minus lane: `bs_mamba2_vocals:instrumental`,
+  `becruily_instrumental_vocals`,
   `audio_separator_bs_roformer_vocals:instrumental`,
   `mdx23c_vocals:instrumental`, `htdemucs_ft:instrumental`;
 - stem lane: `htdemucs_6s`, `hybrid_htdemucs_ft_bs_roformer_6s`,
@@ -199,6 +200,21 @@ delivery `minus.flac` with:
   "output_map": {"minus": "instrumental"}
 }
 ```
+
+Registered vocal/instrumental models such as `bs_mamba2_vocals` are executed
+through `tools/run_registered_model_candidate.py`. Their vocal route asks for
+target stem `vocals`; their minus route asks for target stem `minus`, which
+resolves existing manifest `instrumental` output through the registered stem
+alias contract instead of rebuilding minus from six-stem outputs.
+`bs_mamba2_vocals` remains fail-closed until the bounded Docker probe succeeds
+and writes `/app/vendor/bs_mamba2_vocals/runtime_probe_passed.json`:
+
+```bash
+python tools/probe_bs_mamba2_runtime.py --duration-sec 2 --num-overlap 1
+```
+
+The marker must not be created manually. A probe that loads the checkpoint but
+crashes before manifest validation leaves the route unavailable.
 
 Route ids remain in manifests for provenance. Runtime route directories use a
 sanitized `route_alias`, so ids such as `audio_separator_bs_roformer_vocals:instrumental`

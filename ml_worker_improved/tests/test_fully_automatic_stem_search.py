@@ -322,11 +322,13 @@ def test_model_split_v2_recipe_builds_separate_lanes() -> None:
     assert recipe["schema"] == "stem_search_recipe.v2"
     assert recipe["profile"] == "model_split_v2"
     assert recipe["target_specific_routes"]["vocal_lane"] == [
+        "bs_mamba2_vocals",
         "audio_separator_bs_roformer_vocals",
         "mdx23c_vocals",
         "melband_roformer_vocals",
     ]
     assert recipe["target_specific_routes"]["minus_lane"] == [
+        "bs_mamba2_vocals:instrumental",
         "becruily_instrumental_vocals",
         "audio_separator_bs_roformer_vocals:instrumental",
         "mdx23c_vocals:instrumental",
@@ -404,6 +406,36 @@ def test_model_split_v2_htdemucs_ft_minus_uses_registered_cli_contract() -> None
     assert command_template[command_template.index("--model-id") + 1] == "htdemucs_ft"
     assert command_template[command_template.index("--target-stem") + 1] == "minus"
     assert htdemucs_ft_minus["output_map"] == {"minus": "minus"}
+
+
+def test_model_split_v2_bs_mamba2_uses_registered_vocal_minus_lanes() -> None:
+    recipe = build_model_split_v2_recipe(demucs_available=True)
+
+    assert "bs_mamba2_vocals" in recipe["target_specific_routes"]["vocal_lane"]
+    assert "bs_mamba2_vocals:instrumental" in recipe["target_specific_routes"]["minus_lane"]
+
+    bs_mamba2_vocal = next(
+        route
+        for candidate in recipe["candidates"]
+        for route in candidate["target_specific_commands"]
+        if route["route_id"] == "bs_mamba2_vocals"
+    )
+    bs_mamba2_minus = next(
+        route
+        for candidate in recipe["candidates"]
+        for route in candidate["target_specific_commands"]
+        if route["route_id"] == "bs_mamba2_vocals:instrumental"
+    )
+
+    vocal_command = bs_mamba2_vocal["command_template"]
+    minus_command = bs_mamba2_minus["command_template"]
+    assert "tools/run_registered_model_candidate.py" in vocal_command
+    assert "tools/run_registered_model_candidate.py" in minus_command
+    assert vocal_command[vocal_command.index("--model-id") + 1] == "bs_mamba2_vocals"
+    assert minus_command[minus_command.index("--model-id") + 1] == "bs_mamba2_vocals"
+    assert vocal_command[vocal_command.index("--target-stem") + 1] == "vocals"
+    assert minus_command[minus_command.index("--target-stem") + 1] == "minus"
+    assert bs_mamba2_minus["output_map"] == {"minus": "instrumental"}
 
 
 def test_model_split_v2_minus_delivery_cannot_be_rebuilt_from_six_stems(tmp_path: Path) -> None:

@@ -55,11 +55,13 @@ DEFAULT_VOCAL_ROUTE_ORDER = (
     "becruily_instrumental_vocals",
 )
 MODEL_SPLIT_V2_VOCAL_LANE = (
+    "bs_mamba2_vocals",
     "audio_separator_bs_roformer_vocals",
     "mdx23c_vocals",
     "melband_roformer_vocals",
 )
 MODEL_SPLIT_V2_MINUS_LANE = (
+    "bs_mamba2_vocals:instrumental",
     "becruily_instrumental_vocals",
     "audio_separator_bs_roformer_vocals:instrumental",
     "mdx23c_vocals:instrumental",
@@ -287,6 +289,8 @@ def _demucs_six_stem_command_template(
 
 
 def _vocal_route_command_template(route_id: str) -> list[str]:
+    if route_id == "bs_mamba2_vocals":
+        return _registered_model_command_template(route_id, target_stem="vocals")
     if route_id == "audio_separator_bs_roformer_vocals":
         return [
             "python",
@@ -387,6 +391,8 @@ def _registered_model_command_template(model_id: str, *, target_stem: str | None
 
 def _minus_lane_command_template(route_id: str) -> list[str]:
     base_route = route_id.split(":", 1)[0]
+    if base_route == "bs_mamba2_vocals":
+        return _registered_model_command_template(base_route, target_stem="minus")
     if base_route in {
         "audio_separator_bs_roformer_vocals",
         "mdx23c_vocals",
