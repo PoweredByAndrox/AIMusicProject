@@ -7,7 +7,9 @@ runner for six-stem separation candidates.
 
 - The six generated stems are mandatory: `vocals`, `drums`, `bass`, `guitar`,
   `piano`, and `other`.
-- `minus` is always rebuilt from non-vocal stems.
+- In the default profile, `minus` is rebuilt from non-vocal stems.
+- In `model_split_v2`, `minus` must come from a dedicated minus/instrumental
+  lane and cannot be accepted as the sum of the six-stem non-vocal outputs.
 - Candidates are untrusted by default.
 - `human_review` is not a verdict or next action.
 - Unknown evidence blocks automatically.
@@ -135,6 +137,71 @@ shortcut. Each default candidate starts with a Demucs `htdemucs_6s` six-stem
 route, then replaces `vocals` with a specialized vocal/instrumental model route
 when that route is available in the Docker image. `minus` is still rebuilt from
 the final non-vocal stems after all target-specific routes finish.
+
+## Model-Split V2 Profile
+
+`--profile model_split_v2` builds a separate lane search instead of using one
+all-purpose candidate as the source of every delivered stem:
+
+- vocal lane: `audio_separator_bs_roformer_vocals`, `mdx23c_vocals`,
+  `melband_roformer_vocals`;
+- minus lane: `becruily_instrumental_vocals`,
+  `audio_separator_bs_roformer_vocals:instrumental`,
+  `mdx23c_vocals:instrumental`, `htdemucs_ft:instrumental`;
+- stem lane: `htdemucs_6s`, `hybrid_htdemucs_ft_bs_roformer_6s`,
+  `hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first`;
+- SCNet remains auxiliary non-vocal evidence, not the delivered full six-stem
+  owner in this profile.
+
+The listen pack is assembled from lane-specific outputs. `vocals` must come
+from the vocal lane, `minus` from the minus lane, and `drums`, `bass`,
+`guitar`, `piano`, and `other` from the stem lane. If no atomic lane combination
+passes, V2 builds bounded composite candidates from already generated
+per-lane route outputs, then runs the same reconstruction, damage,
+voice-presence, and contamination gates on the composite. Route manifests record
+lane and output-map provenance, and accepted listen packs include
+`lane_provenance` plus per-window lane provenance.
+
+The minus lane may emit `instrumental.flac`; candidates can map that output to
+delivery `minus.flac` with:
+
+```json
+{
+  "role": "minus",
+  "lane": "minus_lane",
+  "output_map": {"minus": "instrumental"}
+}
+```
+
+Route ids remain in manifests for provenance. Runtime route directories use a
+sanitized `route_alias`, so ids such as `audio_separator_bs_roformer_vocals:instrumental`
+do not create Windows-unsafe path segments.
+
+Unlike the default profile, `model_split_v2` does not use the mixed final stem
+set (`vocals` from vocal lane plus non-vocal stems from stem lane) as the
+delivery reconstruction surface. That would combine outputs from independent
+models and can falsely block or falsely repair a candidate. V2 gates delivery
+pair consistency with `vocals + minus` and records the stem-lane six-stem sum as
+`reconstruction.six_stem_diagnostic`. A failed diagnostic remains evidence, but
+it is not allowed to rebuild or publish `minus`.
+
+`model_split_v2` adds fail-closed damage gates before delivery acceptance:
+
+- broad post-band debleed and stem-merge repair routes are non-publishable as
+  accepted success routes;
+- stereo width collapse blocks the candidate when the mix has measurable stereo
+  width but the delivered stem collapses it;
+- each non-vocal stem, including `other`, must carry non-empty detail above the
+  configured floor;
+- a full-band voice-presence projection gate blocks vocal-like evidence in
+  `minus` or non-vocal stems.
+
+These gates do not replace the forbidden-source contamination matrix. They run
+in addition to the V2 `vocals + minus` delivery-pair reconstruction check and
+contamination checks. If they disagree with a candidate that would otherwise
+pass contamination, the candidate blocks; there is no `human_review` state and
+no threshold relaxation. In V2, setting `damage_gates.enabled=false` or
+`voice_presence_gate.enabled=false` is itself a blocker, not a bypass.
 
 The strongest late candidates use an instrumental-first route:
 
@@ -307,12 +374,17 @@ Supported roles:
   `other`; these initialize the full candidate set.
 - `vocals`: must write `vocals`; this can replace the six-stem vocal output
   before `minus` is rebuilt.
+- `minus`: must write `minus`, or write a declared source such as
+  `instrumental` through `output_map`; this is required for `model_split_v2`
+  delivery minus.
 - `non_vocal_stems`: must write `drums`, `bass`, `guitar`, `piano`, `other`;
   this can replace the instrumental stem set before `minus` is rebuilt.
 
 If a declared route misses one of its required outputs, the candidate blocks as
-`blocked_missing_stem`. `minus` is still rebuilt from the final non-vocal stems,
-and the full forbidden-source matrix still decides delivery.
+`blocked_missing_stem`. In the default profile, `minus` is still rebuilt from
+the final non-vocal stems. In `model_split_v2`, missing minus-lane output blocks
+instead of falling back to rebuilt minus. The full forbidden-source matrix still
+decides delivery after profile-specific gates pass.
 
 Route outputs are normalized to the current window's sample rate, frame count,
 and channel count before they are copied into the final candidate stem set. This

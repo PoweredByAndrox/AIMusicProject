@@ -11,7 +11,7 @@ import sys
 import time
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import soundfile as sf
@@ -40,14 +40,32 @@ DEFAULT_CONTAMINATION_MODEL_SEARCH_ROOTS = (
 TARGET_SPECIFIC_ROLE_OUTPUTS = {
     "six_stems": tuple(STEMS),
     "vocals": ("vocals",),
+    "minus": ("minus",),
     "four_stem_non_vocal": ("drums", "bass", "other"),
     "non_vocal_stems": tuple(NON_VOCAL_STEMS),
 }
+MODEL_SPLIT_V2_PROFILE = "model_split_v2"
 DEFAULT_VOCAL_ROUTE_ORDER = (
     "audio_separator_bs_roformer_vocals",
     "mdx23c_vocals",
     "melband_roformer_vocals",
     "becruily_instrumental_vocals",
+)
+MODEL_SPLIT_V2_VOCAL_LANE = (
+    "audio_separator_bs_roformer_vocals",
+    "mdx23c_vocals",
+    "melband_roformer_vocals",
+)
+MODEL_SPLIT_V2_MINUS_LANE = (
+    "becruily_instrumental_vocals",
+    "audio_separator_bs_roformer_vocals:instrumental",
+    "mdx23c_vocals:instrumental",
+    "htdemucs_ft:instrumental",
+)
+MODEL_SPLIT_V2_STEM_LANE = (
+    "htdemucs_6s",
+    "hybrid_htdemucs_ft_bs_roformer_6s",
+    "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first",
 )
 DEFAULT_VOCAL_ROUTE_REQUIRED_PATHS = {
     "audio_separator_bs_roformer_vocals": (
@@ -308,6 +326,175 @@ def _vocal_route_command_template(route_id: str) -> list[str]:
             "Becruily MelBand RoFormer instrumental checkpoint",
         ]
     raise ValueError(f"unsupported default vocal route: {route_id}")
+
+
+def _registered_six_stem_command_template(model_id: str) -> list[str]:
+    return [
+        "python",
+        "tools/run_registered_six_stem_candidate.py",
+        "--input-audio",
+        "{input_audio}",
+        "--stems-dir",
+        "{stems_dir}",
+        "--work-dir",
+        "{output_dir}/work",
+        "--manifest",
+        "{output_dir}/registered.json",
+        "--model-id",
+        model_id,
+        "--device",
+        "cuda",
+        "--timeout-sec",
+        "900",
+    ]
+
+
+def _stem_lane_command_template(model_id: str) -> list[str]:
+    if model_id == "htdemucs_6s":
+        return _demucs_six_stem_command_template(segment="6", overlap="0.25", shifts="1", residual_stem="")
+    if model_id in {
+        "hybrid_htdemucs_ft_bs_roformer_6s",
+        "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first",
+    }:
+        return _registered_six_stem_command_template(model_id)
+    raise ValueError(f"unsupported model-split stem lane model: {model_id}")
+
+
+def _registered_model_command_template(model_id: str, *, target_stem: str | None = None) -> list[str]:
+    command = [
+        "python",
+        "tools/run_registered_model_candidate.py",
+        "{input_audio}",
+        "{stems_dir}",
+        "--model-id",
+        model_id,
+        "--device",
+        "cuda",
+    ]
+    if target_stem:
+        command.extend(["--target-stem", target_stem])
+    return command
+
+
+def _minus_lane_command_template(route_id: str) -> list[str]:
+    base_route = route_id.split(":", 1)[0]
+    if base_route in {
+        "audio_separator_bs_roformer_vocals",
+        "mdx23c_vocals",
+        "melband_roformer_vocals",
+        "becruily_instrumental_vocals",
+    }:
+        return _vocal_route_command_template(base_route)
+    if base_route == "htdemucs_ft":
+        return _registered_model_command_template(base_route, target_stem="minus")
+    raise ValueError(f"unsupported model-split minus lane model: {route_id}")
+
+
+def build_model_split_v2_recipe(
+    *,
+    demucs_available: bool | None = None,
+    available_vocal_routes: tuple[str, ...] | None = None,
+    contamination_model_manifest: Path | str | None = None,
+) -> dict[str, Any]:
+    if demucs_available is None:
+        demucs_available = shutil.which("demucs") is not None
+    if not demucs_available:
+        return {
+            "schema": "stem_search_recipe.v2",
+            "profile": MODEL_SPLIT_V2_PROFILE,
+            "recipe_source": "model_split_v2",
+            "available": False,
+            "unavailable_reason": "missing_demucs_cli",
+            "candidates": [],
+        }
+
+    vocal_lane = tuple(
+        route for route in MODEL_SPLIT_V2_VOCAL_LANE if available_vocal_routes is None or route in set(available_vocal_routes)
+    )
+    if available_vocal_routes is not None:
+        # Keep the contract-visible lane list stable even when callers restrict
+        # the first executable routes in tests or diagnostics.
+        vocal_lane_manifest = tuple(MODEL_SPLIT_V2_VOCAL_LANE)
+    else:
+        vocal_lane_manifest = tuple(MODEL_SPLIT_V2_VOCAL_LANE)
+    executable_vocal_lane = vocal_lane or tuple(MODEL_SPLIT_V2_VOCAL_LANE)
+    candidates: list[dict[str, Any]] = []
+    for index in range(10):
+        stem_route = MODEL_SPLIT_V2_STEM_LANE[index % len(MODEL_SPLIT_V2_STEM_LANE)]
+        vocal_route = executable_vocal_lane[index % len(executable_vocal_lane)]
+        minus_route = MODEL_SPLIT_V2_MINUS_LANE[index % len(MODEL_SPLIT_V2_MINUS_LANE)]
+        minus_output_map = {"minus": "minus" if minus_route.startswith("htdemucs_ft") else "instrumental"}
+        candidate_id = f"c{index + 1:03d}"
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "profile": MODEL_SPLIT_V2_PROFILE,
+                "route_family": f"model_split_v2_{stem_route}_{vocal_route}_{minus_route.replace(':', '_')}",
+                "required_stems": list(STEMS),
+                "minus_source": "minus_lane",
+                "minus_rebuilt_from_non_vocal_stems": False,
+                "model_split_lanes": {
+                    "vocals": "vocal_lane",
+                    "minus": "minus_lane",
+                    "stems": "stem_lane",
+                },
+                "damage_gates": {
+                    "enabled": True,
+                    "min_non_vocal_rms": 1e-5,
+                    "min_relative_stereo_width": 0.20,
+                    "min_mix_stereo_width": 0.02,
+                },
+                "voice_presence_gate": {
+                    "enabled": True,
+                    "max_projection_ratio": 0.12,
+                    "max_projection_coeff": 0.18,
+                },
+                "delivery_pair_reconstruction": {
+                    "enabled": True,
+                    "max_delivery_pair_residual_ratio": 0.06,
+                    "six_stem_diagnostic_residual_ratio": 0.01,
+                },
+                "target_specific_commands": [
+                    {
+                        "role": "six_stems",
+                        "lane": "stem_lane",
+                        "route_id": stem_route,
+                        "command_template": _stem_lane_command_template(stem_route),
+                    },
+                    {
+                        "role": "vocals",
+                        "lane": "vocal_lane",
+                        "route_id": vocal_route,
+                        "command_template": _vocal_route_command_template(vocal_route),
+                    },
+                    {
+                        "role": "minus",
+                        "lane": "minus_lane",
+                        "route_id": minus_route,
+                        "output_map": minus_output_map,
+                        "command_template": _minus_lane_command_template(minus_route),
+                    },
+                ],
+            }
+        )
+
+    recipe: dict[str, Any] = {
+        "schema": "stem_search_recipe.v2",
+        "profile": MODEL_SPLIT_V2_PROFILE,
+        "recipe_source": "model_split_v2",
+        "available": True,
+        "target_specific_routes": {
+            "vocal_lane": list(vocal_lane_manifest),
+            "minus_lane": list(MODEL_SPLIT_V2_MINUS_LANE),
+            "stem_lane": list(MODEL_SPLIT_V2_STEM_LANE),
+            "auxiliary_non_vocal_evidence": ["scnet_xl_ihf_musdb18"],
+        },
+        "timeout_sec": 900,
+        "candidates": candidates,
+    }
+    if contamination_model_manifest is not None:
+        recipe["contamination_model_manifest"] = str(contamination_model_manifest)
+    return recipe
 
 
 def build_default_from_scratch_recipe(
@@ -669,7 +856,14 @@ def _target_specific_items(candidate: Mapping[str, Any]) -> list[Mapping[str, An
 
 
 def _collect_stem_paths(stems_dir: Path) -> dict[str, str]:
-    return {stem: str(stems_dir / f"{stem}.flac") for stem in STEMS if (stems_dir / f"{stem}.flac").is_file()}
+    return {stem: str(stems_dir / f"{stem}.flac") for stem in [*STEMS, "minus"] if (stems_dir / f"{stem}.flac").is_file()}
+
+
+def _safe_artifact_segment(value: str, *, fallback: str) -> str:
+    segment = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("._-")
+    if not segment:
+        segment = fallback
+    return segment[:64]
 
 
 def _copy_target_specific_outputs(
@@ -680,24 +874,38 @@ def _copy_target_specific_outputs(
     target_sample_rate: int | None = None,
     target_sample_count: int | None = None,
     target_channel_count: int | None = None,
+    output_map: Mapping[str, str] | None = None,
+    copied_outputs: list[dict[str, str]] | None = None,
 ) -> list[str]:
     required_outputs = TARGET_SPECIFIC_ROLE_OUTPUTS.get(role)
     if required_outputs is None:
         return [f"unsupported_target_specific_role:{role}"]
+    mapped_outputs = {str(target): str(source) for target, source in (output_map or {}).items()}
     blockers: list[str] = []
     for stem in required_outputs:
-        source_path = role_stems_dir / f"{stem}.flac"
+        source_stem = mapped_outputs.get(stem, stem)
+        source_path = role_stems_dir / f"{source_stem}.flac"
         if not source_path.is_file():
             blockers.append(f"missing_target_specific_output:{role}:{stem}")
             continue
         final_stems_dir.mkdir(parents=True, exist_ok=True)
+        output_path = final_stems_dir / f"{stem}.flac"
         _copy_audio_to_match_shape(
             source_path,
-            final_stems_dir / f"{stem}.flac",
+            output_path,
             target_sample_rate=target_sample_rate,
             target_sample_count=target_sample_count,
             target_channel_count=target_channel_count,
         )
+        if copied_outputs is not None:
+            copied_outputs.append(
+                {
+                    "stem": stem,
+                    "source_stem": source_stem,
+                    "source_path": str(source_path),
+                    "output_path": str(output_path),
+                }
+            )
     return blockers
 
 
@@ -716,14 +924,22 @@ def _run_target_specific_commands(
         role = str(item.get("role") or "").strip()
         command_template = item.get("command_template")
         route_id = str(item.get("route_id") or role or f"r{idx:03d}")
-        route_dir = candidate_dir / "routes" / route_id
+        route_alias = _safe_artifact_segment(route_id, fallback=f"r{idx:03d}")
+        lane = str(item.get("lane") or role or route_id).strip()
+        output_map = item.get("output_map") if isinstance(item.get("output_map"), dict) else {}
+        route_dir = candidate_dir / "routes" / route_alias
         route_stems_dir = route_dir / "stems"
         route_manifest = {
             "role": role,
+            "lane": lane,
             "route_id": route_id,
+            "route_alias": route_alias,
+            "source_candidate_id": str(candidate.get("candidate_id") or ""),
             "output_dir": str(route_dir),
             "stems_dir": str(route_stems_dir),
             "required_outputs": list(TARGET_SPECIFIC_ROLE_OUTPUTS.get(role, ())),
+            "output_map": dict(output_map),
+            "copied_outputs": [],
             "missing_outputs": [],
             "blocker_reasons": [],
         }
@@ -747,6 +963,7 @@ def _run_target_specific_commands(
         route_stems_dir.mkdir(parents=True, exist_ok=True)
         setattr(command_runner, "stems_dir", route_stems_dir)
         command_runner(command, timeout_sec)
+        copied_outputs: list[dict[str, str]] = []
         route_blockers = _copy_target_specific_outputs(
             role=role,
             role_stems_dir=route_stems_dir,
@@ -754,7 +971,10 @@ def _run_target_specific_commands(
             target_sample_rate=int(window["sample_rate"]) if window.get("sample_rate") is not None else None,
             target_sample_count=int(window["sample_count"]) if window.get("sample_count") is not None else None,
             target_channel_count=int(window["channel_count"]) if window.get("channel_count") is not None else None,
+            output_map=output_map,
+            copied_outputs=copied_outputs,
         )
+        route_manifest["copied_outputs"] = copied_outputs
         route_manifest["missing_outputs"] = [
             reason.split(":")[-1] for reason in route_blockers if reason.startswith("missing_target_specific_output:")
         ]
@@ -816,11 +1036,18 @@ def _rms(audio: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
 
 
-def validate_mix_conservation(*, mix_path: Path, stem_paths: Mapping[str, str]) -> dict[str, Any]:
+def validate_mix_conservation(
+    *,
+    mix_path: Path,
+    stem_paths: Mapping[str, str],
+    required_stems: Sequence[str] | None = None,
+    relative_tolerance: float = 0.01,
+) -> dict[str, Any]:
     mix_audio, mix_rate = _read_audio(mix_path)
     summed = np.zeros_like(mix_audio, dtype=np.float32)
     blockers: list[str] = []
-    for stem in STEMS:
+    stems = tuple(required_stems or STEMS)
+    for stem in stems:
         stem_path = stem_paths.get(stem)
         if not stem_path:
             blockers.append(f"missing_reconstruction_stem:{stem}")
@@ -837,15 +1064,78 @@ def validate_mix_conservation(*, mix_path: Path, stem_paths: Mapping[str, str]) 
     residual = mix_audio - summed
     mix_rms = _rms(mix_audio)
     residual_rms = _rms(residual)
-    tolerance = max(1e-5, mix_rms * 0.01)
+    tolerance = max(1e-5, mix_rms * float(relative_tolerance))
     if residual_rms > tolerance:
         blockers.append("mix_conservation_residual_too_high")
     return {
         "ok": not blockers,
         "blockers": blockers,
+        "required_stems": list(stems),
+        "relative_tolerance": round(float(relative_tolerance), 8),
+        "residual_ratio": round(float(residual_rms / max(mix_rms, 1e-12)), 8),
         "mix_rms": round(mix_rms, 8),
         "residual_rms": round(residual_rms, 8),
         "tolerance": round(tolerance, 8),
+    }
+
+
+def _first_route_stems_dir(target_specific_composition: Mapping[str, Any], role: str) -> Path | None:
+    for route in target_specific_composition.get("routes", []) or []:
+        if str(route.get("role") or "") != role:
+            continue
+        raw_stems_dir = route.get("stems_dir")
+        if raw_stems_dir:
+            return Path(str(raw_stems_dir))
+    return None
+
+
+def _six_stem_lane_paths(target_specific_composition: Mapping[str, Any]) -> dict[str, str]:
+    stems_dir = _first_route_stems_dir(target_specific_composition, "six_stems")
+    if stems_dir is None:
+        return {}
+    return {
+        stem: str(stems_dir / f"{stem}.flac")
+        for stem in STEMS
+        if (stems_dir / f"{stem}.flac").exists()
+    }
+
+
+def validate_model_split_v2_conservation(
+    *,
+    mix_path: Path,
+    stem_paths: Mapping[str, str],
+    target_specific_composition: Mapping[str, Any],
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    config = config or {}
+    max_residual_ratio = float(config.get("max_delivery_pair_residual_ratio", 0.06))
+    delivery_pair = validate_mix_conservation(
+        mix_path=mix_path,
+        stem_paths=stem_paths,
+        required_stems=("vocals", "minus"),
+        relative_tolerance=max_residual_ratio,
+    )
+    six_stem_paths = _six_stem_lane_paths(target_specific_composition)
+    six_stem_diagnostic = (
+        validate_mix_conservation(
+            mix_path=mix_path,
+            stem_paths=six_stem_paths,
+            required_stems=STEMS,
+            relative_tolerance=float(config.get("six_stem_diagnostic_residual_ratio", 0.01)),
+        )
+        if six_stem_paths
+        else {
+            "ok": False,
+            "blockers": ["missing_six_stem_lane_diagnostic"],
+            "required_stems": list(STEMS),
+        }
+    )
+    return {
+        "ok": bool(delivery_pair.get("ok")),
+        "mode": "model_split_v2_delivery_pair",
+        "gated_surface": "vocals_plus_minus",
+        "delivery_pair": delivery_pair,
+        "six_stem_diagnostic": six_stem_diagnostic,
     }
 
 
@@ -1248,6 +1538,231 @@ def _concat_audio(paths: list[Path]) -> tuple[np.ndarray, int]:
     return np.concatenate(chunks, axis=0).astype(np.float32), int(sample_rate)
 
 
+def _profile_name(candidate: Mapping[str, Any]) -> str:
+    return str(candidate.get("profile") or candidate.get("model_split_profile") or "").strip()
+
+
+def _is_model_split_v2(candidate: Mapping[str, Any]) -> bool:
+    return _profile_name(candidate) == MODEL_SPLIT_V2_PROFILE
+
+
+def _candidate_minus_source(candidate: Mapping[str, Any]) -> str:
+    return str(candidate.get("minus_source") or ("minus_lane" if _is_model_split_v2(candidate) else "rebuilt_non_vocal_stems"))
+
+
+def _stereo_width(audio: np.ndarray) -> float:
+    if audio.ndim < 2 or audio.shape[1] < 2:
+        return 0.0
+    left = audio[:, 0].astype(np.float64)
+    right = audio[:, 1].astype(np.float64)
+    mid = (left + right) * 0.5
+    side = (left - right) * 0.5
+    return float(_rms(side) / max(_rms(mid), 1e-12))
+
+
+def _aligned_flattened_pair(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if a.ndim == 1:
+        a = a[:, None]
+    if b.ndim == 1:
+        b = b[:, None]
+    frames = min(len(a), len(b))
+    channels = min(a.shape[1], b.shape[1])
+    if frames <= 0 or channels <= 0:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+    return (
+        a[:frames, :channels].astype(np.float64).reshape(-1),
+        b[:frames, :channels].astype(np.float64).reshape(-1),
+    )
+
+
+def _projection_ratio(stem_audio: np.ndarray, reference_audio: np.ndarray) -> tuple[float, float]:
+    stem, reference = _aligned_flattened_pair(stem_audio, reference_audio)
+    if stem.size == 0 or reference.size == 0:
+        return 0.0, 0.0
+    denom = float(np.dot(reference, reference))
+    if denom <= 1e-18:
+        return 0.0, 0.0
+    coeff = float(np.dot(stem, reference) / denom)
+    projected = coeff * reference
+    ratio = float(_rms(projected) / max(_rms(stem), 1e-12))
+    return abs(coeff), ratio
+
+
+def score_model_split_v2_damage_gates(
+    *,
+    candidate: Mapping[str, Any],
+    mix_path: Path,
+    stem_paths: Mapping[str, str],
+    stem_merges: Mapping[str, Any] | None = None,
+    minus_vocal_debleed: Mapping[str, Any] | None = None,
+    post_minus_vocal_debleed: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    config = candidate.get("damage_gates") if isinstance(candidate.get("damage_gates"), dict) else {}
+    enabled = _is_model_split_v2(candidate) or bool(config.get("enabled", False))
+    if config.get("enabled") is False and _is_model_split_v2(candidate):
+        return {
+            "verdict": "blocked_damage",
+            "enabled": False,
+            "blocker_reasons": ["v2_damage_gate_disabled"],
+            "metrics": {},
+        }
+    if config.get("enabled") is False:
+        return {"verdict": "auto_accept", "enabled": False, "blocker_reasons": [], "metrics": {}}
+    if not enabled:
+        return {"verdict": "auto_accept", "enabled": False, "blocker_reasons": [], "metrics": {}}
+
+    blockers: list[str] = []
+    metrics: dict[str, Any] = {}
+    if stem_merges and (stem_merges.get("applied") or candidate.get("stem_merges")):
+        blockers.append("v2_repair_route_not_publishable:stem_merges")
+    if minus_vocal_debleed and (minus_vocal_debleed.get("applied") or candidate.get("minus_vocal_debleed")):
+        blockers.append("v2_repair_route_not_publishable:minus_vocal_debleed")
+    if post_minus_vocal_debleed and (post_minus_vocal_debleed.get("applied") or candidate.get("post_minus_vocal_debleed")):
+        blockers.append("v2_repair_route_not_publishable:post_minus_vocal_debleed")
+
+    min_non_vocal_rms = float(config.get("min_non_vocal_rms", 1e-5))
+    min_relative_stereo_width = float(config.get("min_relative_stereo_width", 0.20))
+    min_mix_stereo_width = float(config.get("min_mix_stereo_width", 0.02))
+    mix_audio, mix_rate = _read_audio(mix_path)
+    mix_width = _stereo_width(mix_audio)
+    metrics["mix"] = {
+        "rms": round(_rms(mix_audio), 8),
+        "stereo_width": round(mix_width, 8),
+    }
+    for stem in [*NON_VOCAL_STEMS, "minus"]:
+        stem_path = stem_paths.get(stem)
+        if not stem_path:
+            if stem == "minus" and _candidate_minus_source(candidate) == "minus_lane":
+                blockers.append("missing_minus_lane_output")
+            continue
+        stem_audio, stem_rate = _read_audio(Path(stem_path))
+        stem_rms = _rms(stem_audio)
+        stem_width = _stereo_width(stem_audio)
+        metrics[stem] = {
+            "rms": round(stem_rms, 8),
+            "stereo_width": round(stem_width, 8),
+            "sample_rate": stem_rate,
+        }
+        if stem in NON_VOCAL_STEMS and stem_rms < min_non_vocal_rms:
+            blockers.append(f"stem_detail_floor:{stem}")
+        if (
+            stem_rate == mix_rate
+            and mix_width >= min_mix_stereo_width
+            and stem_rms >= max(min_non_vocal_rms, 1e-12)
+            and stem_width < mix_width * min_relative_stereo_width
+        ):
+            blockers.append(f"stereo_width_collapse:{stem}")
+
+    return {
+        "verdict": "blocked_damage" if blockers else "auto_accept",
+        "enabled": True,
+        "blocker_reasons": blockers,
+        "metrics": metrics,
+        "gate_config": {
+            "min_non_vocal_rms": min_non_vocal_rms,
+            "min_relative_stereo_width": min_relative_stereo_width,
+            "min_mix_stereo_width": min_mix_stereo_width,
+        },
+    }
+
+
+def score_model_split_v2_voice_presence_gate(
+    *,
+    candidate: Mapping[str, Any],
+    stem_paths: Mapping[str, str],
+) -> dict[str, Any]:
+    config = candidate.get("voice_presence_gate") if isinstance(candidate.get("voice_presence_gate"), dict) else {}
+    enabled = _is_model_split_v2(candidate) or bool(config.get("enabled", False))
+    if config.get("enabled") is False and _is_model_split_v2(candidate):
+        return {
+            "verdict": "blocked_unknown",
+            "enabled": False,
+            "blocker_reasons": ["v2_voice_presence_gate_disabled"],
+            "metrics": {},
+        }
+    if config.get("enabled") is False:
+        return {"verdict": "auto_accept", "enabled": False, "blocker_reasons": [], "metrics": {}}
+    if not enabled:
+        return {"verdict": "auto_accept", "enabled": False, "blocker_reasons": [], "metrics": {}}
+    vocals_path = stem_paths.get("vocals")
+    if not vocals_path:
+        return {
+            "verdict": "blocked_unknown",
+            "enabled": True,
+            "blocker_reasons": ["missing_voice_presence_reference:vocals"],
+            "metrics": {},
+        }
+
+    vocals_audio, vocals_rate = _read_audio(Path(vocals_path))
+    max_projection_ratio = float(config.get("max_projection_ratio", 0.12))
+    max_projection_coeff = float(config.get("max_projection_coeff", 0.18))
+    blockers: list[str] = []
+    metrics: dict[str, Any] = {}
+    for stem in [*NON_VOCAL_STEMS, "minus"]:
+        stem_path = stem_paths.get(stem)
+        if not stem_path:
+            continue
+        stem_audio, stem_rate = _read_audio(Path(stem_path))
+        if stem_rate != vocals_rate:
+            blockers.append(f"voice_presence_sample_rate_mismatch:{stem}")
+            continue
+        coeff, ratio = _projection_ratio(stem_audio, vocals_audio)
+        metrics[stem] = {
+            "projection_coeff": round(coeff, 8),
+            "projection_ratio": round(ratio, 8),
+        }
+        if coeff > max_projection_coeff and ratio > max_projection_ratio:
+            blockers.append(f"voice_presence_fullband:{stem}")
+    return {
+        "verdict": "blocked_leak" if blockers else "auto_accept",
+        "enabled": True,
+        "blocker_reasons": blockers,
+        "metrics": metrics,
+        "gate_config": {
+            "max_projection_ratio": max_projection_ratio,
+            "max_projection_coeff": max_projection_coeff,
+        },
+    }
+
+
+def _lane_provenance_from_candidate(candidate: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    composition = candidate.get("target_specific_composition") if isinstance(candidate.get("target_specific_composition"), dict) else {}
+    provenance: dict[str, dict[str, Any]] = {}
+    for route in composition.get("routes", []) if isinstance(composition.get("routes"), list) else []:
+        if not isinstance(route, dict):
+            continue
+        lane = str(route.get("lane") or route.get("role") or "")
+        role = str(route.get("role") or "")
+        route_id = str(route.get("route_id") or "")
+        for copied in route.get("copied_outputs", []) if isinstance(route.get("copied_outputs"), list) else []:
+            if not isinstance(copied, dict):
+                continue
+            stem = str(copied.get("stem") or "")
+            if not stem:
+                continue
+            provenance[stem] = {
+                "lane": lane,
+                "role": role,
+                "route_id": route_id,
+                "source_stem": str(copied.get("source_stem") or stem),
+                "source_path": str(copied.get("source_path") or ""),
+                "output_path": str(copied.get("output_path") or ""),
+            }
+    for stem in [*STEMS, "minus"]:
+        provenance.setdefault(
+            stem,
+            {
+                "lane": "candidate",
+                "role": "candidate",
+                "route_id": str(candidate.get("candidate_id") or ""),
+                "source_stem": stem,
+                "source_path": str((candidate.get("stem_paths") or {}).get(stem) or ""),
+                "output_path": str((candidate.get("stem_paths") or {}).get(stem) or ""),
+            },
+        )
+    return provenance
+
+
 def build_listen_pack(
     *,
     output_dir: Path,
@@ -1264,16 +1779,25 @@ def build_listen_pack(
     audio_dir = listen_dir / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     source_paths: dict[str, list[Path]] = {stem: [] for stem in [*STEMS, "minus"]}
+    lane_provenance: dict[str, dict[str, Any]] = {}
+    window_lane_provenance: dict[str, dict[str, dict[str, Any]]] = {}
     mix_window_paths: list[Path] = []
     for window in windows:
         window_id = str(window["window_id"])
         candidate = _find_window_candidate(window, str(accepted_window_candidates[window_id]))
         stem_paths = candidate.get("stem_paths") if isinstance(candidate.get("stem_paths"), dict) else {}
+        candidate_lane_provenance = _lane_provenance_from_candidate(candidate)
+        window_lane_provenance[window_id] = {}
         for stem in source_paths:
             stem_path = stem_paths.get(stem)
             if not stem_path:
                 raise ValueError(f"listen pack missing stem path: {window_id}:{stem}")
             source_paths[stem].append(Path(str(stem_path)))
+            provenance = dict(candidate_lane_provenance.get(stem) or {})
+            provenance["window_id"] = window_id
+            provenance["candidate_id"] = str(candidate.get("candidate_id") or "")
+            window_lane_provenance[window_id][stem] = provenance
+            lane_provenance.setdefault(stem, {key: value for key, value in provenance.items() if key != "window_id"})
         mix_window_paths.append(Path(str(window["mix_path"])))
 
     audio_paths: dict[str, str] = {}
@@ -1298,6 +1822,8 @@ def build_listen_pack(
         "source_mix_path": str(mix_path),
         "window_count": len(windows),
         "accepted_window_candidates": dict(accepted_window_candidates),
+        "lane_provenance": lane_provenance,
+        "window_lane_provenance": window_lane_provenance,
         "audio_paths": audio_paths,
         "playlist_path": str(playlist_path),
     }
@@ -1308,6 +1834,8 @@ def build_listen_pack(
         "audio_dir": str(audio_dir),
         "playlist_path": str(playlist_path),
         "audio_paths": audio_paths,
+        "lane_provenance": lane_provenance,
+        "window_lane_provenance": window_lane_provenance,
     }
 
 
@@ -1376,6 +1904,369 @@ def _score_candidate_contamination(
     }
 
 
+def _route_source_for_stem(route: Mapping[str, Any], stem: str) -> Path | None:
+    for copied in route.get("copied_outputs", []) if isinstance(route.get("copied_outputs"), list) else []:
+        if not isinstance(copied, dict):
+            continue
+        if str(copied.get("stem") or "") != stem:
+            continue
+        source_path = Path(str(copied.get("source_path") or ""))
+        return source_path if source_path.is_file() else None
+    return None
+
+
+def _route_has_source_stems(route: Mapping[str, Any], stems: Sequence[str]) -> bool:
+    return all(_route_source_for_stem(route, stem) is not None for stem in stems)
+
+
+def _model_split_routes_by_role(
+    window_candidates: Sequence[Mapping[str, Any]],
+    role: str,
+    required_stems: Sequence[str],
+) -> list[Mapping[str, Any]]:
+    routes: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in window_candidates:
+        composition = candidate.get("target_specific_composition")
+        if not isinstance(composition, dict):
+            continue
+        for route in composition.get("routes", []) if isinstance(composition.get("routes"), list) else []:
+            if not isinstance(route, dict) or str(route.get("role") or "") != role:
+                continue
+            if route.get("blocker_reasons"):
+                continue
+            if not _route_has_source_stems(route, required_stems):
+                continue
+            key = str(route.get("route_id") or route.get("route_alias") or route.get("stems_dir") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            routes.append(route)
+    return routes
+
+
+def _copy_route_stem_to_candidate(
+    *,
+    route: Mapping[str, Any],
+    stem: str,
+    final_stems_dir: Path,
+    window: Mapping[str, Any],
+    copied_outputs: list[dict[str, str]],
+) -> None:
+    source_path = _route_source_for_stem(route, stem)
+    if source_path is None:
+        raise FileNotFoundError(f"missing composite source stem: {stem}")
+    output_path = final_stems_dir / f"{stem}.flac"
+    _copy_audio_to_match_shape(
+        source_path,
+        output_path,
+        target_sample_rate=int(window["sample_rate"]) if window.get("sample_rate") is not None else None,
+        target_sample_count=int(window["sample_count"]) if window.get("sample_count") is not None else None,
+        target_channel_count=int(window["channel_count"]) if window.get("channel_count") is not None else None,
+    )
+    copied_outputs.append(
+        {
+            "stem": stem,
+            "source_stem": stem,
+            "source_path": str(source_path),
+            "output_path": str(output_path),
+        }
+    )
+
+
+def _composite_route_manifest(
+    *,
+    source_route: Mapping[str, Any],
+    role: str,
+    lane: str,
+    copied_outputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    route_id = str(source_route.get("route_id") or role)
+    route_alias = str(source_route.get("route_alias") or _safe_artifact_segment(route_id, fallback=role))
+    return {
+        "role": role,
+        "lane": lane,
+        "route_id": route_id,
+        "route_alias": route_alias,
+        "source_candidate_id": str(source_route.get("source_candidate_id") or ""),
+        "output_dir": str(source_route.get("output_dir") or ""),
+        "stems_dir": str(source_route.get("stems_dir") or ""),
+        "required_outputs": list(TARGET_SPECIFIC_ROLE_OUTPUTS.get(role, ())),
+        "output_map": dict(source_route.get("output_map") or {}),
+        "copied_outputs": copied_outputs,
+        "missing_outputs": [],
+        "blocker_reasons": [],
+        "composite_source": True,
+    }
+
+
+def _finalize_composite_candidate(
+    *,
+    candidate: Mapping[str, Any],
+    candidate_dir: Path,
+    stem_paths: Mapping[str, str],
+    target_specific_composition: Mapping[str, Any],
+    reconstruction: Mapping[str, Any],
+    damage_score: Mapping[str, Any] | None = None,
+    voice_presence_score: Mapping[str, Any] | None = None,
+    contamination_score: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    verdict = str(
+        (contamination_score or voice_presence_score or damage_score or reconstruction).get("verdict")
+        if any((contamination_score, voice_presence_score, damage_score))
+        else ("auto_accept" if reconstruction.get("ok") else "blocked_bad_reconstruction")
+    )
+    if not reconstruction.get("ok"):
+        verdict = "blocked_bad_reconstruction"
+    next_action = choose_next_action(
+        {
+            "verdict": verdict,
+            "reason": ",".join(
+                list((contamination_score or {}).get("blocker_reasons") or [])
+                + list((voice_presence_score or {}).get("blocker_reasons") or [])
+                + list((damage_score or {}).get("blocker_reasons") or [])
+                + list((reconstruction.get("delivery_pair") or {}).get("blockers") or [])
+            ),
+        }
+    )
+    manifest = build_candidate_manifest(str(candidate.get("candidate_id") or "c101"), candidate_dir)
+    manifest.update(
+        {
+            "window_id": str(candidate.get("window_id") or ""),
+            "execution_status": "completed",
+            "candidate_untrusted": True,
+            "model_split_composite": True,
+            "profile": MODEL_SPLIT_V2_PROFILE,
+            "minus_source": "minus_lane",
+            "minus_rebuilt_from_non_vocal_stems": False,
+            "stems_dir": str(candidate_dir / "stems"),
+            "score_path": str(candidate_dir / "score.json"),
+            "required_stems": list(STEMS),
+            "stem_paths": dict(stem_paths),
+            "missing_stems": [],
+            "reconstruction": reconstruction,
+            "target_specific_composition": target_specific_composition,
+            "damage_score": damage_score,
+            "voice_presence_score": voice_presence_score,
+            "contamination_score": contamination_score,
+            "next_action": next_action,
+            "verdict": verdict,
+            "delivery_allowed": verdict == "auto_accept",
+            "presentation_status": "accepted_for_listen_pack" if verdict == "auto_accept" else "blocked_from_listen_pack",
+        }
+    )
+    score_payload = {
+        "verdict": verdict,
+        "reconstruction": reconstruction,
+        "damage_score": damage_score,
+        "voice_presence_score": voice_presence_score,
+        "contamination_score": contamination_score,
+        "next_action": next_action,
+    }
+    _write_json(candidate_dir / "score.json", score_payload)
+    _write_json(candidate_dir / "manifest.json", manifest)
+    return manifest
+
+
+def build_model_split_v2_composite_candidates(
+    *,
+    window: Mapping[str, Any],
+    window_dir: Path,
+    window_candidates: Sequence[Mapping[str, Any]],
+    candidate_template: Mapping[str, Any],
+    max_composites: int = 36,
+) -> list[dict[str, Any]]:
+    stem_routes = _model_split_routes_by_role(window_candidates, "six_stems", NON_VOCAL_STEMS)
+    vocal_routes = _model_split_routes_by_role(window_candidates, "vocals", ("vocals",))
+    minus_routes = _model_split_routes_by_role(window_candidates, "minus", ("minus",))
+    composite_candidates: list[dict[str, Any]] = []
+    composite_index = 0
+    for stem_route in stem_routes:
+        for vocal_route in vocal_routes:
+            for minus_route in minus_routes:
+                composite_index += 1
+                if composite_index > max_composites:
+                    return composite_candidates
+                candidate_id = f"c{100 + composite_index:03d}"
+                candidate_dir = window_dir / candidate_id
+                stems_dir = candidate_dir / "stems"
+                stems_dir.mkdir(parents=True, exist_ok=True)
+                candidate = dict(candidate_template)
+                candidate.update(
+                    {
+                        "candidate_id": candidate_id,
+                        "window_id": str(window.get("window_id") or ""),
+                        "profile": MODEL_SPLIT_V2_PROFILE,
+                        "minus_source": "minus_lane",
+                        "minus_rebuilt_from_non_vocal_stems": False,
+                        "route_family": "model_split_v2_composite",
+                    }
+                )
+                stem_copies: list[dict[str, str]] = []
+                vocal_copies: list[dict[str, str]] = []
+                minus_copies: list[dict[str, str]] = []
+                try:
+                    for stem in NON_VOCAL_STEMS:
+                        _copy_route_stem_to_candidate(
+                            route=stem_route,
+                            stem=stem,
+                            final_stems_dir=stems_dir,
+                            window=window,
+                            copied_outputs=stem_copies,
+                        )
+                    _copy_route_stem_to_candidate(
+                        route=vocal_route,
+                        stem="vocals",
+                        final_stems_dir=stems_dir,
+                        window=window,
+                        copied_outputs=vocal_copies,
+                    )
+                    _copy_route_stem_to_candidate(
+                        route=minus_route,
+                        stem="minus",
+                        final_stems_dir=stems_dir,
+                        window=window,
+                        copied_outputs=minus_copies,
+                    )
+                except Exception as exc:
+                    manifest = build_candidate_manifest(candidate_id, candidate_dir)
+                    next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "composite_copy_failed"})
+                    manifest.update(
+                        {
+                            "window_id": str(window.get("window_id") or ""),
+                            "execution_status": "failed_runtime_error",
+                            "model_split_composite": True,
+                            "profile": MODEL_SPLIT_V2_PROFILE,
+                            "verdict": "blocked_unknown",
+                            "error": {"type": type(exc).__name__, "message": str(exc)},
+                            "next_action": next_action,
+                            "delivery_allowed": False,
+                            "presentation_status": "blocked_from_listen_pack",
+                        }
+                    )
+                    _write_json(candidate_dir / "manifest.json", manifest)
+                    _write_json(candidate_dir / "score.json", {"verdict": "blocked_unknown", "next_action": next_action})
+                    composite_candidates.append(manifest)
+                    continue
+
+                target_specific_composition = {
+                    "applied": True,
+                    "composite_lane_selection": True,
+                    "blocker_reasons": [],
+                    "routes": [
+                        _composite_route_manifest(
+                            source_route=stem_route,
+                            role="six_stems",
+                            lane="stem_lane",
+                            copied_outputs=stem_copies,
+                        ),
+                        _composite_route_manifest(
+                            source_route=vocal_route,
+                            role="vocals",
+                            lane="vocal_lane",
+                            copied_outputs=vocal_copies,
+                        ),
+                        _composite_route_manifest(
+                            source_route=minus_route,
+                            role="minus",
+                            lane="minus_lane",
+                            copied_outputs=minus_copies,
+                        ),
+                    ],
+                }
+                stem_paths = _collect_stem_paths(stems_dir)
+                missing = missing_required_stems(stem_paths) + ([] if stem_paths.get("minus") else ["minus"])
+                if missing:
+                    reconstruction = {
+                        "ok": False,
+                        "mode": "model_split_v2_delivery_pair",
+                        "gated_surface": "vocals_plus_minus",
+                        "delivery_pair": {"blockers": [f"missing_reconstruction_stem:{stem}" for stem in missing]},
+                        "six_stem_diagnostic": {"ok": False, "blockers": ["missing_composite_stems"]},
+                    }
+                    manifest = _finalize_composite_candidate(
+                        candidate=candidate,
+                        candidate_dir=candidate_dir,
+                        stem_paths=stem_paths,
+                        target_specific_composition=target_specific_composition,
+                        reconstruction=reconstruction,
+                    )
+                    manifest["missing_stems"] = missing
+                    _write_json(candidate_dir / "manifest.json", manifest)
+                    composite_candidates.append(manifest)
+                    continue
+
+                reconstruction_config = candidate.get("delivery_pair_reconstruction")
+                reconstruction = validate_model_split_v2_conservation(
+                    mix_path=Path(str(window["mix_path"])),
+                    stem_paths=stem_paths,
+                    target_specific_composition=target_specific_composition,
+                    config=reconstruction_config if isinstance(reconstruction_config, Mapping) else None,
+                )
+                if not reconstruction["ok"]:
+                    composite_candidates.append(
+                        _finalize_composite_candidate(
+                            candidate=candidate,
+                            candidate_dir=candidate_dir,
+                            stem_paths=stem_paths,
+                            target_specific_composition=target_specific_composition,
+                            reconstruction=reconstruction,
+                        )
+                    )
+                    continue
+                damage_score = score_model_split_v2_damage_gates(
+                    candidate=candidate,
+                    mix_path=Path(str(window["mix_path"])),
+                    stem_paths=stem_paths,
+                )
+                if damage_score["verdict"] != "auto_accept":
+                    composite_candidates.append(
+                        _finalize_composite_candidate(
+                            candidate=candidate,
+                            candidate_dir=candidate_dir,
+                            stem_paths=stem_paths,
+                            target_specific_composition=target_specific_composition,
+                            reconstruction=reconstruction,
+                            damage_score=damage_score,
+                        )
+                    )
+                    continue
+                voice_presence_score = score_model_split_v2_voice_presence_gate(candidate=candidate, stem_paths=stem_paths)
+                if voice_presence_score["verdict"] != "auto_accept":
+                    composite_candidates.append(
+                        _finalize_composite_candidate(
+                            candidate=candidate,
+                            candidate_dir=candidate_dir,
+                            stem_paths=stem_paths,
+                            target_specific_composition=target_specific_composition,
+                            reconstruction=reconstruction,
+                            damage_score=damage_score,
+                            voice_presence_score=voice_presence_score,
+                        )
+                    )
+                    continue
+                contamination_score = _score_candidate_contamination(
+                    candidate=candidate,
+                    candidate_dir=candidate_dir,
+                    stem_paths=stem_paths,
+                )
+                composite_candidates.append(
+                    _finalize_composite_candidate(
+                        candidate=candidate,
+                        candidate_dir=candidate_dir,
+                        stem_paths=stem_paths,
+                        target_specific_composition=target_specific_composition,
+                        reconstruction=reconstruction,
+                        damage_score=damage_score,
+                        voice_presence_score=voice_presence_score,
+                        contamination_score=contamination_score,
+                    )
+                )
+                if composite_candidates[-1].get("verdict") == "auto_accept":
+                    return composite_candidates
+    return composite_candidates
+
+
 def execute_recipe_candidate(
     *,
     candidate: Mapping[str, Any],
@@ -1394,6 +2285,9 @@ def execute_recipe_candidate(
             "execution_status": "pending",
             "stems_dir": str(stems_dir),
             "score_path": str(candidate_dir / "score.json"),
+            "profile": _profile_name(candidate),
+            "minus_source": _candidate_minus_source(candidate),
+            "minus_rebuilt_from_non_vocal_stems": bool(candidate.get("minus_rebuilt_from_non_vocal_stems", True)),
         }
     )
     command_template = candidate.get("command_template")
@@ -1606,9 +2500,89 @@ def execute_recipe_candidate(
             _write_json(candidate_dir / "manifest.json", manifest)
             return manifest
 
-    minus_path = build_minus_from_non_vocal_stems({stem: Path(path) for stem, path in stem_paths.items()}, stems_dir / "minus.flac")
-    stem_paths["minus"] = str(minus_path)
-    reconstruction = validate_mix_conservation(mix_path=Path(str(window["mix_path"])), stem_paths=stem_paths)
+    minus_rebuilt_from_non_vocal_stems = bool(candidate.get("minus_rebuilt_from_non_vocal_stems", True))
+    if _is_model_split_v2(candidate) or str(candidate.get("minus_source") or "") == "minus_lane":
+        minus_rebuilt_from_non_vocal_stems = False
+    if minus_rebuilt_from_non_vocal_stems:
+        minus_path = build_minus_from_non_vocal_stems({stem: Path(path) for stem, path in stem_paths.items()}, stems_dir / "minus.flac")
+        stem_paths["minus"] = str(minus_path)
+    elif not stem_paths.get("minus"):
+        damage_score = score_model_split_v2_damage_gates(
+            candidate=candidate,
+            mix_path=Path(str(window["mix_path"])),
+            stem_paths=stem_paths,
+            stem_merges=stem_merges,
+            minus_vocal_debleed=minus_vocal_debleed,
+            post_minus_vocal_debleed=post_minus_vocal_debleed,
+        )
+        if damage_score["verdict"] != "auto_accept":
+            next_action = choose_next_action(
+                {
+                    "verdict": damage_score["verdict"],
+                    "reason": ",".join(damage_score.get("blocker_reasons") or []),
+                }
+            )
+            manifest.update(
+                {
+                    "execution_status": "completed",
+                    "candidate_untrusted": True,
+                    "verdict": damage_score["verdict"],
+                    "missing_stems": ["minus"],
+                    "stem_paths": stem_paths,
+                    "reconstruction_repair": reconstruction_repair,
+                    "minus_vocal_debleed": minus_vocal_debleed,
+                    "vocal_projection_debleed": vocal_projection_debleed,
+                    "stem_merges": stem_merges,
+                    "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                    "target_specific_composition": target_specific_composition,
+                    "damage_score": damage_score,
+                    "next_action": next_action,
+                    "delivery_allowed": False,
+                    "presentation_status": "blocked_from_listen_pack",
+                    "minus_source": _candidate_minus_source(candidate),
+                    "minus_rebuilt_from_non_vocal_stems": False,
+                }
+            )
+            _write_json(
+                candidate_dir / "score.json",
+                {"verdict": damage_score["verdict"], "damage_score": damage_score, "next_action": next_action},
+            )
+            _write_json(candidate_dir / "manifest.json", manifest)
+            return manifest
+        next_action = choose_next_action({"verdict": "blocked_missing_stem", "reason": "missing_minus_lane_output"})
+        manifest.update(
+            {
+                "execution_status": "completed",
+                "candidate_untrusted": True,
+                "verdict": "blocked_missing_stem",
+                "missing_stems": ["minus"],
+                "stem_paths": stem_paths,
+                "reconstruction_repair": reconstruction_repair,
+                "minus_vocal_debleed": minus_vocal_debleed,
+                "vocal_projection_debleed": vocal_projection_debleed,
+                "stem_merges": stem_merges,
+                "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                "target_specific_composition": target_specific_composition,
+                "next_action": next_action,
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
+                "minus_source": _candidate_minus_source(candidate),
+                "minus_rebuilt_from_non_vocal_stems": False,
+            }
+        )
+        _write_json(candidate_dir / "score.json", {"verdict": "blocked_missing_stem", "missing_stems": ["minus"], "next_action": next_action})
+        _write_json(candidate_dir / "manifest.json", manifest)
+        return manifest
+    if _is_model_split_v2(candidate):
+        reconstruction_config = candidate.get("delivery_pair_reconstruction")
+        reconstruction = validate_model_split_v2_conservation(
+            mix_path=Path(str(window["mix_path"])),
+            stem_paths=stem_paths,
+            target_specific_composition=target_specific_composition,
+            config=reconstruction_config if isinstance(reconstruction_config, Mapping) else None,
+        )
+    else:
+        reconstruction = validate_mix_conservation(mix_path=Path(str(window["mix_path"])), stem_paths=stem_paths)
     if not reconstruction["ok"]:
         next_action = choose_next_action({"verdict": "blocked_bad_reconstruction", "reason": "mix_conservation_failed"})
         manifest.update(
@@ -1628,6 +2602,8 @@ def execute_recipe_candidate(
                 "next_action": next_action,
                 "delivery_allowed": False,
                 "presentation_status": "blocked_from_listen_pack",
+                "minus_source": _candidate_minus_source(candidate),
+                "minus_rebuilt_from_non_vocal_stems": minus_rebuilt_from_non_vocal_stems,
             }
         )
         _write_json(
@@ -1643,6 +2619,85 @@ def execute_recipe_candidate(
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
             },
+        )
+        _write_json(candidate_dir / "manifest.json", manifest)
+        return manifest
+
+    damage_score = score_model_split_v2_damage_gates(
+        candidate=candidate,
+        mix_path=Path(str(window["mix_path"])),
+        stem_paths=stem_paths,
+        stem_merges=stem_merges,
+        minus_vocal_debleed=minus_vocal_debleed,
+        post_minus_vocal_debleed=post_minus_vocal_debleed,
+    )
+    if damage_score["verdict"] != "auto_accept":
+        next_action = choose_next_action(
+            {
+                "verdict": damage_score["verdict"],
+                "reason": ",".join(damage_score.get("blocker_reasons") or []),
+            }
+        )
+        manifest.update(
+            {
+                "execution_status": "completed",
+                "candidate_untrusted": True,
+                "verdict": damage_score["verdict"],
+                "stem_paths": stem_paths,
+                "missing_stems": [],
+                "reconstruction": reconstruction,
+                "reconstruction_repair": reconstruction_repair,
+                "minus_vocal_debleed": minus_vocal_debleed,
+                "vocal_projection_debleed": vocal_projection_debleed,
+                "stem_merges": stem_merges,
+                "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                "target_specific_composition": target_specific_composition,
+                "damage_score": damage_score,
+                "next_action": next_action,
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
+                "minus_source": _candidate_minus_source(candidate),
+                "minus_rebuilt_from_non_vocal_stems": minus_rebuilt_from_non_vocal_stems,
+            }
+        )
+        _write_json(candidate_dir / "score.json", {"verdict": damage_score["verdict"], "damage_score": damage_score, "next_action": next_action})
+        _write_json(candidate_dir / "manifest.json", manifest)
+        return manifest
+
+    voice_presence_score = score_model_split_v2_voice_presence_gate(candidate=candidate, stem_paths=stem_paths)
+    if voice_presence_score["verdict"] != "auto_accept":
+        next_action = choose_next_action(
+            {
+                "verdict": voice_presence_score["verdict"],
+                "reason": ",".join(voice_presence_score.get("blocker_reasons") or []),
+            }
+        )
+        manifest.update(
+            {
+                "execution_status": "completed",
+                "candidate_untrusted": True,
+                "verdict": voice_presence_score["verdict"],
+                "stem_paths": stem_paths,
+                "missing_stems": [],
+                "reconstruction": reconstruction,
+                "reconstruction_repair": reconstruction_repair,
+                "minus_vocal_debleed": minus_vocal_debleed,
+                "vocal_projection_debleed": vocal_projection_debleed,
+                "stem_merges": stem_merges,
+                "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                "target_specific_composition": target_specific_composition,
+                "damage_score": damage_score,
+                "voice_presence_score": voice_presence_score,
+                "next_action": next_action,
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
+                "minus_source": _candidate_minus_source(candidate),
+                "minus_rebuilt_from_non_vocal_stems": minus_rebuilt_from_non_vocal_stems,
+            }
+        )
+        _write_json(
+            candidate_dir / "score.json",
+            {"verdict": voice_presence_score["verdict"], "voice_presence_score": voice_presence_score, "next_action": next_action},
         )
         _write_json(candidate_dir / "manifest.json", manifest)
         return manifest
@@ -1668,10 +2723,14 @@ def execute_recipe_candidate(
             "stem_merges": stem_merges,
             "post_minus_vocal_debleed": post_minus_vocal_debleed,
             "target_specific_composition": target_specific_composition,
+            "damage_score": damage_score,
+            "voice_presence_score": voice_presence_score,
             "contamination_score": score,
             "next_action": next_action,
             "delivery_allowed": score["verdict"] == "auto_accept",
             "presentation_status": "accepted_for_listen_pack" if score["verdict"] == "auto_accept" else "blocked_from_listen_pack",
+            "minus_source": _candidate_minus_source(candidate),
+            "minus_rebuilt_from_non_vocal_stems": minus_rebuilt_from_non_vocal_stems,
         }
     )
     score["next_action"] = next_action
@@ -1775,6 +2834,7 @@ def run_fully_automatic_stem_search(
     allow_default_recipe: bool = True,
     demucs_available: bool | None = None,
     contamination_model_manifest: Path | None = None,
+    profile: str = "",
 ) -> dict[str, Any]:
     if no_artifact_rag:
         validate_no_artifact_rag_output(output_dir)
@@ -1790,6 +2850,7 @@ def run_fully_automatic_stem_search(
             "max_candidates": max_candidates,
             "gpu_required": require_gpu,
             "artifact_rag_write_allowed": not no_artifact_rag,
+            "profile": profile or "default",
         },
     )
 
@@ -1801,10 +2862,16 @@ def run_fully_automatic_stem_search(
         recipe = json.loads(recipe_path.read_text(encoding="utf-8-sig"))
     elif allow_default_recipe:
         model_manifest = contamination_model_manifest or _discover_default_contamination_model_manifest()
-        recipe = build_default_from_scratch_recipe(
-            demucs_available=demucs_available,
-            contamination_model_manifest=model_manifest,
-        )
+        if profile == MODEL_SPLIT_V2_PROFILE:
+            recipe = build_model_split_v2_recipe(
+                demucs_available=demucs_available,
+                contamination_model_manifest=model_manifest,
+            )
+        else:
+            recipe = build_default_from_scratch_recipe(
+                demucs_available=demucs_available,
+                contamination_model_manifest=model_manifest,
+            )
     if recipe is not None and contamination_model_manifest is not None and not recipe.get("contamination_model_manifest"):
         recipe["contamination_model_manifest"] = str(contamination_model_manifest)
 
@@ -1817,6 +2884,7 @@ def run_fully_automatic_stem_search(
             "max_candidates": max_candidates,
             "gpu_required": require_gpu,
             "artifact_rag_write_allowed": not no_artifact_rag,
+            "profile": profile or str((recipe or {}).get("profile") or "default"),
             "required_stems": list(STEMS),
             "candidate_count": 0,
             "candidates": [],
@@ -1853,6 +2921,7 @@ def run_fully_automatic_stem_search(
                 "max_candidates": max_candidates,
                 "gpu_required": require_gpu,
                 "artifact_rag_write_allowed": not no_artifact_rag,
+                "profile": profile or str((recipe or {}).get("profile") or "default"),
                 "required_stems": list(STEMS),
                 "candidate_count": 0,
                 "candidates": [],
@@ -1876,6 +2945,7 @@ def run_fully_automatic_stem_search(
         runner = command_runner or default_command_runner
         timeout_sec = int(recipe.get("timeout_sec") or 300)
         recipe_model_manifest = str(recipe.get("contamination_model_manifest") or "").strip()
+        recipe_profile = str(recipe.get("profile") or profile or "").strip()
         for window in windows:
             window_dir = output_dir / str(window["window_id"])
             window_candidates: list[dict[str, Any]] = []
@@ -1912,8 +2982,34 @@ def run_fully_automatic_stem_search(
                         "elapsed_sec": round(time.monotonic() - started, 6),
                     },
                 )
-                if candidate_manifest["verdict"] == "auto_accept":
+                if candidate_manifest["verdict"] == "auto_accept" and recipe_profile != MODEL_SPLIT_V2_PROFILE:
                     break
+            if recipe_profile == MODEL_SPLIT_V2_PROFILE and not any(
+                candidate.get("verdict") == "auto_accept" for candidate in window_candidates
+            ):
+                composite_template = dict(recipe_candidates[0]) if recipe_candidates else {"profile": MODEL_SPLIT_V2_PROFILE}
+                if recipe_model_manifest and not composite_template.get("contamination_model_manifest"):
+                    composite_template["contamination_model_manifest"] = recipe_model_manifest
+                composite_candidates = build_model_split_v2_composite_candidates(
+                    window=window,
+                    window_dir=window_dir,
+                    window_candidates=window_candidates,
+                    candidate_template=composite_template,
+                    max_composites=36,
+                )
+                for composite in composite_candidates:
+                    window_candidates.append(composite)
+                    candidates.append(composite)
+                    _append_jsonl(
+                        progress_path,
+                        {
+                            "event": "composite_candidate_end",
+                            "window_id": window["window_id"],
+                            "candidate_id": composite.get("candidate_id"),
+                            "verdict": composite.get("verdict"),
+                            "elapsed_sec": round(time.monotonic() - started, 6),
+                        },
+                    )
             window["candidates"] = window_candidates
     else:
         _append_jsonl(
@@ -1960,6 +3056,7 @@ def run_fully_automatic_stem_search(
         "max_candidates": max_candidates,
         "gpu_required": require_gpu,
         "artifact_rag_write_allowed": not no_artifact_rag,
+        "profile": profile or str((recipe or {}).get("profile") or "default"),
         "required_stems": list(STEMS),
         "candidate_count": len(candidates),
         "candidates": candidates,
@@ -1996,6 +3093,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-gpu", default="true")
     parser.add_argument("--no-artifact-rag", action="store_true")
     parser.add_argument("--recipe")
+    parser.add_argument("--profile", choices=("", MODEL_SPLIT_V2_PROFILE), default="")
     parser.add_argument("--contamination-model-manifest")
     parser.add_argument("--disable-default-recipe", action="store_true")
     return parser.parse_args()
@@ -2017,6 +3115,7 @@ def main() -> None:
         recipe_path=Path(args.recipe) if args.recipe else None,
         allow_default_recipe=not args.disable_default_recipe,
         contamination_model_manifest=Path(args.contamination_model_manifest) if args.contamination_model_manifest else None,
+        profile=args.profile,
     )
     print(json.dumps(result, sort_keys=True))
 
