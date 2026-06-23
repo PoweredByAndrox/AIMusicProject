@@ -340,7 +340,10 @@ def test_model_split_v2_recipe_builds_separate_lanes() -> None:
     assert recipe["target_specific_routes"]["bass_support_lane"] == [
         "scnet_xl_ihf_musdb18:bass",
     ]
-    assert recipe["model_split_composite_max_candidates"] == 72
+    assert recipe["target_specific_routes"]["non_vocal_support_lane"] == [
+        "scnet_xl_ihf_musdb18:drums_bass_other",
+    ]
+    assert recipe["model_split_composite_max_candidates"] == 864
     first = recipe["candidates"][0]
     assert first["minus_source"] == "minus_lane"
     assert first["minus_rebuilt_from_non_vocal_stems"] is False
@@ -354,17 +357,29 @@ def test_model_split_v2_recipe_builds_separate_lanes() -> None:
         "minus": "minus_lane",
         "stems": "stem_lane",
         "bass_support": "bass_support_lane",
+        "non_vocal_support": "non_vocal_support_lane",
     }
+    assert [option["repair_id"] for option in first["model_split_composite_repair_options"]] == [
+        "none",
+        "vp100",
+        "bs250",
+        "bs400",
+        "pg08",
+        "vp100_bs400",
+        "bs400_pg08",
+        "vp100_pg08",
+        "vp100_bs400_pg08",
+    ]
     assert [route["role"] for route in first["target_specific_commands"]] == [
         "six_stems",
         "vocals",
         "minus",
-        "bass_support",
+        "non_vocal_support",
     ]
-    bass_support = first["target_specific_commands"][-1]
-    assert bass_support["lane"] == "bass_support_lane"
-    assert bass_support["command_template"][bass_support["command_template"].index("--model-id") + 1] == "scnet_xl_ihf_musdb18"
-    assert bass_support["command_template"][bass_support["command_template"].index("--target-stem") + 1] == "bass"
+    non_vocal_support = first["target_specific_commands"][-1]
+    assert non_vocal_support["lane"] == "non_vocal_support_lane"
+    assert "run_registered_non_vocal_candidate.py" in " ".join(non_vocal_support["command_template"])
+    assert non_vocal_support["command_template"][non_vocal_support["command_template"].index("--model-id") + 1] == "scnet_xl_ihf_musdb18"
 
 
 def test_model_split_v2_htdemucs_ft_minus_uses_registered_cli_contract() -> None:
@@ -748,7 +763,7 @@ def test_model_split_v2_builds_composite_from_independent_lane_winners(tmp_path:
     assert result["listen_pack"]["lane_provenance"]["minus"]["route_id"] == "minus_good"
 
 
-def test_model_split_v2_composite_can_use_independent_bass_support_lane(tmp_path: Path) -> None:
+def test_model_split_v2_composite_can_use_independent_non_vocal_support_lane(tmp_path: Path) -> None:
     def wide(mono: np.ndarray) -> np.ndarray:
         return np.stack([mono, mono * np.float32(0.2)], axis=1).astype(np.float32)
 
@@ -802,10 +817,10 @@ def test_model_split_v2_composite_can_use_independent_bass_support_lane(tmp_path
                                 "command_template": ["fixture-minus-bad", "{window_mix}"],
                             },
                             {
-                                "role": "bass_support",
-                                "lane": "bass_support_lane",
-                                "route_id": "scnet_xl_ihf_musdb18:bass",
-                                "command_template": ["fixture-bass-support", "{window_mix}"],
+                                "role": "non_vocal_support",
+                                "lane": "non_vocal_support_lane",
+                                "route_id": "scnet_xl_ihf_musdb18:drums_bass_other",
+                                "command_template": ["fixture-non-vocal-support", "{window_mix}"],
                             },
                         ],
                         "foreign_references": write_full_foreign_references(tmp_path, source_audio),
@@ -859,8 +874,9 @@ def test_model_split_v2_composite_can_use_independent_bass_support_lane(tmp_path
             sf.write(stems_dir / "instrumental.flac", minus[:frames], mix_rate)
         elif command[0] == "fixture-minus-bad":
             sf.write(stems_dir / "instrumental.flac", np.zeros_like(minus[:frames]), mix_rate)
-        elif command[0] == "fixture-bass-support":
-            sf.write(stems_dir / "bass.flac", source_audio["bass"][:frames], mix_rate)
+        elif command[0] == "fixture-non-vocal-support":
+            for stem in ("drums", "bass", "other"):
+                sf.write(stems_dir / f"{stem}.flac", source_audio[stem][:frames], mix_rate)
         else:
             raise AssertionError(command)
 
@@ -878,11 +894,324 @@ def test_model_split_v2_composite_can_use_independent_bass_support_lane(tmp_path
     assert result["verdict"] == "auto_accept"
     accepted = next(candidate for candidate in result["candidates"] if candidate["candidate_id"] == result["accepted_candidate_id"])
     assert accepted["bass_support_applied"] is True
+    assert accepted["stem_support_applied"] is True
+    assert accepted["non_vocal_support_applied"] is True
     assert accepted["target_specific_composition"]["bass_support_applied"] is True
+    assert accepted["target_specific_composition"]["non_vocal_support_applied"] is True
     routes = accepted["target_specific_composition"]["routes"]
-    assert next(route for route in routes if route["role"] == "bass_support")["lane"] == "bass_support_lane"
+    assert next(route for route in routes if route["role"] == "non_vocal_support")["lane"] == "non_vocal_support_lane"
     assert accepted["damage_score"]["verdict"] == "auto_accept"
     assert "stereo_width_collapse:bass" not in accepted["damage_score"]["blocker_reasons"]
+
+
+def test_model_split_v2_composite_projection_repair_can_clean_vocal_leak(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, seconds=0.5, amp=0.06),
+        "drums": sine(110.0, seconds=0.5, amp=0.07),
+        "bass": sine(220.0, seconds=0.5, amp=0.05),
+        "guitar": sine(330.0, seconds=0.5, amp=0.04),
+        "piano": sine(440.0, seconds=0.5, amp=0.03),
+        "other": sine(550.0, seconds=0.5, amp=0.02),
+    }
+    drum_leak = source_audio["vocals"] * np.float32(0.04)
+    other_leak = source_audio["vocals"] * np.float32(0.03)
+    vocal_lane = source_audio["vocals"]
+    minus = sum(source_audio[stem] for stem in ("drums", "bass", "guitar", "piano", "other"))
+    mix = write_wav(tmp_path / "mix.wav", source_audio["vocals"] + minus)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v2",
+                "profile": "model_split_v2",
+                "model_split_composite_max_candidates": 2,
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "profile": "model_split_v2",
+                        "minus_source": "minus_lane",
+                        "model_split_composite_repair_options": [
+                            {"repair_id": "none", "type": "none"},
+                            {
+                                "repair_id": "vp100",
+                                "type": "vocal_projection_debleed",
+                                "strength": 1.0,
+                                "target_stems": ["drums", "other"],
+                            },
+                        ],
+                        "target_specific_commands": [
+                            {
+                                "role": "six_stems",
+                                "lane": "stem_lane",
+                                "route_id": "stem_dirty_vocal_bleed",
+                                "command_template": ["fixture-six-dirty-vocal-bleed", "{window_mix}"],
+                            },
+                            {
+                                "role": "vocals",
+                                "lane": "vocal_lane",
+                                "route_id": "vocal_good",
+                                "command_template": ["fixture-vocal-good", "{window_mix}"],
+                            },
+                            {
+                                "role": "minus",
+                                "lane": "minus_lane",
+                                "route_id": "minus_good",
+                                "output_map": {"minus": "instrumental"},
+                                "command_template": ["fixture-minus-good", "{window_mix}"],
+                            },
+                        ],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        frames = len(window_audio)
+        if command[0] == "fixture-six-dirty-vocal-bleed":
+            sf.write(stems_dir / "vocals.flac", vocal_lane[:frames], mix_rate)
+            sf.write(stems_dir / "drums.flac", (source_audio["drums"] + drum_leak)[:frames], mix_rate)
+            sf.write(stems_dir / "bass.flac", source_audio["bass"][:frames], mix_rate)
+            sf.write(stems_dir / "guitar.flac", source_audio["guitar"][:frames], mix_rate)
+            sf.write(stems_dir / "piano.flac", source_audio["piano"][:frames], mix_rate)
+            sf.write(stems_dir / "other.flac", (source_audio["other"] + other_leak)[:frames], mix_rate)
+        elif command[0] == "fixture-vocal-good":
+            sf.write(stems_dir / "vocals.flac", vocal_lane[:frames], mix_rate)
+        elif command[0] == "fixture-minus-good":
+            sf.write(stems_dir / "instrumental.flac", minus[:frames], mix_rate)
+        else:
+            raise AssertionError(command)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=1,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    assert result["verdict"] == "auto_accept"
+    rejected_none = next(
+        candidate
+        for candidate in result["candidates"]
+        if candidate.get("model_split_composite") and candidate.get("model_split_repair_id") == "none"
+    )
+    accepted = next(candidate for candidate in result["candidates"] if candidate["candidate_id"] == result["accepted_candidate_id"])
+    assert rejected_none["verdict"] == "blocked_leak"
+    assert accepted["model_split_repair_id"] == "vp100"
+    assert accepted["model_split_repair_type"] == "vocal_projection_debleed"
+    assert accepted["vocal_projection_debleed"]["applied"] is True
+    assert accepted["contamination_score"]["verdict"] == "auto_accept"
+    assert accepted["reconstruction"]["delivery_pair"]["ok"] is True
+
+
+def test_model_split_v2_composite_bass_stereo_repair_can_clear_damage_gate(tmp_path: Path) -> None:
+    def stereo_pair(mono: np.ndarray, right_gain: float) -> np.ndarray:
+        return np.stack([mono, mono * np.float32(right_gain)], axis=1).astype(np.float32)
+
+    source_audio = {
+        "vocals": stereo_pair(sine(880.0, seconds=0.5, amp=0.03), 0.6),
+        "drums": stereo_pair(sine(110.0, seconds=0.5, amp=0.07), 0.4),
+        "bass": stereo_pair(sine(80.0, seconds=0.5, amp=0.06), -0.7),
+        "guitar": stereo_pair(sine(330.0, seconds=0.5, amp=0.04), 0.3),
+        "piano": stereo_pair(sine(440.0, seconds=0.5, amp=0.03), 0.5),
+        "other": stereo_pair(sine(550.0, seconds=0.5, amp=0.02), 0.7),
+    }
+    damaged_bass = stereo_pair(sine(80.0, seconds=0.5, amp=0.06), 0.8)
+    minus = sum(source_audio[stem] for stem in ("drums", "bass", "guitar", "piano", "other"))
+    mix = write_wav(tmp_path / "mix.wav", source_audio["vocals"] + minus)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v2",
+                "profile": "model_split_v2",
+                "model_split_composite_max_candidates": 2,
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "profile": "model_split_v2",
+                        "minus_source": "minus_lane",
+                        "damage_gates": {"enabled": True},
+                        "model_split_composite_repair_options": [
+                            {"repair_id": "none", "type": "none"},
+                            {"repair_id": "bs400", "type": "bass_stereo_width", "side_gain": 4.0},
+                        ],
+                        "target_specific_commands": [
+                            {
+                                "role": "six_stems",
+                                "lane": "stem_lane",
+                                "route_id": "stem_bass_narrow",
+                                "command_template": ["fixture-six-bass-narrow", "{window_mix}"],
+                            },
+                            {
+                                "role": "vocals",
+                                "lane": "vocal_lane",
+                                "route_id": "vocal_good",
+                                "command_template": ["fixture-vocal-good", "{window_mix}"],
+                            },
+                            {
+                                "role": "minus",
+                                "lane": "minus_lane",
+                                "route_id": "minus_good",
+                                "output_map": {"minus": "instrumental"},
+                                "command_template": ["fixture-minus-good", "{window_mix}"],
+                            },
+                        ],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=True)
+        stems_dir = fake_runner.stems_dir
+        frames = len(window_audio)
+        if command[0] == "fixture-six-bass-narrow":
+            for stem, audio in source_audio.items():
+                sf.write(stems_dir / f"{stem}.flac", (damaged_bass if stem == "bass" else audio)[:frames], mix_rate)
+        elif command[0] == "fixture-vocal-good":
+            sf.write(stems_dir / "vocals.flac", source_audio["vocals"][:frames], mix_rate)
+        elif command[0] == "fixture-minus-good":
+            sf.write(stems_dir / "instrumental.flac", minus[:frames], mix_rate)
+        else:
+            raise AssertionError(command)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=1,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    assert result["verdict"] == "auto_accept"
+    rejected_none = next(
+        candidate
+        for candidate in result["candidates"]
+        if candidate.get("model_split_composite") and candidate.get("model_split_repair_id") == "none"
+    )
+    accepted = next(candidate for candidate in result["candidates"] if candidate["candidate_id"] == result["accepted_candidate_id"])
+    assert rejected_none["verdict"] == "blocked_damage"
+    assert "stereo_width_collapse:bass" in rejected_none["damage_score"]["blocker_reasons"]
+    assert accepted["model_split_repair_id"] == "bs400"
+    assert accepted["bass_stereo_width_repair"]["applied"] is True
+    assert accepted["bass_stereo_width_repair"]["after_width"] > accepted["bass_stereo_width_repair"]["before_width"]
+    assert accepted["damage_score"]["verdict"] == "auto_accept"
+
+
+def test_model_split_v2_composite_pair_gain_repair_can_clear_reconstruction_gate(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, seconds=0.5, amp=0.03),
+        "drums": sine(110.0, seconds=0.5, amp=0.07),
+        "bass": sine(220.0, seconds=0.5, amp=0.05),
+        "guitar": sine(330.0, seconds=0.5, amp=0.04),
+        "piano": sine(440.0, seconds=0.5, amp=0.03),
+        "other": sine(550.0, seconds=0.5, amp=0.02),
+    }
+    minus = sum(source_audio[stem] for stem in ("drums", "bass", "guitar", "piano", "other"))
+    weak_minus = minus * np.float32(0.93)
+    mix = write_wav(tmp_path / "mix.wav", source_audio["vocals"] + minus)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v2",
+                "profile": "model_split_v2",
+                "model_split_composite_max_candidates": 2,
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "profile": "model_split_v2",
+                        "minus_source": "minus_lane",
+                        "model_split_composite_repair_options": [
+                            {"repair_id": "none", "type": "none"},
+                            {
+                                "repair_id": "pg08",
+                                "type": "delivery_pair_gain",
+                                "target_stem": "minus",
+                                "max_abs_gain_delta": 0.08,
+                            },
+                        ],
+                        "target_specific_commands": [
+                            {
+                                "role": "six_stems",
+                                "lane": "stem_lane",
+                                "route_id": "stem_good",
+                                "command_template": ["fixture-six-good", "{window_mix}"],
+                            },
+                            {
+                                "role": "vocals",
+                                "lane": "vocal_lane",
+                                "route_id": "vocal_good",
+                                "command_template": ["fixture-vocal-good", "{window_mix}"],
+                            },
+                            {
+                                "role": "minus",
+                                "lane": "minus_lane",
+                                "route_id": "minus_weak",
+                                "output_map": {"minus": "instrumental"},
+                                "command_template": ["fixture-minus-weak", "{window_mix}"],
+                            },
+                        ],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        frames = len(window_audio)
+        if command[0] == "fixture-six-good":
+            for stem, audio in source_audio.items():
+                sf.write(stems_dir / f"{stem}.flac", audio[:frames], mix_rate)
+        elif command[0] == "fixture-vocal-good":
+            sf.write(stems_dir / "vocals.flac", source_audio["vocals"][:frames], mix_rate)
+        elif command[0] == "fixture-minus-weak":
+            sf.write(stems_dir / "instrumental.flac", weak_minus[:frames], mix_rate)
+        else:
+            raise AssertionError(command)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=1,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    assert result["verdict"] == "auto_accept"
+    rejected_none = next(
+        candidate
+        for candidate in result["candidates"]
+        if candidate.get("model_split_composite") and candidate.get("model_split_repair_id") == "none"
+    )
+    accepted = next(candidate for candidate in result["candidates"] if candidate["candidate_id"] == result["accepted_candidate_id"])
+    assert rejected_none["verdict"] == "blocked_bad_reconstruction"
+    assert accepted["model_split_repair_id"] == "pg08"
+    assert accepted["delivery_pair_gain_repair"]["applied"] is True
+    assert accepted["delivery_pair_gain_repair"]["after_residual_ratio"] < accepted["delivery_pair_gain_repair"]["before_residual_ratio"]
+    assert accepted["reconstruction"]["delivery_pair"]["ok"] is True
 
 
 def test_model_split_v2_blocks_t040_style_post_debleed_and_other_merge(tmp_path: Path) -> None:

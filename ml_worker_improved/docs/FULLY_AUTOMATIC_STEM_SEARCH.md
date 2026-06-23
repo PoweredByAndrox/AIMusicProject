@@ -158,8 +158,10 @@ all-purpose candidate as the source of every delivered stem:
 - stem lane: `htdemucs_6s`, `hybrid_htdemucs_ft_bs_roformer_6s`,
   `hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first`;
 - bass-support lane: `scnet_xl_ihf_musdb18:bass`;
+- non-vocal support lane: `scnet_xl_ihf_musdb18:drums_bass_other`;
 - SCNet remains auxiliary non-vocal evidence, not the delivered full six-stem
-  owner in this profile. It can replace only `bass` in bounded composite
+  owner in this profile. It can replace bounded individual support stems
+  (`bass`, or `drums`/`bass`/`other` from the support route) inside composite
   candidates, and the same reconstruction, damage, voice-presence, and
   contamination gates still decide delivery.
 
@@ -169,11 +171,23 @@ from the vocal lane, `minus` from the minus lane, and `drums`, `bass`,
 passes, V2 builds bounded composite candidates from already generated
 per-lane route outputs, then runs the same reconstruction, damage,
 voice-presence, and contamination gates on the composite. If a composite passes
-`vocals + minus` reconstruction but the stem lane damages `bass`, V2 may try the
-bounded bass-support lane as a bass-only source; this does not make SCNet the
-owner of the delivered stem set and does not bypass any gate. Route manifests
-record lane and output-map provenance, and accepted listen packs include
-`lane_provenance` plus per-window lane provenance.
+`vocals + minus` reconstruction but the stem lane damages or contaminates
+non-vocal stems, V2 may try bounded support stems from auxiliary non-vocal
+routes; this does not make SCNet the owner of the delivered stem set and does
+not bypass any gate. V2 also enumerates explicit composite repair candidates:
+`none`, `vp100`, `bs250`, `bs400`, `pg08`, `vp100_bs400`, `bs400_pg08`,
+`vp100_pg08`, and `vp100_bs400_pg08`. The `vp*` variants apply bounded
+`vocal_projection_debleed` to non-vocal stems. The `bs*` variants apply a
+bounded bass-band mid-side width repair using only the candidate bass stem, not
+the mix. The `pg08` variants apply a bounded delivery-pair gain correction to
+reduce `vocals + minus` residual without changing thresholds. Combined variants
+apply their named repairs in order. All variants record `model_split_repair_id`
+plus repair provenance and still must pass reconstruction, damage,
+voice-presence, and full contamination gates.
+Legacy broad-band `post_minus_vocal_debleed` and stem-merge routes remain
+blocked from V2 delivery. Route manifests record lane, repair, and output-map
+provenance, and accepted listen packs include `lane_provenance` plus per-window
+lane provenance.
 
 The minus lane may emit `instrumental.flac`; candidates can map that output to
 delivery `minus.flac` with:
