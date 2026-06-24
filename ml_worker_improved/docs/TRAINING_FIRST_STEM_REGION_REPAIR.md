@@ -57,6 +57,8 @@ stage.
   one defect family.
 - `apply_stem_region_repair.py`: writes a repaired diagnostic patch and manifest
   with `delivery_allowed=false`.
+- `apply_stem_region_repair_pack.py`: applies one issue-matched repair checkpoint
+  to hard-case rows and writes before/after diagnostics without delivery.
 
 ## Current V1 Scope
 
