@@ -48,6 +48,9 @@ stage.
 - `build_stem_region_hardcase_pack.py`: copies selected queue rows into a
   short-path hard-case pack with bad audio, score evidence, and explicit
   `data_gap` until a verified target exists.
+- `build_stem_region_synthetic_pretrain_dataset.py`: converts hard-case issue
+  metadata into synthetic clean/dirty repair rows for pretraining. It does not
+  self-label hard-case bad audio as target.
 - `build_stem_region_repair_dataset.py`: builds synthetic repair rows from a
   clean/reference stem by injecting a localized defect.
 - `train_stem_region_repair_model.py`: trains one focused patch checkpoint for
