@@ -20,6 +20,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.score_stem_contamination import score_stem_contamination
+from tools.build_training_first_root_cause_queue import build_root_cause_queue
 from tools.stem_contamination_common import (
     FORBIDDEN_SOURCES,
     NON_VOCAL_STEMS,
@@ -3501,6 +3502,23 @@ def select_accepted_candidate(
     }
 
 
+def _write_run_manifest_with_training_queue(output_dir: Path, run_manifest: dict[str, Any]) -> Path:
+    run_json_path = _write_json(output_dir / "run.json", run_manifest)
+    if bool(run_manifest.get("delivery_allowed")):
+        return run_json_path
+    queue_manifest = build_root_cause_queue(
+        run_json_path=run_json_path,
+        output_dir=output_dir / "training" / "root_cause",
+        min_repeats=2,
+    )
+    run_manifest["training_first_root_cause_queue_manifest"] = str(output_dir / "training" / "root_cause" / "manifest.json")
+    run_manifest["training_first_root_cause_queue_jsonl"] = str(output_dir / "training" / "root_cause" / "queue.jsonl")
+    run_manifest["training_first_root_cause_queue_rows"] = int(queue_manifest.get("queue_row_count") or 0)
+    run_manifest["training_first_root_cause_counts"] = queue_manifest.get("root_cause_counts") or {}
+    run_manifest["training_first_issue_counts"] = queue_manifest.get("issue_type_counts") or {}
+    return _write_json(output_dir / "run.json", run_manifest)
+
+
 def run_fully_automatic_stem_search(
     *,
     mix_path: Path,
@@ -3578,7 +3596,7 @@ def run_fully_automatic_stem_search(
             "failed_checks": ["blocked_no_available_separator"],
             "unavailable_reason": recipe.get("unavailable_reason") or "no_default_separator_available",
         }
-        _write_json(output_dir / "run.json", run_manifest)
+        _write_run_manifest_with_training_queue(output_dir, run_manifest)
         _append_jsonl(
             progress_path,
             {
@@ -3615,7 +3633,7 @@ def run_fully_automatic_stem_search(
                 "failed_checks": ["blocked_bad_reconstruction"],
                 "error": {"type": type(exc).__name__, "message": str(exc)},
             }
-            _write_json(output_dir / "run.json", run_manifest)
+            _write_run_manifest_with_training_queue(output_dir, run_manifest)
             _append_jsonl(
                 progress_path,
                 {"event": "end", "verdict": "blocked_bad_reconstruction", "elapsed_sec": round(time.monotonic() - started, 6)},
@@ -3755,7 +3773,7 @@ def run_fully_automatic_stem_search(
     }
     if listen_pack_error is not None:
         run_manifest["listen_pack_error"] = listen_pack_error
-    _write_json(output_dir / "run.json", run_manifest)
+    _write_run_manifest_with_training_queue(output_dir, run_manifest)
     _write_json(output_dir / "windows.json", {"schema": "fully_automatic_stem_windows.v1", "windows": windows})
     for window in windows:
         _append_jsonl(output_dir / "windows.jsonl", window)

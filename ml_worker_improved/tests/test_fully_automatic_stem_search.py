@@ -188,6 +188,9 @@ def test_no_artifact_rag_write_in_scratch_search(tmp_path: Path) -> None:
     assert result["artifact_rag_write_allowed"] is False
     assert not (out / "artifact_rag").exists()
     assert "human" not in json.dumps(result)
+    assert result["training_first_root_cause_queue_manifest"].endswith("training/root_cause/manifest.json")
+    assert (out / "training" / "root_cause" / "manifest.json").exists()
+    assert (out / "training" / "root_cause" / "queue.jsonl").exists()
 
 
 def test_split_audio_windows_merges_tiny_tail_into_previous_window(tmp_path: Path) -> None:

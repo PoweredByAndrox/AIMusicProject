@@ -21,6 +21,9 @@ runner for six-stem separation candidates.
   `delivery_status=accepted`, `delivery_allowed=true`, and
   `presentation_status=accepted_for_listen_pack`. Blocked runs do not publish a
   listen pack.
+- Blocked runs must write `training/root_cause/manifest.json` and
+  `training/root_cause/queue.jsonl`. Repeated blockers become training/mining
+  samples instead of another pile of rejected candidates.
 
 ## Reconstruction Conservation
 
