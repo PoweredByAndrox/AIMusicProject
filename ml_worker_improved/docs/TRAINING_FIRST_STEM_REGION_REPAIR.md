@@ -45,6 +45,9 @@ stage.
 
 - `build_training_first_root_cause_queue.py`: converts blocked run candidates
   into root-cause/mining rows.
+- `build_stem_region_hardcase_pack.py`: copies selected queue rows into a
+  short-path hard-case pack with bad audio, score evidence, and explicit
+  `data_gap` until a verified target exists.
 - `build_stem_region_repair_dataset.py`: builds synthetic repair rows from a
   clean/reference stem by injecting a localized defect.
 - `train_stem_region_repair_model.py`: trains one focused patch checkpoint for
