@@ -360,6 +360,112 @@ def test_no_reference_model_probability_without_leak_audio_stays_pass(tmp_path: 
     assert result["leak_audio"] == ""
 
 
+def test_no_reference_drums_vocal_probability_requires_vocal_acoustic_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    def high_probability(**_kwargs: object) -> dict[str, object]:
+        return {
+            "probability": 0.99,
+            "threshold": 0.5,
+            "model_id": "fixture",
+            "model_manifest": str(manifest_path),
+            "features": [],
+            "feature_names": [],
+        }
+
+    monkeypatch.setattr(scorer, "predict_no_reference_probability", high_probability)
+    transient_drums = cymbal_like_drums(seconds=0.75) + kick_drum_like(seconds=0.75)
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "drums.flac", transient_drums),
+        tested_stem="drums",
+        foreign_source="vocals",
+        output_dir=tmp_path / "score",
+        foreign_reference_path=None,
+        model_manifest_path=manifest_path,
+        detection_floor_db=-60.0,
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["probability_failed"] is True
+    assert result["acoustic_leak_failed"] is False
+    assert result["acoustic_evidence"]["vocal_like_in_drums"] is False
+
+
+def test_no_reference_drums_vocal_acoustic_evidence_fails_on_voice_like_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    def high_probability(**_kwargs: object) -> dict[str, object]:
+        return {
+            "probability": 0.99,
+            "threshold": 0.5,
+            "model_id": "fixture",
+            "model_manifest": str(manifest_path),
+            "features": [],
+            "feature_names": [],
+        }
+
+    monkeypatch.setattr(scorer, "predict_no_reference_probability", high_probability)
+    contaminated_drums = 0.15 * kick_drum_like(seconds=0.75) + bright_voice_like_vocal(seconds=0.75)
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "drums.flac", contaminated_drums),
+        tested_stem="drums",
+        foreign_source="vocals",
+        output_dir=tmp_path / "score",
+        foreign_reference_path=None,
+        model_manifest_path=manifest_path,
+        detection_floor_db=-60.0,
+    )
+
+    assert result["verdict"] == "fail"
+    assert result["probability_failed"] is True
+    assert result["acoustic_leak_failed"] is True
+    assert result["acoustic_evidence"]["vocal_like_in_drums"] is True
+    assert result["leak_audio"] == "leaks/drums_vocals.flac"
+
+
+def test_no_reference_drums_vocal_acoustic_evidence_fails_even_with_low_model_probability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    def low_probability(**_kwargs: object) -> dict[str, object]:
+        return {
+            "probability": 0.01,
+            "threshold": 0.5,
+            "model_id": "fixture",
+            "model_manifest": str(manifest_path),
+            "features": [],
+            "feature_names": [],
+        }
+
+    monkeypatch.setattr(scorer, "predict_no_reference_probability", low_probability)
+    contaminated_drums = 0.15 * kick_drum_like(seconds=0.75) + bright_voice_like_vocal(seconds=0.75)
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "drums.flac", contaminated_drums),
+        tested_stem="drums",
+        foreign_source="vocals",
+        output_dir=tmp_path / "score",
+        foreign_reference_path=None,
+        model_manifest_path=manifest_path,
+        detection_floor_db=-60.0,
+    )
+
+    assert result["verdict"] == "fail"
+    assert result["probability_failed"] is False
+    assert result["acoustic_leak_failed"] is True
+    assert result["acoustic_evidence"]["vocal_like_in_drums"] is True
+
+
 def test_no_reference_unsupported_pair_blocks_unknown(tmp_path: Path) -> None:
     result = score_stem_contamination(
         tested_stem_path=write_wav(tmp_path / "guitar.wav", sine(330.0, amp=0.2)),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -136,9 +136,6 @@ def train_region_repair_model_from_arrays(
     config: StemRegionRepairTrainConfig | None = None,
 ) -> tuple[StemRegionRepairNet, dict[str, Any]]:
     config = config or StemRegionRepairTrainConfig()
-    torch.manual_seed(int(config.seed))
-    torch.set_num_threads(1)
-
     mix, bad, mask = _prepare_arrays(mix_audio=mix_audio, bad_stem_audio=bad_stem_audio, region_mask=region_mask)
     target = ensure_stereo(target_stem_audio)
     frames = min(target.shape[0], bad.shape[0])
@@ -149,46 +146,86 @@ def train_region_repair_model_from_arrays(
     if float(np.max(mask)) <= 0.0:
         raise ValueError("region_mask must include at least one active frame")
 
-    device = torch.device(config.device if config.device == "cpu" or torch.cuda.is_available() else "cpu")
-    model = StemRegionRepairNet(
-        hidden_channels=config.hidden_channels,
-        kernel_size=config.kernel_size,
-        max_delta=config.max_delta,
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(config.learning_rate))
+    def _train_once(attempt_config: StemRegionRepairTrainConfig) -> tuple[StemRegionRepairNet, list[float], float]:
+        torch.manual_seed(int(attempt_config.seed))
+        torch.set_num_threads(1)
+        device = torch.device(attempt_config.device if attempt_config.device == "cpu" or torch.cuda.is_available() else "cpu")
+        model = StemRegionRepairNet(
+            hidden_channels=attempt_config.hidden_channels,
+            kernel_size=attempt_config.kernel_size,
+            max_delta=attempt_config.max_delta,
+        ).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=float(attempt_config.learning_rate))
 
-    features = build_repair_features(
-        mix_audio=mix,
-        bad_stem_audio=bad,
-        region_mask=mask,
-        issue_type=issue_type,
-        device=device,
-    )
-    target_delta = torch.from_numpy((target - bad).T[None, ...].astype(np.float32)).to(device)
-    mask_t = torch.from_numpy(mask[None, None, :].astype(np.float32)).to(device)
-    outside_t = 1.0 - mask_t
+        features = build_repair_features(
+            mix_audio=mix,
+            bad_stem_audio=bad,
+            region_mask=mask,
+            issue_type=issue_type,
+            device=device,
+        )
+        target_delta = torch.from_numpy((target - bad).T[None, ...].astype(np.float32)).to(device)
+        mask_t = torch.from_numpy(mask[None, None, :].astype(np.float32)).to(device)
+        outside_t = 1.0 - mask_t
 
-    history: list[float] = []
-    for _ in range(int(config.epochs)):
-        optimizer.zero_grad(set_to_none=True)
-        pred_delta = model(features)
-        region_loss = torch.mean(torch.square((pred_delta - target_delta) * mask_t))
-        outside_loss = torch.mean(torch.square(pred_delta * outside_t))
-        loss = float(config.region_loss_weight) * region_loss + float(config.outside_loss_weight) * outside_loss
-        loss.backward()
-        optimizer.step()
-        history.append(float(loss.detach().cpu().item()))
+        history: list[float] = []
+        best_loss = float("inf")
+        best_state: dict[str, torch.Tensor] | None = None
+        for _ in range(int(attempt_config.epochs)):
+            optimizer.zero_grad(set_to_none=True)
+            pred_delta = model(features)
+            region_loss = torch.mean(torch.square((pred_delta - target_delta) * mask_t))
+            outside_loss = torch.mean(torch.square(pred_delta * outside_t))
+            loss = float(attempt_config.region_loss_weight) * region_loss + float(attempt_config.outside_loss_weight) * outside_loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            loss_value = float(loss.detach().cpu().item())
+            history.append(loss_value)
+            if loss_value < best_loss:
+                best_loss = loss_value
+                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
-    model.eval()
+        if best_state is not None:
+            model.load_state_dict(best_state)
+        model.eval()
+        return model.cpu(), history, best_loss if history else 0.0
+
+    attempts = [config]
+    if float(config.learning_rate) > 0.003 or int(config.epochs) < 200:
+        attempts.append(
+            replace(
+                config,
+                learning_rate=min(float(config.learning_rate), 0.003),
+                epochs=max(int(config.epochs), 200),
+            )
+        )
+    attempt_results: list[tuple[StemRegionRepairTrainConfig, StemRegionRepairNet, list[float], float]] = []
+    for attempt_config in attempts:
+        attempt_model, attempt_history, attempt_best_loss = _train_once(attempt_config)
+        attempt_results.append((attempt_config, attempt_model, attempt_history, attempt_best_loss))
+
+    selected_config, model, history, best_loss = min(attempt_results, key=lambda item: item[3])
     return model.cpu(), {
         "schema": "stem_region_repair_training_history.v1",
         "sample_rate": int(sample_rate),
         "issue_type": str(issue_type),
-        "epochs": int(config.epochs),
+        "epochs": int(selected_config.epochs),
         "initial_loss": float(history[0]) if history else 0.0,
-        "final_loss": float(history[-1]) if history else 0.0,
+        "final_loss": float(best_loss) if history else 0.0,
         "loss_history": [round(value, 8) for value in history],
-        "config": asdict(config),
+        "config": asdict(selected_config),
+        "attempts": [
+            {
+                "learning_rate": float(attempt_config.learning_rate),
+                "epochs": int(attempt_config.epochs),
+                "initial_loss": float(attempt_history[0]) if attempt_history else 0.0,
+                "final_loss": float(attempt_history[-1]) if attempt_history else 0.0,
+                "best_loss": float(attempt_best_loss),
+                "selected": attempt_config == selected_config,
+            }
+            for attempt_config, _attempt_model, attempt_history, attempt_best_loss in attempt_results
+        ],
     }
 
 

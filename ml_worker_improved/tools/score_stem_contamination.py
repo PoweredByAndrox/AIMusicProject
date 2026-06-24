@@ -158,6 +158,58 @@ def _sustained_melodic_in_drums_acoustic_evidence(leak_audio: np.ndarray, sample
     }
 
 
+def _vocal_in_drums_acoustic_evidence(leak_audio: np.ndarray, sample_rate: int) -> dict[str, Any]:
+    mono = np.asarray(leak_audio, dtype=np.float32)
+    if mono.ndim == 2:
+        mono = np.mean(mono, axis=1).astype(np.float32)
+    if mono.size <= 1:
+        return {
+            "vocal_like_in_drums": False,
+            "drums_vocal_active_ratio": 0.0,
+            "drums_vocal_peak_share": 0.0,
+            "drums_vocal_transient_ratio": 0.0,
+            "drums_vocal_envelope_cv": 0.0,
+            "drums_vocal_crest_db": 0.0,
+            "drums_vocal_flatness": 0.0,
+        }
+    frame = max(128, int(sample_rate * 0.06))
+    hop = max(1, frame // 2)
+    if mono.size < frame:
+        envelope = np.asarray([_rms(mono)], dtype=np.float32)
+    else:
+        envelope = np.asarray(
+            [_rms(mono[start : start + frame]) for start in range(0, len(mono) - frame + 1, hop)],
+            dtype=np.float32,
+        )
+    envelope_mean = float(np.mean(envelope) + 1.0e-12)
+    envelope_max = float(np.max(envelope) + 1.0e-12)
+    envelope_cv = float(np.std(envelope) / envelope_mean)
+    transient_ratio = float(np.mean(np.abs(np.diff(envelope))) / envelope_mean) if len(envelope) > 1 else 0.0
+    active_ratio = float(np.mean(envelope > 0.25 * envelope_max))
+    spectrum = np.abs(np.fft.rfft(mono * np.hanning(len(mono)))).astype(np.float64)
+    spectrum = spectrum + 1.0e-12
+    peak_share = float(np.max(spectrum) / np.sum(spectrum)) if spectrum.size else 0.0
+    flatness = float(np.exp(np.mean(np.log(spectrum))) / np.mean(spectrum)) if spectrum.size else 1.0
+    crest_db = _dbfs(float(np.max(np.abs(mono)))) - _dbfs(_rms(mono))
+    vocal_like = (
+        active_ratio >= 0.55
+        and peak_share >= 0.01
+        and transient_ratio <= 0.23
+        and envelope_cv <= 1.25
+        and crest_db <= 14.5
+        and flatness <= 0.45
+    )
+    return {
+        "vocal_like_in_drums": bool(vocal_like),
+        "drums_vocal_active_ratio": round(active_ratio, 6),
+        "drums_vocal_peak_share": round(peak_share, 6),
+        "drums_vocal_transient_ratio": round(transient_ratio, 6),
+        "drums_vocal_envelope_cv": round(envelope_cv, 6),
+        "drums_vocal_crest_db": round(crest_db, 6),
+        "drums_vocal_flatness": round(flatness, 6),
+    }
+
+
 def _foreign_in_vocals_acoustic_evidence(
     stem_audio: np.ndarray,
     leak_audio: np.ndarray,
@@ -296,6 +348,9 @@ def _no_reference_acoustic_leak_failed(
     if tested_stem == "drums" and foreign_source == "bass":
         evidence = _bass_in_drums_acoustic_evidence(leak_audio, sample_rate)
         return bool(evidence["bass_like_sustained"]), evidence
+    if tested_stem == "drums" and foreign_source == "vocals":
+        evidence = _vocal_in_drums_acoustic_evidence(leak_audio, sample_rate)
+        return bool(evidence["vocal_like_in_drums"]), evidence
     if tested_stem == "drums" and foreign_source in {"guitar", "piano", "other"}:
         evidence = _sustained_melodic_in_drums_acoustic_evidence(leak_audio, sample_rate)
         return bool(evidence["melodic_like_sustained"]), evidence
@@ -415,7 +470,8 @@ def score_stem_contamination(
                 sample_rate=stem_rate,
                 detection_floor_db=detection_floor_db,
             )
-            verdict = "fail" if probability_failed and acoustic_leak_failed else "pass"
+            acoustic_fail_closed = tested_stem == "drums" and foreign_source == "vocals" and acoustic_leak_failed
+            verdict = "fail" if acoustic_fail_closed or (probability_failed and acoustic_leak_failed) else "pass"
             return _write_no_reference_result(
                 tested_stem=tested_stem,
                 foreign_source=foreign_source,
