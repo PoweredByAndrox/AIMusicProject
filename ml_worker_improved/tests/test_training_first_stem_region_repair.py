@@ -119,6 +119,7 @@ def test_repeated_blocker_becomes_single_training_queue_sample(tmp_path: Path) -
     assert manifest["root_cause_counts"] == {"repair_gap": 1, "infra_gap": 1}
     assert len(rows) == 2
     repair_row = next(row for row in rows if row["root_cause"] == "repair_gap")
+    assert repair_row["training_state"] == "data_gap"
     assert repair_row["issue_type"] == ISSUE_VOCAL_LEAK
     assert repair_row["affected_stem"] == "drums"
     assert repair_row["foreign_source"] == "vocals"
@@ -162,6 +163,49 @@ def test_auto_accepted_candidates_are_not_training_failures(tmp_path: Path) -> N
 
     assert manifest["queue_row_count"] == 1
     assert rows[0]["candidate_ids"] == ["c002", "c003"]
+
+
+def test_root_cause_queue_splits_multiple_foreign_source_blockers(tmp_path: Path) -> None:
+    run_json = tmp_path / "run.json"
+    reason = "foreign_source_recovered:bass:vocals,foreign_source_recovered:other:vocals"
+    run_json.write_text(
+        json.dumps(
+            {
+                "schema": "fully_automatic_stem_run.v1",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "window_id": "w000",
+                        "verdict": "blocked_leak",
+                        "next_action": {"reason": reason},
+                        "stem_paths": {"bass": "/tmp/bass.flac", "other": "/tmp/other.flac"},
+                    },
+                    {
+                        "candidate_id": "c002",
+                        "window_id": "w000",
+                        "verdict": "blocked_leak",
+                        "next_action": {"reason": reason},
+                        "stem_paths": {"bass": "/tmp/bass2.flac", "other": "/tmp/other2.flac"},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_root_cause_queue(run_json_path=run_json, output_dir=tmp_path / "queue", min_repeats=2)
+    rows = [
+        json.loads(line)
+        for line in Path(manifest["queue_jsonl"]).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert manifest["queue_row_count"] == 2
+    assert {(row["affected_stem"], row["foreign_source"], row["blocker_reason"]) for row in rows} == {
+        ("bass", "vocals", "foreign_source_recovered:bass:vocals"),
+        ("other", "vocals", "foreign_source_recovered:other:vocals"),
+    }
+    assert all(row["training_state"] == "data_gap" for row in rows)
 
 
 def test_generated_separator_output_cannot_be_region_repair_ground_truth() -> None:

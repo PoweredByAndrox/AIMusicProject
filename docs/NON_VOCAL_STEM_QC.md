@@ -7,6 +7,81 @@ known stem-quality defect labels such as drum tonal leakage, proxy-copy stems, i
 and source conservation errors. The benchmark fails on unexpected P1 labels unless a fixture explicitly
 allows a secondary label.
 
+## Cross-stem forensic delivery gate
+
+`ml_worker_improved/tools/stem_forensic_crosscheck.py` is the forced sibling-stem forensic gate for
+delivery candidates and final listen packs.
+
+Contract:
+
+- a candidate cannot enter listen only because the standalone contamination detector passes;
+- every delivery candidate must run a cross-stem matrix over forbidden sibling relationships:
+  `vocals` against `drums/bass/guitar/piano/other`, non-vocal stems against `vocals`, configured
+  non-vocal cross-bleed pairs, and `minus` against `vocals`;
+- `vocals:drums` is a special high-risk pair: aligned high-frequency transients, high-frequency
+  flux/envelope correlation, transient-region STFT similarity, or source-relative projection can
+  raise `vocal_contains_drum_transient_imprint`;
+- gain/stress probes are diagnostic only. They can expose quiet coherent imprint, but they never
+  modify delivery audio;
+- unknown forensic outcomes block automatically as `blocked_unknown`;
+- failed pair checks write pair JSON, matrix JSON, suspicious regions, and optional proxy audio under
+  `score/forensic/` for candidate evidence only;
+- after `build_listen_pack()` concatenates accepted windows, the final `listen/audio/*.flac` files
+  must be revalidated with the effective forensic gate used by the accepted candidate set. If
+  candidate-level configs conflict, the listen pack blocks fail-closed. If revalidation fails, the
+  listen pack is deleted, `delivery_status=blocked`, `delivery_allowed=false`,
+  `presentation_status=blocked_from_listen_pack`, and `failed_checks=["listen_pack_forensic_failed"]`;
+- forensic proxy audio is never a result/listen artifact.
+
+## Model-split v2 pair ranking and repair candidates
+
+`model_split_v2` composite search must rank vocal/minus route pairs by the audio that would actually
+be delivered after candidate copy/shape alignment.
+
+Contract:
+
+- route collection must not dedupe only by `route_id`; the same model id can produce different audio
+  in different candidates, so identity includes the required source audio paths;
+- pair ranking uses aligned `output_path` from `copied_outputs` when available and falls back to raw
+  `source_path` only when no aligned output exists;
+- `delivery_pair_residual` repair candidates such as `pr16` and `bs400_pr16` are allowed only as
+  gated repair candidates. They can reduce `vocals + minus` residual, but they cannot publish unless
+  damage, voice-presence, contamination, and cross-stem forensic gates also pass;
+- `delivery_pair_residual` is not a fallback-as-success route. If it exposes vocal leakage, drum
+  imprint, stereo collapse, or other stem damage, the candidate stays blocked and is training/root
+  cause evidence only;
+- bounded composite search must sample support lanes before exhausting all repair variants. In
+  practice this means the first pass tries no-support/no-repair, then available `bass_support` and
+  `non_vocal_support` routes without repair. The bounded pass must then try key support-plus-repair
+  combinations (`pr16`, `bs400_pr16`, `vp100`, `bs400`) before lower-priority no-support variants,
+  because support-only candidates can still expose reconstruction, stereo, or vocal-leak blockers;
+- support lanes must be materialized by the default bounded recipe, not only listed in
+  `target_specific_routes`. `bass_support` must have an executable producer, and `non_vocal_support`
+  must not depend on a single fragile first candidate.
+
+## Training-first stem-region repair
+
+`ml_worker_improved/tools/build_stem_region_synthetic_pretrain_dataset.py` and
+`ml_worker_improved/tools/train_stem_region_repair_model.py` are the current training-first repair
+entry points for blocked candidate evidence.
+
+Contract:
+
+- blocked separator output is mining evidence, not ground truth;
+- synthetic pretrain rows may be exact ground truth only because the clean target is generated before
+  corruption;
+- supported synthetic repair issues are `stereo_collapse`, `vocal_leak`, and `instrument_leak`;
+- focused builders can filter by `--issue-type` and `--stem`, so repeated blockers such as
+  `bass:vocal_leak`, `minus:vocal_leak`, and `other:instrument_leak` can produce separate one-row
+  checkpoints;
+- v1 trainer intentionally trains exactly one focused row per checkpoint. This keeps the first repair
+  target small and prevents unrelated failures from being hidden inside one broad model;
+- `model_split_v2` can inject multiple focused checkpoints as a single sequence repair option
+  (`srseq_vp100_pr16`). The sequence applies several `stem_region_repair` patches before the
+  existing debleed/residual repair steps, but it is still a gated repair candidate;
+- if the sequence shifts failure from leakage into reconstruction or damage, the candidate remains
+  blocked and the run must write a root-cause queue. It must not create a listen pack.
+
 ## Scope
 
 `ml_worker_improved/tools/stem_quality_control.py` применяет только общие проверки и безопасный headroom:

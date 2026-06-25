@@ -15,10 +15,12 @@ import numpy as np
 try:
     from tools.build_stem_region_repair_dataset import corrupt_clean_stem
     from tools.stem_region_repair_common import (
+        ISSUE_INSTRUMENT_LEAK,
         ISSUE_STEREO_COLLAPSE,
         ISSUE_VOCAL_LEAK,
         LABEL_TYPE_SYNTHETIC_CLEAN,
         make_region_mask,
+        normalize_stem_name,
         read_audio_stereo,
         validate_issue_type,
         validate_region_repair_row,
@@ -29,10 +31,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
     from build_stem_region_repair_dataset import corrupt_clean_stem
     from stem_region_repair_common import (
+        ISSUE_INSTRUMENT_LEAK,
         ISSUE_STEREO_COLLAPSE,
         ISSUE_VOCAL_LEAK,
         LABEL_TYPE_SYNTHETIC_CLEAN,
         make_region_mask,
+        normalize_stem_name,
         read_audio_stereo,
         validate_issue_type,
         validate_region_repair_row,
@@ -42,7 +46,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution fallba
     )
 
 
-SUPPORTED_ISSUES = {ISSUE_STEREO_COLLAPSE, ISSUE_VOCAL_LEAK}
+SUPPORTED_ISSUES = {ISSUE_STEREO_COLLAPSE, ISSUE_VOCAL_LEAK, ISSUE_INSTRUMENT_LEAK}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -98,10 +102,16 @@ def build_stem_region_synthetic_pretrain_dataset(
     output_dir: Path,
     max_rows: int = 8,
     duration_sec: float = 2.0,
+    issue_type_filter: str = "",
+    stem_filter: str = "",
 ) -> dict[str, Any]:
     hardcase_rows = _read_jsonl(hardcase_rows_jsonl)
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_dir = output_dir / "audio"
+    normalized_issue_filter = str(issue_type_filter or "").strip().lower()
+    if normalized_issue_filter:
+        normalized_issue_filter = validate_issue_type(normalized_issue_filter)
+    normalized_stem_filter = normalize_stem_name(stem_filter) if str(stem_filter or "").strip() else ""
 
     rows: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
@@ -109,13 +119,19 @@ def build_stem_region_synthetic_pretrain_dataset(
         if len(rows) >= int(max_rows):
             break
         issue_type = validate_issue_type(hardcase.get("issue_type"))
+        if normalized_issue_filter and issue_type != normalized_issue_filter:
+            skipped.append({"row_id": str(hardcase.get("row_id") or ""), "reason": "issue_type_filter"})
+            continue
         if issue_type not in SUPPORTED_ISSUES:
             skipped.append({"row_id": str(hardcase.get("row_id") or ""), "reason": "unsupported_issue"})
             continue
         if str(hardcase.get("training_state") or "") != "data_gap":
             skipped.append({"row_id": str(hardcase.get("row_id") or ""), "reason": "not_data_gap"})
             continue
-        stem = str(hardcase.get("affected_stem") or hardcase.get("target_stem") or "").strip().lower()
+        stem = normalize_stem_name(hardcase.get("affected_stem") or hardcase.get("target_stem"))
+        if normalized_stem_filter and stem != normalized_stem_filter:
+            skipped.append({"row_id": str(hardcase.get("row_id") or ""), "reason": "stem_filter"})
+            continue
         frames, sample_rate = _reference_shape(str(hardcase.get("bad_stem_path") or ""), duration_sec)
         row_index = len(rows)
         region_mask = make_region_mask(
@@ -164,6 +180,8 @@ def build_stem_region_synthetic_pretrain_dataset(
         "schema": "stem_region_synthetic_pretrain_dataset.v1",
         "hardcase_rows_jsonl": str(hardcase_rows_jsonl),
         "rows_jsonl": str(rows_path),
+        "issue_type_filter": normalized_issue_filter,
+        "stem_filter": normalized_stem_filter,
         "row_count": len(rows),
         "skipped_count": len(skipped),
         "skipped": skipped[:50],
@@ -189,6 +207,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--max-rows", type=int, default=8)
     parser.add_argument("--duration-sec", type=float, default=2.0)
+    parser.add_argument("--issue-type", default="")
+    parser.add_argument("--stem", default="")
     return parser
 
 
@@ -199,6 +219,8 @@ def main() -> int:
         output_dir=args.out,
         max_rows=args.max_rows,
         duration_sec=args.duration_sec,
+        issue_type_filter=args.issue_type,
+        stem_filter=args.stem,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0

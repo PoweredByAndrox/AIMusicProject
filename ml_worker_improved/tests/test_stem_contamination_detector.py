@@ -14,6 +14,7 @@ import tools.score_stem_contamination as scorer
 from tools.score_stem_contamination import score_stem_contamination
 from tools.stem_contamination_common import build_minus_from_non_vocal_stems
 from tools.stem_contamination_model import BASE_FEATURE_NAMES, StemContaminationNet
+from tools.stem_forensic_crosscheck import score_pair_forensic
 from tools.train_stem_contamination_detector import train_stem_contamination_detector
 
 
@@ -123,6 +124,18 @@ def cymbal_like_drums(seconds: float = 0.75) -> np.ndarray:
         end = min(frames, start + decay_len)
         noise = rng.normal(0.0, 0.25, end - start).astype(np.float32)
         audio[start:end] += noise * decay[: end - start]
+    return audio.astype(np.float32)
+
+
+def sparse_click_transients(seconds: float = 0.75, *, starts: tuple[float, ...] = (0.12, 0.31, 0.52)) -> np.ndarray:
+    frames = int(SAMPLE_RATE * seconds)
+    audio = np.zeros(frames, dtype=np.float32)
+    click_len = max(8, int(SAMPLE_RATE * 0.018))
+    decay = np.exp(-np.arange(click_len, dtype=np.float32) / float(SAMPLE_RATE * 0.004))
+    for start_sec in starts:
+        start = int(round(SAMPLE_RATE * start_sec))
+        end = min(frames, start + click_len)
+        audio[start:end] += 0.25 * decay[: end - start]
     return audio.astype(np.float32)
 
 
@@ -464,6 +477,74 @@ def test_no_reference_drums_vocal_acoustic_evidence_fails_even_with_low_model_pr
     assert result["probability_failed"] is False
     assert result["acoustic_leak_failed"] is True
     assert result["acoustic_evidence"]["vocal_like_in_drums"] is True
+
+
+def test_forensic_vocal_with_aligned_drum_imprint_fails(tmp_path: Path) -> None:
+    drums = cymbal_like_drums(seconds=0.75)
+    contaminated_vocal = bright_voice_like_vocal(seconds=0.75) + 0.18 * drums
+
+    result = score_pair_forensic(
+        tested_stem="vocals",
+        source_stem="drums",
+        tested_path=write_wav(tmp_path / "vocals.flac", contaminated_vocal),
+        source_path=write_wav(tmp_path / "drums.flac", drums),
+        output_dir=tmp_path / "forensic",
+    )
+
+    assert result["verdict"] == "fail"
+    assert "vocal_contains_drum_transient_imprint" in result["blocker_reasons"]
+    assert result["regions"]
+    assert result["forensic_proxy_audio"]
+
+
+def test_forensic_clean_vocal_with_unaligned_drums_passes(tmp_path: Path) -> None:
+    drums = cymbal_like_drums(seconds=0.75)
+    clean_vocal = bright_voice_like_vocal(seconds=0.75)
+
+    result = score_pair_forensic(
+        tested_stem="vocals",
+        source_stem="drums",
+        tested_path=write_wav(tmp_path / "vocals.flac", clean_vocal),
+        source_path=write_wav(tmp_path / "drums.flac", np.roll(drums, int(SAMPLE_RATE * 0.09))),
+        output_dir=tmp_path / "forensic",
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["blocker_reasons"] == []
+
+
+def test_forensic_quiet_drum_imprint_fails_after_stress_probe(tmp_path: Path) -> None:
+    drums = cymbal_like_drums(seconds=0.75)
+    contaminated_vocal = bright_voice_like_vocal(seconds=0.75) + 0.045 * drums
+
+    result = score_pair_forensic(
+        tested_stem="vocals",
+        source_stem="drums",
+        tested_path=write_wav(tmp_path / "vocals.flac", contaminated_vocal),
+        source_path=write_wav(tmp_path / "drums.flac", drums),
+        output_dir=tmp_path / "forensic",
+        config={"probe_gains": [0.5, 1.0, 2.0, 4.0]},
+    )
+
+    assert result["verdict"] == "fail"
+    assert result["best_probe_gain"] == 4.0
+    assert "vocal_contains_drum_transient_imprint" in result["blocker_reasons"]
+
+
+def test_forensic_vocal_consonant_transients_without_drum_coherence_pass(tmp_path: Path) -> None:
+    clean_vocal = bright_voice_like_vocal(seconds=0.75) + sparse_click_transients(seconds=0.75, starts=(0.08, 0.27, 0.61))
+    drums = cymbal_like_drums(seconds=0.75)
+
+    result = score_pair_forensic(
+        tested_stem="vocals",
+        source_stem="drums",
+        tested_path=write_wav(tmp_path / "vocals.flac", clean_vocal),
+        source_path=write_wav(tmp_path / "drums.flac", np.roll(drums, int(SAMPLE_RATE * 0.11))),
+        output_dir=tmp_path / "forensic",
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["blocker_reasons"] == []
 
 
 def test_no_reference_unsupported_pair_blocks_unknown(tmp_path: Path) -> None:

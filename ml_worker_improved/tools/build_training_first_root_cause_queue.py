@@ -159,6 +159,59 @@ def classify_blocker(candidate: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def classify_candidate_blockers(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
+    reason = _candidate_reason(candidate)
+    error = candidate.get("error") if isinstance(candidate.get("error"), Mapping) else {}
+    if candidate.get("execution_status") == "failed_runtime_error" or error:
+        return [classify_blocker(candidate)]
+
+    classifications: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for foreign_match in FOREIGN_RECOVERED_RE.finditer(reason):
+        affected_stem = normalize_stem_name(foreign_match.group(1))
+        foreign_source = normalize_stem_name(foreign_match.group(2))
+        blocker_reason = foreign_match.group(0)
+        key = (affected_stem, foreign_source, blocker_reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        classifications.append(
+            {
+                "root_cause": ROOT_CAUSE_REPAIR_GAP,
+                "issue_type": ISSUE_VOCAL_LEAK if foreign_source == "vocals" else ISSUE_INSTRUMENT_LEAK,
+                "affected_stem": affected_stem,
+                "foreign_source": foreign_source,
+                "training_action": "mine_region_repair_example",
+                "blocker_reason": blocker_reason,
+            }
+        )
+    if classifications:
+        return classifications
+
+    stereo_classifications: list[dict[str, Any]] = []
+    for stereo_match in STEREO_COLLAPSE_RE.finditer(reason):
+        affected_stem = normalize_stem_name(stereo_match.group(1))
+        blocker_reason = stereo_match.group(0)
+        key = (affected_stem, "", blocker_reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        stereo_classifications.append(
+            {
+                "root_cause": ROOT_CAUSE_REPAIR_GAP,
+                "issue_type": ISSUE_STEREO_COLLAPSE,
+                "affected_stem": affected_stem,
+                "foreign_source": "",
+                "training_action": "mine_stereo_repair_example",
+                "blocker_reason": blocker_reason,
+            }
+        )
+    if stereo_classifications:
+        return stereo_classifications
+
+    return [classify_blocker(candidate)]
+
+
 def _queue_signature(candidate: Mapping[str, Any], classification: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
     return (
         str(candidate.get("window_id") or ""),
@@ -189,10 +242,10 @@ def build_root_cause_queue(
         if str(candidate.get("verdict") or "").strip() == "auto_accept":
             continue
         blocked_candidate_count += 1
-        classification = classify_blocker(candidate)
-        signature = _queue_signature(candidate, classification)
-        grouped[signature].append(candidate)
-        classifications[signature] = classification
+        for classification in classify_candidate_blockers(candidate):
+            signature = _queue_signature(candidate, classification)
+            grouped[signature].append(candidate)
+            classifications[signature] = classification
 
     rows: list[dict[str, Any]] = []
     for index, (signature, group) in enumerate(sorted(grouped.items(), key=lambda item: item[0]), start=1):
@@ -206,6 +259,7 @@ def build_root_cause_queue(
             "schema": "training_first_root_cause_sample.v1",
             "row_id": f"rc{index:06d}",
             "root_cause": root_cause,
+            "training_state": "data_gap" if root_cause == ROOT_CAUSE_REPAIR_GAP else root_cause,
             "issue_type": classification["issue_type"],
             "affected_stem": classification["affected_stem"],
             "foreign_source": classification["foreign_source"],

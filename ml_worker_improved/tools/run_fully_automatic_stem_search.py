@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -21,6 +22,7 @@ if __package__ in {None, ""}:
 
 from tools.score_stem_contamination import score_stem_contamination
 from tools.build_training_first_root_cause_queue import build_root_cause_queue
+from tools.stem_forensic_crosscheck import score_cross_stem_forensic_matrix, validate_listen_pack_forensic
 from tools.stem_region_repair_common import ISSUE_STEREO_COLLAPSE, make_region_mask
 from tools.stem_region_repair_model import apply_region_repair_model, load_region_repair_checkpoint
 from tools.stem_contamination_common import (
@@ -435,11 +437,96 @@ def _non_vocal_support_lane_command_template(route_id: str) -> list[str]:
     ]
 
 
+def _model_split_stem_region_repair_options(
+    stem_region_repair_checkpoints: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    if not stem_region_repair_checkpoints:
+        return options
+    sequence_configs: list[dict[str, str]] = []
+    for index, raw_checkpoint in enumerate(stem_region_repair_checkpoints, start=1):
+        if not isinstance(raw_checkpoint, Mapping):
+            continue
+        checkpoint = str(raw_checkpoint.get("checkpoint") or raw_checkpoint.get("checkpoint_path") or "").strip()
+        if not checkpoint:
+            continue
+        stem = str(raw_checkpoint.get("stem") or "bass").strip().lower()
+        issue_type = str(raw_checkpoint.get("issue_type") or ISSUE_STEREO_COLLAPSE).strip().lower()
+        repair_id = _safe_artifact_segment(
+            str(raw_checkpoint.get("repair_id") or f"sr{index:03d}"),
+            fallback=f"sr{index:03d}",
+        )
+        sequence_configs.append({"stem": stem, "issue_type": issue_type, "checkpoint": checkpoint})
+        options.append(
+            {
+                "repair_id": repair_id,
+                "type": "stem_region_repair",
+                "stem": stem,
+                "issue_type": issue_type,
+                "checkpoint": checkpoint,
+            }
+        )
+        options.append(
+            {
+                "repair_id": f"{repair_id}_vp100",
+                "type": "stem_region_repair+vocal_projection_debleed",
+                "stem_region_repair": {
+                    "stem": stem,
+                    "issue_type": issue_type,
+                    "checkpoint": checkpoint,
+                },
+                "vocal_projection_debleed": {
+                    "strength": 1.0,
+                    "target_stems": list(NON_VOCAL_STEMS),
+                },
+            }
+        )
+        options.insert(
+            len(options) - 1,
+            {
+                "repair_id": f"{repair_id}_vp100_pr16",
+                "type": "stem_region_repair+vocal_projection_debleed+delivery_pair_residual",
+                "stem_region_repair": {
+                    "stem": stem,
+                    "issue_type": issue_type,
+                    "checkpoint": checkpoint,
+                },
+                "vocal_projection_debleed": {
+                    "strength": 1.0,
+                    "target_stems": list(NON_VOCAL_STEMS),
+                },
+                "delivery_pair_residual": {
+                    "target_stem": "minus",
+                    "max_residual_ratio": 0.16,
+                },
+            },
+        )
+    if len(sequence_configs) > 1:
+        options.insert(
+            0,
+            {
+                "repair_id": "srseq_vp100_pr16",
+                "type": "stem_region_repair+vocal_projection_debleed+delivery_pair_residual",
+                "stem_region_repairs": sequence_configs,
+                "vocal_projection_debleed": {
+                    "strength": 1.0,
+                    "target_stems": list(NON_VOCAL_STEMS),
+                },
+                "delivery_pair_residual": {
+                    "target_stem": "minus",
+                    "max_residual_ratio": 0.16,
+                },
+            },
+        )
+    return options
+
+
 def build_model_split_v2_recipe(
     *,
     demucs_available: bool | None = None,
     available_vocal_routes: tuple[str, ...] | None = None,
     contamination_model_manifest: Path | str | None = None,
+    stem_region_repair_checkpoints: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if demucs_available is None:
         demucs_available = shutil.which("demucs") is not None
@@ -463,6 +550,7 @@ def build_model_split_v2_recipe(
     else:
         vocal_lane_manifest = tuple(MODEL_SPLIT_V2_VOCAL_LANE)
     executable_vocal_lane = vocal_lane or tuple(MODEL_SPLIT_V2_VOCAL_LANE)
+    learned_repair_options = _model_split_stem_region_repair_options(stem_region_repair_checkpoints)
     candidates: list[dict[str, Any]] = []
     for index in range(10):
         stem_route = MODEL_SPLIT_V2_STEM_LANE[index % len(MODEL_SPLIT_V2_STEM_LANE)]
@@ -491,7 +579,17 @@ def build_model_split_v2_recipe(
                 "command_template": _minus_lane_command_template(minus_route),
             },
         ]
-        if index == 0:
+        if index == 1:
+            bass_support_route = MODEL_SPLIT_V2_BASS_SUPPORT_LANE[0]
+            target_specific_commands.append(
+                {
+                    "role": "bass_support",
+                    "lane": "bass_support_lane",
+                    "route_id": bass_support_route,
+                    "command_template": _bass_support_lane_command_template(bass_support_route),
+                }
+            )
+        if index in {0, 2}:
             support_route = MODEL_SPLIT_V2_NON_VOCAL_SUPPORT_LANE[0]
             target_specific_commands.append(
                 {
@@ -534,6 +632,7 @@ def build_model_split_v2_recipe(
                 },
                 "model_split_composite_repair_options": [
                     {"repair_id": "none", "type": "none"},
+                    *learned_repair_options,
                     {
                         "repair_id": "vp100",
                         "type": "vocal_projection_debleed",
@@ -555,6 +654,23 @@ def build_model_split_v2_recipe(
                         "type": "delivery_pair_gain",
                         "target_stem": "minus",
                         "max_abs_gain_delta": 0.08,
+                    },
+                    {
+                        "repair_id": "pr16",
+                        "type": "delivery_pair_residual",
+                        "target_stem": "minus",
+                        "max_residual_ratio": 0.16,
+                    },
+                    {
+                        "repair_id": "bs400_pr16",
+                        "type": "bass_stereo_width+delivery_pair_residual",
+                        "bass_stereo_width": {
+                            "side_gain": 4.0,
+                        },
+                        "delivery_pair_residual": {
+                            "target_stem": "minus",
+                            "max_residual_ratio": 0.16,
+                        },
                     },
                     {
                         "repair_id": "vp100_bs400",
@@ -1856,6 +1972,39 @@ def apply_learned_stem_region_repair(
     return result
 
 
+def apply_learned_stem_region_repairs(
+    *,
+    mix_path: Path,
+    stem_paths: Mapping[str, str],
+    configs: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "applied": False,
+        "repair_owner": "runner_stem_region_repair_sequence_v1",
+        "repairs": [],
+        "blockers": [],
+    }
+    if not configs:
+        result["blockers"].append("missing_stem_region_repair_sequence")
+        return result
+
+    for raw_config in configs:
+        if not isinstance(raw_config, Mapping):
+            result["blockers"].append("invalid_stem_region_repair_sequence_item")
+            continue
+        item = apply_learned_stem_region_repair(
+            mix_path=mix_path,
+            stem_paths=stem_paths,
+            config=dict(raw_config),
+        )
+        result["repairs"].append(item)
+        if item.get("applied"):
+            result["applied"] = True
+        for blocker in item.get("blockers") or []:
+            result["blockers"].append(str(blocker))
+    return result
+
+
 def apply_delivery_pair_gain_repair(
     *,
     mix_path: Path,
@@ -2064,6 +2213,36 @@ def _find_window_candidate(window: Mapping[str, Any], candidate_id: str) -> Mapp
         if str(candidate.get("candidate_id") or "") == candidate_id and candidate.get("verdict") == "auto_accept":
             return candidate
     raise ValueError(f"accepted candidate not found for window {window.get('window_id')}: {candidate_id}")
+
+
+def _config_identity(config: Mapping[str, Any]) -> str:
+    return json.dumps(dict(config), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _resolve_listen_pack_forensic_config(
+    *,
+    recipe: Mapping[str, Any],
+    windows: Sequence[Mapping[str, Any]],
+    accepted_window_candidates: Mapping[str, str],
+) -> tuple[dict[str, Any], list[str]]:
+    recipe_config = _cross_stem_forensic_gate_config(recipe)
+    accepted_configs: list[dict[str, Any]] = []
+    for window in windows:
+        window_id = str(window.get("window_id") or "")
+        candidate_id = str(accepted_window_candidates.get(window_id) or "")
+        if not candidate_id:
+            continue
+        candidate = _find_window_candidate(window, candidate_id)
+        candidate_config = _cross_stem_forensic_gate_config(candidate)
+        if candidate_config:
+            accepted_configs.append(candidate_config)
+    if not accepted_configs:
+        return recipe_config, []
+    first = accepted_configs[0]
+    first_key = _config_identity(first)
+    if any(_config_identity(config) != first_key for config in accepted_configs[1:]):
+        return {}, ["listen_pack_forensic_config_conflict"]
+    return first, []
 
 
 def _concat_audio(paths: list[Path]) -> tuple[np.ndarray, int]:
@@ -2481,19 +2660,72 @@ def _score_candidate_contamination(
     }
 
 
-def _route_source_for_stem(route: Mapping[str, Any], stem: str) -> Path | None:
+def _score_candidate_cross_stem_forensic(
+    *,
+    candidate: Mapping[str, Any],
+    candidate_dir: Path,
+    stem_paths: Mapping[str, str],
+) -> dict[str, Any]:
+    config = _cross_stem_forensic_gate_config(candidate)
+    if config.get("enabled") is False:
+        return {
+            "schema": "cross_stem_forensic_matrix.v1",
+            "verdict": "blocked_unknown",
+            "blocker_reasons": ["v2_cross_stem_forensic_gate_disabled"],
+            "pair_results": [],
+        }
+    return score_cross_stem_forensic_matrix(
+        stem_paths=stem_paths,
+        output_dir=candidate_dir / "score" / "forensic",
+        config=config,
+    )
+
+
+def _cross_stem_forensic_gate_config(owner: Mapping[str, Any]) -> dict[str, Any]:
+    config = owner.get("cross_stem_forensic_gate") if isinstance(owner.get("cross_stem_forensic_gate"), dict) else {}
+    return dict(config)
+
+
+def _candidate_verdict_from_cross_stem_forensic(score: Mapping[str, Any]) -> str:
+    if score.get("verdict") == "auto_accept":
+        return "auto_accept"
+    if score.get("verdict") == "fail":
+        return "blocked_leak"
+    return "blocked_unknown"
+
+
+def _route_existing_audio_path_for_stem(route: Mapping[str, Any], stem: str, keys: Sequence[str]) -> Path | None:
     for copied in route.get("copied_outputs", []) if isinstance(route.get("copied_outputs"), list) else []:
         if not isinstance(copied, dict):
             continue
         if str(copied.get("stem") or "") != stem:
             continue
-        source_path = Path(str(copied.get("source_path") or ""))
-        return source_path if source_path.is_file() else None
+        for key in keys:
+            audio_path = Path(str(copied.get(key) or ""))
+            if audio_path.is_file():
+                return audio_path
     return None
+
+
+def _route_source_for_stem(route: Mapping[str, Any], stem: str) -> Path | None:
+    return _route_existing_audio_path_for_stem(route, stem, ("source_path",))
+
+
+def _route_pair_scoring_path_for_stem(route: Mapping[str, Any], stem: str) -> Path | None:
+    return _route_existing_audio_path_for_stem(route, stem, ("output_path", "source_path"))
 
 
 def _route_has_source_stems(route: Mapping[str, Any], stems: Sequence[str]) -> bool:
     return all(_route_source_for_stem(route, stem) is not None for stem in stems)
+
+
+def _route_source_identity(route: Mapping[str, Any], stems: Sequence[str]) -> str:
+    route_id = str(route.get("route_id") or route.get("route_alias") or route.get("stems_dir") or "")
+    source_parts: list[str] = []
+    for stem in stems:
+        source_path = _route_source_for_stem(route, stem)
+        source_parts.append(str(source_path.resolve()) if source_path is not None else "")
+    return "\x1f".join([route_id, *source_parts])
 
 
 def _model_split_routes_by_role(
@@ -2514,12 +2746,133 @@ def _model_split_routes_by_role(
                 continue
             if not _route_has_source_stems(route, required_stems):
                 continue
-            key = str(route.get("route_id") or route.get("route_alias") or route.get("stems_dir") or "")
+            key = _route_source_identity(route, required_stems)
             if key in seen:
                 continue
             seen.add(key)
             routes.append(route)
     return routes
+
+
+def _route_id_for_pairing(route: Mapping[str, Any]) -> str:
+    return str(route.get("route_id") or route.get("route_alias") or route.get("stems_dir") or "")
+
+
+def _score_vocal_minus_route_pair(
+    *,
+    mix_path: Path,
+    vocal_route: Mapping[str, Any],
+    minus_route: Mapping[str, Any],
+) -> float:
+    vocal_path = _route_pair_scoring_path_for_stem(vocal_route, "vocals")
+    minus_path = _route_pair_scoring_path_for_stem(minus_route, "minus")
+    if vocal_path is None or minus_path is None:
+        return float("inf")
+    score = validate_mix_conservation(
+        mix_path=mix_path,
+        stem_paths={"vocals": str(vocal_path), "minus": str(minus_path)},
+        required_stems=("vocals", "minus"),
+        relative_tolerance=1.0,
+    )
+    if score.get("blockers"):
+        return float("inf")
+    return float(score.get("residual_ratio") or float("inf"))
+
+
+def _rank_model_split_vocal_minus_pairs(
+    *,
+    mix_path: Path,
+    vocal_routes: Sequence[Mapping[str, Any]],
+    minus_routes: Sequence[Mapping[str, Any]],
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any], float]]:
+    pairs: list[tuple[Mapping[str, Any], Mapping[str, Any], float, int, int]] = []
+    for vocal_index, vocal_route in enumerate(vocal_routes):
+        for minus_index, minus_route in enumerate(minus_routes):
+            residual_ratio = _score_vocal_minus_route_pair(
+                mix_path=mix_path,
+                vocal_route=vocal_route,
+                minus_route=minus_route,
+            )
+            pairs.append((vocal_route, minus_route, residual_ratio, vocal_index, minus_index))
+    return [
+        (vocal_route, minus_route, residual_ratio)
+        for vocal_route, minus_route, residual_ratio, _, _ in sorted(
+            pairs,
+            key=lambda item: (
+                item[2],
+                _route_id_for_pairing(item[0]),
+                _route_id_for_pairing(item[1]),
+                item[3],
+                item[4],
+            ),
+        )
+    ]
+
+
+def _prioritized_model_split_support_repair_pairs(
+    *,
+    support_options: Sequence[Mapping[str, Mapping[str, Any]]],
+    repair_options: Sequence[Mapping[str, Any]],
+) -> list[tuple[Mapping[str, Mapping[str, Any]], Mapping[str, Any]]]:
+    if not support_options:
+        support_options = ({},)
+    if not repair_options:
+        repair_options = ({"repair_id": "none", "type": "none"},)
+
+    base_support = support_options[0]
+    support_tail = list(support_options[1:])
+    first_repair = repair_options[0]
+    pairs: list[tuple[Mapping[str, Mapping[str, Any]], Mapping[str, Any]]] = []
+    seen: set[tuple[int, str, str]] = set()
+
+    def add_pair(support_routes: Mapping[str, Mapping[str, Any]], repair_option: Mapping[str, Any]) -> None:
+        key = (
+            id(support_routes),
+            str(repair_option.get("repair_id") or ""),
+            str(repair_option.get("type") or ""),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        pairs.append((support_routes, repair_option))
+
+    add_pair(base_support, first_repair)
+    for support_routes in support_tail:
+        add_pair(support_routes, first_repair)
+
+    priority_repair_ids = ("pr16", "bs400_pr16", "vp100", "bs400")
+    learned_repairs: list[Mapping[str, Any]] = []
+    priority_repairs: list[Mapping[str, Any]] = []
+    remaining_repairs: list[Mapping[str, Any]] = []
+    for repair_option in repair_options[1:]:
+        repair_id = str(repair_option.get("repair_id") or "")
+        repair_type = str(repair_option.get("type") or "")
+        if "stem_region_repair" in repair_type.split("+"):
+            learned_repairs.append(repair_option)
+        elif repair_id in priority_repair_ids:
+            priority_repairs.append(repair_option)
+        else:
+            remaining_repairs.append(repair_option)
+    priority_repairs.sort(
+        key=lambda repair_option: priority_repair_ids.index(str(repair_option.get("repair_id") or ""))
+    )
+
+    for repair_option in learned_repairs:
+        for support_routes in support_tail:
+            add_pair(support_routes, repair_option)
+        add_pair(base_support, repair_option)
+
+    for repair_option in priority_repairs:
+        for support_routes in support_tail:
+            add_pair(support_routes, repair_option)
+        add_pair(base_support, repair_option)
+
+    for repair_option in remaining_repairs:
+        add_pair(base_support, repair_option)
+    for support_routes in support_tail:
+        for repair_option in remaining_repairs:
+            add_pair(support_routes, repair_option)
+    return pairs
 
 
 def _copy_route_stem_to_candidate(
@@ -2587,17 +2940,21 @@ def _finalize_composite_candidate(
     damage_score: Mapping[str, Any] | None = None,
     voice_presence_score: Mapping[str, Any] | None = None,
     contamination_score: Mapping[str, Any] | None = None,
+    cross_stem_forensic_score: Mapping[str, Any] | None = None,
     vocal_projection_debleed: Mapping[str, Any] | None = None,
     delivery_pair_gain_repair: Mapping[str, Any] | None = None,
     delivery_pair_residual_repair: Mapping[str, Any] | None = None,
     bass_stereo_width_repair: Mapping[str, Any] | None = None,
     stem_region_repair: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    verdict = str(
-        (contamination_score or voice_presence_score or damage_score or reconstruction).get("verdict")
-        if any((contamination_score, voice_presence_score, damage_score))
-        else ("auto_accept" if reconstruction.get("ok") else "blocked_bad_reconstruction")
-    )
+    verdict = "auto_accept" if reconstruction.get("ok") else "blocked_bad_reconstruction"
+    for gate_score in (damage_score, voice_presence_score, contamination_score):
+        if gate_score and gate_score.get("verdict") != "auto_accept":
+            verdict = str(gate_score.get("verdict") or "blocked_unknown")
+            break
+    else:
+        if cross_stem_forensic_score is not None:
+            verdict = _candidate_verdict_from_cross_stem_forensic(cross_stem_forensic_score)
     if not reconstruction.get("ok"):
         verdict = "blocked_bad_reconstruction"
     next_action = choose_next_action(
@@ -2605,6 +2962,7 @@ def _finalize_composite_candidate(
             "verdict": verdict,
             "reason": ",".join(
                 list((contamination_score or {}).get("blocker_reasons") or [])
+                + list((cross_stem_forensic_score or {}).get("blocker_reasons") or [])
                 + list((voice_presence_score or {}).get("blocker_reasons") or [])
                 + list((damage_score or {}).get("blocker_reasons") or [])
                 + list((reconstruction.get("delivery_pair") or {}).get("blockers") or [])
@@ -2623,6 +2981,8 @@ def _finalize_composite_candidate(
             "non_vocal_support_applied": bool(target_specific_composition.get("non_vocal_support_applied")),
             "model_split_repair_id": str(candidate.get("model_split_repair_id") or "none"),
             "model_split_repair_type": str(candidate.get("model_split_repair_type") or "none"),
+            "model_split_pair_residual_ratio": candidate.get("model_split_pair_residual_ratio"),
+            "cross_stem_forensic_gate": _cross_stem_forensic_gate_config(candidate),
             "profile": MODEL_SPLIT_V2_PROFILE,
             "minus_source": "minus_lane",
             "minus_rebuilt_from_non_vocal_stems": False,
@@ -2641,6 +3001,7 @@ def _finalize_composite_candidate(
             "damage_score": damage_score,
             "voice_presence_score": voice_presence_score,
             "contamination_score": contamination_score,
+            "cross_stem_forensic_score": cross_stem_forensic_score,
             "next_action": next_action,
             "verdict": verdict,
             "delivery_allowed": verdict == "auto_accept",
@@ -2655,9 +3016,11 @@ def _finalize_composite_candidate(
         "delivery_pair_residual_repair": delivery_pair_residual_repair,
         "bass_stereo_width_repair": bass_stereo_width_repair,
         "stem_region_repair": stem_region_repair,
+        "model_split_pair_residual_ratio": candidate.get("model_split_pair_residual_ratio"),
         "damage_score": damage_score,
         "voice_presence_score": voice_presence_score,
         "contamination_score": contamination_score,
+        "cross_stem_forensic_score": cross_stem_forensic_score,
         "next_action": next_action,
     }
     _write_json(candidate_dir / "score.json", score_payload)
@@ -2677,6 +3040,11 @@ def build_model_split_v2_composite_candidates(
     stem_routes = _model_split_routes_by_role(window_candidates, "six_stems", NON_VOCAL_STEMS)
     vocal_routes = _model_split_routes_by_role(window_candidates, "vocals", ("vocals",))
     minus_routes = _model_split_routes_by_role(window_candidates, "minus", ("minus",))
+    vocal_minus_pairs = _rank_model_split_vocal_minus_pairs(
+        mix_path=Path(str(window.get("mix_path") or "")),
+        vocal_routes=vocal_routes,
+        minus_routes=minus_routes,
+    )
     bass_support_routes = _model_split_routes_by_role(window_candidates, "bass_support", ("bass",))
     non_vocal_support_routes = _model_split_routes_by_role(window_candidates, "non_vocal_support", ("drums", "bass", "other"))
     support_options: list[dict[str, Mapping[str, Any]]] = [{}]
@@ -2718,6 +3086,11 @@ def build_model_split_v2_composite_candidates(
                         if repair_part == "vocal_projection_debleed":
                             repair_config.setdefault("target_stems", list(NON_VOCAL_STEMS))
                         repair_option[repair_part] = repair_config
+                    sequence_configs = raw_option.get("stem_region_repairs")
+                    if isinstance(sequence_configs, list):
+                        repair_option["stem_region_repairs"] = [
+                            dict(item) for item in sequence_configs if isinstance(item, Mapping)
+                        ]
                 repair_options.append(repair_option)
                 continue
             if repair_type == "bass_stereo_width":
@@ -2781,435 +3154,327 @@ def build_model_split_v2_composite_candidates(
 
     composite_index = 0
     for stem_route in stem_routes:
-        for vocal_route in vocal_routes:
-            for minus_route in minus_routes:
-                for support_routes in support_options:
-                    for repair_option in repair_options:
-                        composite_index += 1
-                        if composite_index > max_composites:
-                            _emit_progress(
-                                {
-                                    "event": "composite_candidate_limit_reached",
-                                    "window_id": str(window.get("window_id") or ""),
-                                    "max_composites": max_composites,
-                                }
-                            )
-                            return composite_candidates
-                        repair_type = str(repair_option.get("type") or "none")
-                        repair_id = _safe_artifact_segment(str(repair_option.get("repair_id") or repair_type), fallback="repair")
-                        candidate_id = f"c{100 + composite_index:03d}"
+        for vocal_route, minus_route, pair_residual_ratio in vocal_minus_pairs:
+            for support_routes, repair_option in _prioritized_model_split_support_repair_pairs(
+                support_options=support_options,
+                repair_options=repair_options,
+            ):
+                    composite_index += 1
+                    if composite_index > max_composites:
                         _emit_progress(
                             {
-                                "event": "composite_candidate_start",
+                                "event": "composite_candidate_limit_reached",
                                 "window_id": str(window.get("window_id") or ""),
-                                "candidate_id": candidate_id,
-                                "repair_id": repair_id,
-                                "repair_type": repair_type,
-                                "composite_index": composite_index,
                                 "max_composites": max_composites,
                             }
                         )
-                        candidate_dir = window_dir / candidate_id
-                        stems_dir = candidate_dir / "stems"
-                        stems_dir.mkdir(parents=True, exist_ok=True)
-                        candidate = dict(candidate_template)
-                        candidate.update(
-                            {
-                                "candidate_id": candidate_id,
-                                "window_id": str(window.get("window_id") or ""),
-                                "profile": MODEL_SPLIT_V2_PROFILE,
-                                "minus_source": "minus_lane",
-                                "minus_rebuilt_from_non_vocal_stems": False,
-                                "route_family": "model_split_v2_composite",
-                                "bass_support_applied": "bass" in support_routes,
-                                "stem_support_applied": bool(support_routes),
-                                "non_vocal_support_applied": any(
-                                    str(route.get("role") or "") == "non_vocal_support" for route in support_routes.values()
-                                ),
-                                "model_split_repair_id": repair_id,
-                                "model_split_repair_type": repair_type,
-                            }
-                        )
-                        repair_parts = set(repair_type.split("+"))
-                        if "vocal_projection_debleed" in repair_parts:
-                            candidate["vocal_projection_debleed"] = dict(repair_option.get("vocal_projection_debleed") or {})
-                        if "delivery_pair_gain" in repair_parts:
-                            candidate["delivery_pair_gain_repair"] = dict(repair_option.get("delivery_pair_gain") or {})
-                        if "delivery_pair_residual" in repair_parts:
-                            candidate["delivery_pair_residual_repair"] = dict(repair_option.get("delivery_pair_residual") or {})
-                        if "bass_stereo_width" in repair_parts:
-                            candidate["bass_stereo_width_repair"] = dict(repair_option.get("bass_stereo_width") or {})
-                        if "stem_region_repair" in repair_parts:
-                            candidate["stem_region_repair"] = dict(repair_option.get("stem_region_repair") or {})
-                        stem_copies: list[dict[str, str]] = []
-                        vocal_copies: list[dict[str, str]] = []
-                        minus_copies: list[dict[str, str]] = []
-                        support_copies_by_key: dict[str, list[dict[str, str]]] = {}
-                        support_routes_by_key: dict[str, Mapping[str, Any]] = {}
-                        try:
-                            for stem in NON_VOCAL_STEMS:
-                                _copy_route_stem_to_candidate(
-                                    route=stem_route,
-                                    stem=stem,
-                                    final_stems_dir=stems_dir,
-                                    window=window,
-                                    copied_outputs=stem_copies,
-                                )
-                            for stem, support_route in support_routes.items():
-                                support_key = str(
-                                    support_route.get("route_id")
-                                    or support_route.get("route_alias")
-                                    or support_route.get("stems_dir")
-                                    or id(support_route)
-                                )
-                                support_routes_by_key[support_key] = support_route
-                                support_copies = support_copies_by_key.setdefault(support_key, [])
-                                _copy_route_stem_to_candidate(
-                                    route=support_route,
-                                    stem=stem,
-                                    final_stems_dir=stems_dir,
-                                    window=window,
-                                    copied_outputs=support_copies,
-                                )
-                            _copy_route_stem_to_candidate(
-                                route=vocal_route,
-                                stem="vocals",
-                                final_stems_dir=stems_dir,
-                                window=window,
-                                copied_outputs=vocal_copies,
-                            )
-                            _copy_route_stem_to_candidate(
-                                route=minus_route,
-                                stem="minus",
-                                final_stems_dir=stems_dir,
-                                window=window,
-                                copied_outputs=minus_copies,
-                            )
-                        except Exception as exc:
-                            manifest = build_candidate_manifest(candidate_id, candidate_dir)
-                            next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "composite_copy_failed"})
-                            manifest.update(
-                                {
-                                    "window_id": str(window.get("window_id") or ""),
-                                    "execution_status": "failed_runtime_error",
-                                    "model_split_composite": True,
-                                    "model_split_repair_id": repair_id,
-                                    "model_split_repair_type": repair_type,
-                                    "profile": MODEL_SPLIT_V2_PROFILE,
-                                    "verdict": "blocked_unknown",
-                                    "error": {"type": type(exc).__name__, "message": str(exc)},
-                                    "next_action": next_action,
-                                    "delivery_allowed": False,
-                                    "presentation_status": "blocked_from_listen_pack",
-                                }
-                            )
-                            _write_json(candidate_dir / "manifest.json", manifest)
-                            _write_json(candidate_dir / "score.json", {"verdict": "blocked_unknown", "next_action": next_action})
-                            _append_composite(manifest)
-                            continue
-
-                        routes = [
-                            _composite_route_manifest(
-                                source_route=stem_route,
-                                role="six_stems",
-                                lane="stem_lane",
-                                copied_outputs=stem_copies,
-                            ),
-                            _composite_route_manifest(
-                                source_route=vocal_route,
-                                role="vocals",
-                                lane="vocal_lane",
-                                copied_outputs=vocal_copies,
-                            ),
-                            _composite_route_manifest(
-                                source_route=minus_route,
-                                role="minus",
-                                lane="minus_lane",
-                                copied_outputs=minus_copies,
-                            ),
-                        ]
-                        for support_key, support_copies in support_copies_by_key.items():
-                            support_route = support_routes_by_key[support_key]
-                            routes.append(
-                                _composite_route_manifest(
-                                    source_route=support_route,
-                                    role=str(support_route.get("role") or "stem_support"),
-                                    lane=str(support_route.get("lane") or "stem_support_lane"),
-                                    copied_outputs=support_copies,
-                                )
-                            )
-                        target_specific_composition = {
-                            "applied": True,
-                            "composite_lane_selection": True,
+                        return composite_candidates
+                    repair_type = str(repair_option.get("type") or "none")
+                    repair_id = _safe_artifact_segment(str(repair_option.get("repair_id") or repair_type), fallback="repair")
+                    candidate_id = f"c{100 + composite_index:03d}"
+                    _emit_progress(
+                        {
+                            "event": "composite_candidate_start",
+                            "window_id": str(window.get("window_id") or ""),
+                            "candidate_id": candidate_id,
+                            "repair_id": repair_id,
+                            "repair_type": repair_type,
+                            "composite_index": composite_index,
+                            "max_composites": max_composites,
                             "bass_support_applied": "bass" in support_routes,
                             "stem_support_applied": bool(support_routes),
                             "non_vocal_support_applied": any(
                                 str(route.get("role") or "") == "non_vocal_support" for route in support_routes.values()
                             ),
-                            "repair": {"repair_id": repair_id, "type": repair_type},
-                            "blocker_reasons": [],
-                            "routes": routes,
+                            "pair_residual_ratio": round(float(pair_residual_ratio), 8)
+                            if math.isfinite(pair_residual_ratio)
+                            else None,
                         }
-                        stem_paths = _collect_stem_paths(stems_dir)
-                        missing = missing_required_stems(stem_paths) + ([] if stem_paths.get("minus") else ["minus"])
-                        vocal_projection_debleed: dict[str, Any] | None = None
-                        delivery_pair_gain_repair: dict[str, Any] | None = None
-                        delivery_pair_residual_repair: dict[str, Any] | None = None
-                        bass_stereo_width_repair: dict[str, Any] | None = None
-                        stem_region_repair: dict[str, Any] | None = None
-                        if missing:
-                            reconstruction = {
-                                "ok": False,
-                                "mode": "model_split_v2_delivery_pair",
-                                "gated_surface": "vocals_plus_minus",
-                                "delivery_pair": {"blockers": [f"missing_reconstruction_stem:{stem}" for stem in missing]},
-                                "six_stem_diagnostic": {"ok": False, "blockers": ["missing_composite_stems"]},
-                            }
-                            manifest = _finalize_composite_candidate(
-                                candidate=candidate,
-                                candidate_dir=candidate_dir,
-                                stem_paths=stem_paths,
-                                target_specific_composition=target_specific_composition,
-                                reconstruction=reconstruction,
+                    )
+                    candidate_dir = window_dir / candidate_id
+                    stems_dir = candidate_dir / "stems"
+                    stems_dir.mkdir(parents=True, exist_ok=True)
+                    candidate = dict(candidate_template)
+                    candidate.update(
+                        {
+                            "candidate_id": candidate_id,
+                            "window_id": str(window.get("window_id") or ""),
+                            "profile": MODEL_SPLIT_V2_PROFILE,
+                            "minus_source": "minus_lane",
+                            "minus_rebuilt_from_non_vocal_stems": False,
+                            "route_family": "model_split_v2_composite",
+                            "bass_support_applied": "bass" in support_routes,
+                            "stem_support_applied": bool(support_routes),
+                            "non_vocal_support_applied": any(
+                                str(route.get("role") or "") == "non_vocal_support" for route in support_routes.values()
+                            ),
+                            "model_split_repair_id": repair_id,
+                            "model_split_repair_type": repair_type,
+                            "model_split_pair_residual_ratio": pair_residual_ratio if math.isfinite(pair_residual_ratio) else None,
+                        }
+                    )
+                    repair_parts = set(repair_type.split("+"))
+                    if "vocal_projection_debleed" in repair_parts:
+                        candidate["vocal_projection_debleed"] = dict(repair_option.get("vocal_projection_debleed") or {})
+                    if "delivery_pair_gain" in repair_parts:
+                        candidate["delivery_pair_gain_repair"] = dict(repair_option.get("delivery_pair_gain") or {})
+                    if "delivery_pair_residual" in repair_parts:
+                        candidate["delivery_pair_residual_repair"] = dict(repair_option.get("delivery_pair_residual") or {})
+                    if "bass_stereo_width" in repair_parts:
+                        candidate["bass_stereo_width_repair"] = dict(repair_option.get("bass_stereo_width") or {})
+                    if "stem_region_repair" in repair_parts:
+                        candidate["stem_region_repair"] = dict(repair_option.get("stem_region_repair") or {})
+                    stem_copies: list[dict[str, str]] = []
+                    vocal_copies: list[dict[str, str]] = []
+                    minus_copies: list[dict[str, str]] = []
+                    support_copies_by_key: dict[str, list[dict[str, str]]] = {}
+                    support_routes_by_key: dict[str, Mapping[str, Any]] = {}
+                    try:
+                        for stem in NON_VOCAL_STEMS:
+                            _copy_route_stem_to_candidate(
+                                route=stem_route,
+                                stem=stem,
+                                final_stems_dir=stems_dir,
+                                window=window,
+                                copied_outputs=stem_copies,
                             )
-                            manifest["missing_stems"] = missing
-                            _write_json(candidate_dir / "manifest.json", manifest)
-                            _append_composite(manifest)
-                            continue
+                        for stem, support_route in support_routes.items():
+                            support_key = str(
+                                support_route.get("route_id")
+                                or support_route.get("route_alias")
+                                or support_route.get("stems_dir")
+                                or id(support_route)
+                            )
+                            support_routes_by_key[support_key] = support_route
+                            support_copies = support_copies_by_key.setdefault(support_key, [])
+                            _copy_route_stem_to_candidate(
+                                route=support_route,
+                                stem=stem,
+                                final_stems_dir=stems_dir,
+                                window=window,
+                                copied_outputs=support_copies,
+                            )
+                        _copy_route_stem_to_candidate(
+                            route=vocal_route,
+                            stem="vocals",
+                            final_stems_dir=stems_dir,
+                            window=window,
+                            copied_outputs=vocal_copies,
+                        )
+                        _copy_route_stem_to_candidate(
+                            route=minus_route,
+                            stem="minus",
+                            final_stems_dir=stems_dir,
+                            window=window,
+                            copied_outputs=minus_copies,
+                        )
+                    except Exception as exc:
+                        manifest = build_candidate_manifest(candidate_id, candidate_dir)
+                        next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "composite_copy_failed"})
+                        manifest.update(
+                            {
+                                "window_id": str(window.get("window_id") or ""),
+                                "execution_status": "failed_runtime_error",
+                                "model_split_composite": True,
+                                "model_split_repair_id": repair_id,
+                                "model_split_repair_type": repair_type,
+                                "profile": MODEL_SPLIT_V2_PROFILE,
+                                "verdict": "blocked_unknown",
+                                "error": {"type": type(exc).__name__, "message": str(exc)},
+                                "next_action": next_action,
+                                "delivery_allowed": False,
+                                "presentation_status": "blocked_from_listen_pack",
+                            }
+                        )
+                        _write_json(candidate_dir / "manifest.json", manifest)
+                        _write_json(candidate_dir / "score.json", {"verdict": "blocked_unknown", "next_action": next_action})
+                        _append_composite(manifest)
+                        continue
 
-                        if "vocal_projection_debleed" in repair_parts:
-                            projection_config = repair_option.get("vocal_projection_debleed") or repair_option.get("config")
-                            vocal_projection_debleed = apply_vocal_projection_debleed(
-                                stem_paths=stem_paths,
-                                config=dict(projection_config or {}),
+                    routes = [
+                        _composite_route_manifest(
+                            source_route=stem_route,
+                            role="six_stems",
+                            lane="stem_lane",
+                            copied_outputs=stem_copies,
+                        ),
+                        _composite_route_manifest(
+                            source_route=vocal_route,
+                            role="vocals",
+                            lane="vocal_lane",
+                            copied_outputs=vocal_copies,
+                        ),
+                        _composite_route_manifest(
+                            source_route=minus_route,
+                            role="minus",
+                            lane="minus_lane",
+                            copied_outputs=minus_copies,
+                        ),
+                    ]
+                    for support_key, support_copies in support_copies_by_key.items():
+                        support_route = support_routes_by_key[support_key]
+                        routes.append(
+                            _composite_route_manifest(
+                                source_route=support_route,
+                                role=str(support_route.get("role") or "stem_support"),
+                                lane=str(support_route.get("lane") or "stem_support_lane"),
+                                copied_outputs=support_copies,
                             )
-                            target_specific_composition["repair"] = {
-                                "repair_id": repair_id,
-                                "type": repair_type,
-                                "vocal_projection_debleed": vocal_projection_debleed,
-                            }
-                            if vocal_projection_debleed.get("blockers"):
-                                reconstruction = {
-                                    "ok": False,
-                                    "mode": "model_split_v2_delivery_pair",
-                                    "gated_surface": "vocals_plus_minus",
-                                    "delivery_pair": {
-                                        "blockers": [
-                                            f"composite_repair_blocker:{blocker}"
-                                            for blocker in vocal_projection_debleed.get("blockers", [])
-                                        ]
-                                    },
-                                    "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
-                                }
-                                _append_composite(
-                                    _finalize_composite_candidate(
-                                        candidate=candidate,
-                                        candidate_dir=candidate_dir,
-                                        stem_paths=stem_paths,
-                                        target_specific_composition=target_specific_composition,
-                                        reconstruction=reconstruction,
-                                        vocal_projection_debleed=vocal_projection_debleed,
-                                    )
-                                )
-                                continue
-                        if "delivery_pair_gain" in repair_parts:
-                            pair_config = repair_option.get("delivery_pair_gain") or repair_option.get("config")
-                            delivery_pair_gain_repair = apply_delivery_pair_gain_repair(
+                        )
+                    target_specific_composition = {
+                        "applied": True,
+                        "composite_lane_selection": True,
+                        "bass_support_applied": "bass" in support_routes,
+                        "stem_support_applied": bool(support_routes),
+                        "non_vocal_support_applied": any(
+                            str(route.get("role") or "") == "non_vocal_support" for route in support_routes.values()
+                        ),
+                        "repair": {"repair_id": repair_id, "type": repair_type},
+                        "blocker_reasons": [],
+                        "routes": routes,
+                    }
+                    stem_paths = _collect_stem_paths(stems_dir)
+                    missing = missing_required_stems(stem_paths) + ([] if stem_paths.get("minus") else ["minus"])
+                    vocal_projection_debleed: dict[str, Any] | None = None
+                    delivery_pair_gain_repair: dict[str, Any] | None = None
+                    delivery_pair_residual_repair: dict[str, Any] | None = None
+                    bass_stereo_width_repair: dict[str, Any] | None = None
+                    stem_region_repair: dict[str, Any] | None = None
+                    if missing:
+                        reconstruction = {
+                            "ok": False,
+                            "mode": "model_split_v2_delivery_pair",
+                            "gated_surface": "vocals_plus_minus",
+                            "delivery_pair": {"blockers": [f"missing_reconstruction_stem:{stem}" for stem in missing]},
+                            "six_stem_diagnostic": {"ok": False, "blockers": ["missing_composite_stems"]},
+                        }
+                        manifest = _finalize_composite_candidate(
+                            candidate=candidate,
+                            candidate_dir=candidate_dir,
+                            stem_paths=stem_paths,
+                            target_specific_composition=target_specific_composition,
+                            reconstruction=reconstruction,
+                        )
+                        manifest["missing_stems"] = missing
+                        _write_json(candidate_dir / "manifest.json", manifest)
+                        _append_composite(manifest)
+                        continue
+
+                    if "stem_region_repair" in repair_parts and "vocal_projection_debleed" in repair_parts:
+                        stem_region_sequence = repair_option.get("stem_region_repairs")
+                        if isinstance(stem_region_sequence, list) and stem_region_sequence:
+                            stem_region_repair = apply_learned_stem_region_repairs(
                                 mix_path=Path(str(window["mix_path"])),
                                 stem_paths=stem_paths,
-                                config=dict(pair_config or {}),
+                                configs=[dict(item) for item in stem_region_sequence if isinstance(item, Mapping)],
                             )
-                            repair_manifest = dict(target_specific_composition.get("repair") or {})
-                            repair_manifest.update(
-                                {
-                                    "repair_id": repair_id,
-                                    "type": repair_type,
-                                    "delivery_pair_gain_repair": delivery_pair_gain_repair,
-                                }
-                            )
-                            if vocal_projection_debleed is not None:
-                                repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
-                            target_specific_composition["repair"] = repair_manifest
-                            if delivery_pair_gain_repair.get("blockers"):
-                                reconstruction = {
-                                    "ok": False,
-                                    "mode": "model_split_v2_delivery_pair",
-                                    "gated_surface": "vocals_plus_minus",
-                                    "delivery_pair": {
-                                        "blockers": [
-                                            f"composite_repair_blocker:{blocker}"
-                                            for blocker in delivery_pair_gain_repair.get("blockers", [])
-                                        ]
-                                    },
-                                    "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
-                                }
-                                _append_composite(
-                                    _finalize_composite_candidate(
-                                        candidate=candidate,
-                                        candidate_dir=candidate_dir,
-                                        stem_paths=stem_paths,
-                                        target_specific_composition=target_specific_composition,
-                                        reconstruction=reconstruction,
-                                        vocal_projection_debleed=vocal_projection_debleed,
-                                        delivery_pair_gain_repair=delivery_pair_gain_repair,
-                                    )
-                                )
-                                continue
-                        if "delivery_pair_residual" in repair_parts:
-                            residual_config = repair_option.get("delivery_pair_residual") or repair_option.get("config")
-                            delivery_pair_residual_repair = apply_delivery_pair_residual_repair(
-                                mix_path=Path(str(window["mix_path"])),
-                                stem_paths=stem_paths,
-                                config=dict(residual_config or {}),
-                            )
-                            repair_manifest = dict(target_specific_composition.get("repair") or {})
-                            repair_manifest.update(
-                                {
-                                    "repair_id": repair_id,
-                                    "type": repair_type,
-                                    "delivery_pair_residual_repair": delivery_pair_residual_repair,
-                                }
-                            )
-                            if vocal_projection_debleed is not None:
-                                repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
-                            if delivery_pair_gain_repair is not None:
-                                repair_manifest["delivery_pair_gain_repair"] = delivery_pair_gain_repair
-                            if delivery_pair_residual_repair is not None:
-                                repair_manifest["delivery_pair_residual_repair"] = delivery_pair_residual_repair
-                            target_specific_composition["repair"] = repair_manifest
-                            if delivery_pair_residual_repair.get("blockers"):
-                                reconstruction = {
-                                    "ok": False,
-                                    "mode": "model_split_v2_delivery_pair",
-                                    "gated_surface": "vocals_plus_minus",
-                                    "delivery_pair": {
-                                        "blockers": [
-                                            f"composite_repair_blocker:{blocker}"
-                                            for blocker in delivery_pair_residual_repair.get("blockers", [])
-                                        ]
-                                    },
-                                    "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
-                                }
-                                _append_composite(
-                                    _finalize_composite_candidate(
-                                        candidate=candidate,
-                                        candidate_dir=candidate_dir,
-                                        stem_paths=stem_paths,
-                                        target_specific_composition=target_specific_composition,
-                                        reconstruction=reconstruction,
-                                        vocal_projection_debleed=vocal_projection_debleed,
-                                        delivery_pair_gain_repair=delivery_pair_gain_repair,
-                                        delivery_pair_residual_repair=delivery_pair_residual_repair,
-                                    )
-                                )
-                                continue
-                        if "bass_stereo_width" in repair_parts:
-                            bass_config = repair_option.get("bass_stereo_width") or repair_option.get("config")
-                            bass_stereo_width_repair = apply_bass_stereo_width_repair(
-                                stem_paths=stem_paths,
-                                config=dict(bass_config or {}),
-                            )
-                            repair_manifest = dict(target_specific_composition.get("repair") or {})
-                            repair_manifest.update(
-                                {
-                                    "repair_id": repair_id,
-                                    "type": repair_type,
-                                    "bass_stereo_width_repair": bass_stereo_width_repair,
-                                }
-                            )
-                            if vocal_projection_debleed is not None:
-                                repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
-                            if delivery_pair_gain_repair is not None:
-                                repair_manifest["delivery_pair_gain_repair"] = delivery_pair_gain_repair
-                            target_specific_composition["repair"] = repair_manifest
-                            if bass_stereo_width_repair.get("blockers"):
-                                reconstruction = {
-                                    "ok": False,
-                                    "mode": "model_split_v2_delivery_pair",
-                                    "gated_surface": "vocals_plus_minus",
-                                    "delivery_pair": {
-                                        "blockers": [
-                                            f"composite_repair_blocker:{blocker}"
-                                            for blocker in bass_stereo_width_repair.get("blockers", [])
-                                        ]
-                                    },
-                                    "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
-                                }
-                                _append_composite(
-                                    _finalize_composite_candidate(
-                                        candidate=candidate,
-                                        candidate_dir=candidate_dir,
-                                        stem_paths=stem_paths,
-                                        target_specific_composition=target_specific_composition,
-                                        reconstruction=reconstruction,
-                                        vocal_projection_debleed=vocal_projection_debleed,
-                                        delivery_pair_gain_repair=delivery_pair_gain_repair,
-                                        delivery_pair_residual_repair=delivery_pair_residual_repair,
-                                        bass_stereo_width_repair=bass_stereo_width_repair,
-                                    )
-                                )
-                                continue
-                        if "stem_region_repair" in repair_parts:
+                        else:
                             stem_region_config = repair_option.get("stem_region_repair") or repair_option.get("config")
                             stem_region_repair = apply_learned_stem_region_repair(
                                 mix_path=Path(str(window["mix_path"])),
                                 stem_paths=stem_paths,
                                 config=dict(stem_region_config or {}),
                             )
-                            repair_manifest = dict(target_specific_composition.get("repair") or {})
-                            repair_manifest.update(
-                                {
-                                    "repair_id": repair_id,
-                                    "type": repair_type,
-                                    "stem_region_repair": stem_region_repair,
-                                }
-                            )
-                            if vocal_projection_debleed is not None:
-                                repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
-                            if delivery_pair_gain_repair is not None:
-                                repair_manifest["delivery_pair_gain_repair"] = delivery_pair_gain_repair
-                            if delivery_pair_residual_repair is not None:
-                                repair_manifest["delivery_pair_residual_repair"] = delivery_pair_residual_repair
-                            if bass_stereo_width_repair is not None:
-                                repair_manifest["bass_stereo_width_repair"] = bass_stereo_width_repair
-                            target_specific_composition["repair"] = repair_manifest
-                            if stem_region_repair.get("blockers"):
-                                reconstruction = {
-                                    "ok": False,
-                                    "mode": "model_split_v2_delivery_pair",
-                                    "gated_surface": "vocals_plus_minus",
-                                    "delivery_pair": {
-                                        "blockers": [
-                                            f"composite_repair_blocker:{blocker}"
-                                            for blocker in stem_region_repair.get("blockers", [])
-                                        ]
-                                    },
-                                    "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
-                                }
-                                _append_composite(
-                                    _finalize_composite_candidate(
-                                        candidate=candidate,
-                                        candidate_dir=candidate_dir,
-                                        stem_paths=stem_paths,
-                                        target_specific_composition=target_specific_composition,
-                                        reconstruction=reconstruction,
-                                        vocal_projection_debleed=vocal_projection_debleed,
-                                        delivery_pair_gain_repair=delivery_pair_gain_repair,
-                                        delivery_pair_residual_repair=delivery_pair_residual_repair,
-                                        bass_stereo_width_repair=bass_stereo_width_repair,
-                                        stem_region_repair=stem_region_repair,
-                                    )
+                        repair_manifest = dict(target_specific_composition.get("repair") or {})
+                        repair_manifest.update(
+                            {
+                                "repair_id": repair_id,
+                                "type": repair_type,
+                                "stem_region_repair": stem_region_repair,
+                            }
+                        )
+                        target_specific_composition["repair"] = repair_manifest
+                        if stem_region_repair.get("blockers"):
+                            reconstruction = {
+                                "ok": False,
+                                "mode": "model_split_v2_delivery_pair",
+                                "gated_surface": "vocals_plus_minus",
+                                "delivery_pair": {
+                                    "blockers": [
+                                        f"composite_repair_blocker:{blocker}"
+                                        for blocker in stem_region_repair.get("blockers", [])
+                                    ]
+                                },
+                                "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
+                            }
+                            _append_composite(
+                                _finalize_composite_candidate(
+                                    candidate=candidate,
+                                    candidate_dir=candidate_dir,
+                                    stem_paths=stem_paths,
+                                    target_specific_composition=target_specific_composition,
+                                    reconstruction=reconstruction,
+                                    stem_region_repair=stem_region_repair,
                                 )
-                                continue
+                            )
+                            continue
 
-                        reconstruction_config = candidate.get("delivery_pair_reconstruction")
-                        reconstruction = validate_model_split_v2_conservation(
+                    if "vocal_projection_debleed" in repair_parts:
+                        projection_config = repair_option.get("vocal_projection_debleed") or repair_option.get("config")
+                        vocal_projection_debleed = apply_vocal_projection_debleed(
+                            stem_paths=stem_paths,
+                            config=dict(projection_config or {}),
+                        )
+                        target_specific_composition["repair"] = {
+                            "repair_id": repair_id,
+                            "type": repair_type,
+                            "vocal_projection_debleed": vocal_projection_debleed,
+                        }
+                        if vocal_projection_debleed.get("blockers"):
+                            reconstruction = {
+                                "ok": False,
+                                "mode": "model_split_v2_delivery_pair",
+                                "gated_surface": "vocals_plus_minus",
+                                "delivery_pair": {
+                                    "blockers": [
+                                        f"composite_repair_blocker:{blocker}"
+                                        for blocker in vocal_projection_debleed.get("blockers", [])
+                                    ]
+                                },
+                                "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
+                            }
+                            _append_composite(
+                                _finalize_composite_candidate(
+                                    candidate=candidate,
+                                    candidate_dir=candidate_dir,
+                                    stem_paths=stem_paths,
+                                    target_specific_composition=target_specific_composition,
+                                    reconstruction=reconstruction,
+                                    vocal_projection_debleed=vocal_projection_debleed,
+                                )
+                            )
+                            continue
+                    if "delivery_pair_gain" in repair_parts:
+                        pair_config = repair_option.get("delivery_pair_gain") or repair_option.get("config")
+                        delivery_pair_gain_repair = apply_delivery_pair_gain_repair(
                             mix_path=Path(str(window["mix_path"])),
                             stem_paths=stem_paths,
-                            target_specific_composition=target_specific_composition,
-                            config=reconstruction_config if isinstance(reconstruction_config, Mapping) else None,
+                            config=dict(pair_config or {}),
                         )
-                        if not reconstruction["ok"]:
+                        repair_manifest = dict(target_specific_composition.get("repair") or {})
+                        repair_manifest.update(
+                            {
+                                "repair_id": repair_id,
+                                "type": repair_type,
+                                "delivery_pair_gain_repair": delivery_pair_gain_repair,
+                            }
+                        )
+                        if vocal_projection_debleed is not None:
+                            repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
+                        target_specific_composition["repair"] = repair_manifest
+                        if delivery_pair_gain_repair.get("blockers"):
+                            reconstruction = {
+                                "ok": False,
+                                "mode": "model_split_v2_delivery_pair",
+                                "gated_surface": "vocals_plus_minus",
+                                "delivery_pair": {
+                                    "blockers": [
+                                        f"composite_repair_blocker:{blocker}"
+                                        for blocker in delivery_pair_gain_repair.get("blockers", [])
+                                    ]
+                                },
+                                "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
+                            }
                             _append_composite(
                                 _finalize_composite_candidate(
                                     candidate=candidate,
@@ -3219,18 +3484,44 @@ def build_model_split_v2_composite_candidates(
                                     reconstruction=reconstruction,
                                     vocal_projection_debleed=vocal_projection_debleed,
                                     delivery_pair_gain_repair=delivery_pair_gain_repair,
-                                    delivery_pair_residual_repair=delivery_pair_residual_repair,
-                                    bass_stereo_width_repair=bass_stereo_width_repair,
-                                    stem_region_repair=stem_region_repair,
                                 )
                             )
                             continue
-                        damage_score = score_model_split_v2_damage_gates(
-                            candidate=candidate,
+                    if "delivery_pair_residual" in repair_parts:
+                        residual_config = repair_option.get("delivery_pair_residual") or repair_option.get("config")
+                        delivery_pair_residual_repair = apply_delivery_pair_residual_repair(
                             mix_path=Path(str(window["mix_path"])),
                             stem_paths=stem_paths,
+                            config=dict(residual_config or {}),
                         )
-                        if damage_score["verdict"] != "auto_accept":
+                        repair_manifest = dict(target_specific_composition.get("repair") or {})
+                        repair_manifest.update(
+                            {
+                                "repair_id": repair_id,
+                                "type": repair_type,
+                                "delivery_pair_residual_repair": delivery_pair_residual_repair,
+                            }
+                        )
+                        if vocal_projection_debleed is not None:
+                            repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
+                        if delivery_pair_gain_repair is not None:
+                            repair_manifest["delivery_pair_gain_repair"] = delivery_pair_gain_repair
+                        if delivery_pair_residual_repair is not None:
+                            repair_manifest["delivery_pair_residual_repair"] = delivery_pair_residual_repair
+                        target_specific_composition["repair"] = repair_manifest
+                        if delivery_pair_residual_repair.get("blockers"):
+                            reconstruction = {
+                                "ok": False,
+                                "mode": "model_split_v2_delivery_pair",
+                                "gated_surface": "vocals_plus_minus",
+                                "delivery_pair": {
+                                    "blockers": [
+                                        f"composite_repair_blocker:{blocker}"
+                                        for blocker in delivery_pair_residual_repair.get("blockers", [])
+                                    ]
+                                },
+                                "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
+                            }
                             _append_composite(
                                 _finalize_composite_candidate(
                                     candidate=candidate,
@@ -3238,39 +3529,166 @@ def build_model_split_v2_composite_candidates(
                                     stem_paths=stem_paths,
                                     target_specific_composition=target_specific_composition,
                                     reconstruction=reconstruction,
-                                    damage_score=damage_score,
                                     vocal_projection_debleed=vocal_projection_debleed,
                                     delivery_pair_gain_repair=delivery_pair_gain_repair,
                                     delivery_pair_residual_repair=delivery_pair_residual_repair,
-                                    bass_stereo_width_repair=bass_stereo_width_repair,
-                                    stem_region_repair=stem_region_repair,
                                 )
                             )
                             continue
-                        voice_presence_score = score_model_split_v2_voice_presence_gate(candidate=candidate, stem_paths=stem_paths)
-                        if voice_presence_score["verdict"] != "auto_accept":
-                            _append_composite(
-                                _finalize_composite_candidate(
-                                    candidate=candidate,
-                                    candidate_dir=candidate_dir,
-                                    stem_paths=stem_paths,
-                                    target_specific_composition=target_specific_composition,
-                                    reconstruction=reconstruction,
-                                    damage_score=damage_score,
-                                    voice_presence_score=voice_presence_score,
-                                    vocal_projection_debleed=vocal_projection_debleed,
-                                    delivery_pair_gain_repair=delivery_pair_gain_repair,
-                                    delivery_pair_residual_repair=delivery_pair_residual_repair,
-                                    bass_stereo_width_repair=bass_stereo_width_repair,
-                                    stem_region_repair=stem_region_repair,
-                                )
-                            )
-                            continue
-                        contamination_score = _score_candidate_contamination(
-                            candidate=candidate,
-                            candidate_dir=candidate_dir,
+                    if "bass_stereo_width" in repair_parts:
+                        bass_config = repair_option.get("bass_stereo_width") or repair_option.get("config")
+                        bass_stereo_width_repair = apply_bass_stereo_width_repair(
                             stem_paths=stem_paths,
+                            config=dict(bass_config or {}),
                         )
+                        repair_manifest = dict(target_specific_composition.get("repair") or {})
+                        repair_manifest.update(
+                            {
+                                "repair_id": repair_id,
+                                "type": repair_type,
+                                "bass_stereo_width_repair": bass_stereo_width_repair,
+                            }
+                        )
+                        if vocal_projection_debleed is not None:
+                            repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
+                        if delivery_pair_gain_repair is not None:
+                            repair_manifest["delivery_pair_gain_repair"] = delivery_pair_gain_repair
+                        target_specific_composition["repair"] = repair_manifest
+                        if bass_stereo_width_repair.get("blockers"):
+                            reconstruction = {
+                                "ok": False,
+                                "mode": "model_split_v2_delivery_pair",
+                                "gated_surface": "vocals_plus_minus",
+                                "delivery_pair": {
+                                    "blockers": [
+                                        f"composite_repair_blocker:{blocker}"
+                                        for blocker in bass_stereo_width_repair.get("blockers", [])
+                                    ]
+                                },
+                                "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
+                            }
+                            _append_composite(
+                                _finalize_composite_candidate(
+                                    candidate=candidate,
+                                    candidate_dir=candidate_dir,
+                                    stem_paths=stem_paths,
+                                    target_specific_composition=target_specific_composition,
+                                    reconstruction=reconstruction,
+                                    vocal_projection_debleed=vocal_projection_debleed,
+                                    delivery_pair_gain_repair=delivery_pair_gain_repair,
+                                    delivery_pair_residual_repair=delivery_pair_residual_repair,
+                                    bass_stereo_width_repair=bass_stereo_width_repair,
+                                )
+                            )
+                            continue
+                    if "stem_region_repair" in repair_parts and stem_region_repair is None:
+                        stem_region_sequence = repair_option.get("stem_region_repairs")
+                        if isinstance(stem_region_sequence, list) and stem_region_sequence:
+                            stem_region_repair = apply_learned_stem_region_repairs(
+                                mix_path=Path(str(window["mix_path"])),
+                                stem_paths=stem_paths,
+                                configs=[dict(item) for item in stem_region_sequence if isinstance(item, Mapping)],
+                            )
+                        else:
+                            stem_region_config = repair_option.get("stem_region_repair") or repair_option.get("config")
+                            stem_region_repair = apply_learned_stem_region_repair(
+                                mix_path=Path(str(window["mix_path"])),
+                                stem_paths=stem_paths,
+                                config=dict(stem_region_config or {}),
+                            )
+                        repair_manifest = dict(target_specific_composition.get("repair") or {})
+                        repair_manifest.update(
+                            {
+                                "repair_id": repair_id,
+                                "type": repair_type,
+                                "stem_region_repair": stem_region_repair,
+                            }
+                        )
+                        if vocal_projection_debleed is not None:
+                            repair_manifest["vocal_projection_debleed"] = vocal_projection_debleed
+                        if delivery_pair_gain_repair is not None:
+                            repair_manifest["delivery_pair_gain_repair"] = delivery_pair_gain_repair
+                        if delivery_pair_residual_repair is not None:
+                            repair_manifest["delivery_pair_residual_repair"] = delivery_pair_residual_repair
+                        if bass_stereo_width_repair is not None:
+                            repair_manifest["bass_stereo_width_repair"] = bass_stereo_width_repair
+                        target_specific_composition["repair"] = repair_manifest
+                        if stem_region_repair.get("blockers"):
+                            reconstruction = {
+                                "ok": False,
+                                "mode": "model_split_v2_delivery_pair",
+                                "gated_surface": "vocals_plus_minus",
+                                "delivery_pair": {
+                                    "blockers": [
+                                        f"composite_repair_blocker:{blocker}"
+                                        for blocker in stem_region_repair.get("blockers", [])
+                                    ]
+                                },
+                                "six_stem_diagnostic": {"ok": False, "blockers": ["composite_repair_failed"]},
+                            }
+                            _append_composite(
+                                _finalize_composite_candidate(
+                                    candidate=candidate,
+                                    candidate_dir=candidate_dir,
+                                    stem_paths=stem_paths,
+                                    target_specific_composition=target_specific_composition,
+                                    reconstruction=reconstruction,
+                                    vocal_projection_debleed=vocal_projection_debleed,
+                                    delivery_pair_gain_repair=delivery_pair_gain_repair,
+                                    delivery_pair_residual_repair=delivery_pair_residual_repair,
+                                    bass_stereo_width_repair=bass_stereo_width_repair,
+                                    stem_region_repair=stem_region_repair,
+                                )
+                            )
+                            continue
+
+                    reconstruction_config = candidate.get("delivery_pair_reconstruction")
+                    reconstruction = validate_model_split_v2_conservation(
+                        mix_path=Path(str(window["mix_path"])),
+                        stem_paths=stem_paths,
+                        target_specific_composition=target_specific_composition,
+                        config=reconstruction_config if isinstance(reconstruction_config, Mapping) else None,
+                    )
+                    if not reconstruction["ok"]:
+                        _append_composite(
+                            _finalize_composite_candidate(
+                                candidate=candidate,
+                                candidate_dir=candidate_dir,
+                                stem_paths=stem_paths,
+                                target_specific_composition=target_specific_composition,
+                                reconstruction=reconstruction,
+                                vocal_projection_debleed=vocal_projection_debleed,
+                                delivery_pair_gain_repair=delivery_pair_gain_repair,
+                                delivery_pair_residual_repair=delivery_pair_residual_repair,
+                                bass_stereo_width_repair=bass_stereo_width_repair,
+                                stem_region_repair=stem_region_repair,
+                            )
+                        )
+                        continue
+                    damage_score = score_model_split_v2_damage_gates(
+                        candidate=candidate,
+                        mix_path=Path(str(window["mix_path"])),
+                        stem_paths=stem_paths,
+                    )
+                    if damage_score["verdict"] != "auto_accept":
+                        _append_composite(
+                            _finalize_composite_candidate(
+                                candidate=candidate,
+                                candidate_dir=candidate_dir,
+                                stem_paths=stem_paths,
+                                target_specific_composition=target_specific_composition,
+                                reconstruction=reconstruction,
+                                damage_score=damage_score,
+                                vocal_projection_debleed=vocal_projection_debleed,
+                                delivery_pair_gain_repair=delivery_pair_gain_repair,
+                                delivery_pair_residual_repair=delivery_pair_residual_repair,
+                                bass_stereo_width_repair=bass_stereo_width_repair,
+                                stem_region_repair=stem_region_repair,
+                            )
+                        )
+                        continue
+                    voice_presence_score = score_model_split_v2_voice_presence_gate(candidate=candidate, stem_paths=stem_paths)
+                    if voice_presence_score["verdict"] != "auto_accept":
                         _append_composite(
                             _finalize_composite_candidate(
                                 candidate=candidate,
@@ -3280,7 +3698,6 @@ def build_model_split_v2_composite_candidates(
                                 reconstruction=reconstruction,
                                 damage_score=damage_score,
                                 voice_presence_score=voice_presence_score,
-                                contamination_score=contamination_score,
                                 vocal_projection_debleed=vocal_projection_debleed,
                                 delivery_pair_gain_repair=delivery_pair_gain_repair,
                                 delivery_pair_residual_repair=delivery_pair_residual_repair,
@@ -3288,8 +3705,41 @@ def build_model_split_v2_composite_candidates(
                                 stem_region_repair=stem_region_repair,
                             )
                         )
-                        if composite_candidates[-1].get("verdict") == "auto_accept":
-                            return composite_candidates
+                        continue
+                    contamination_score = _score_candidate_contamination(
+                        candidate=candidate,
+                        candidate_dir=candidate_dir,
+                        stem_paths=stem_paths,
+                    )
+                    cross_stem_forensic_score = (
+                        _score_candidate_cross_stem_forensic(
+                            candidate=candidate,
+                            candidate_dir=candidate_dir,
+                            stem_paths=stem_paths,
+                        )
+                        if contamination_score["verdict"] == "auto_accept"
+                        else None
+                    )
+                    _append_composite(
+                        _finalize_composite_candidate(
+                            candidate=candidate,
+                            candidate_dir=candidate_dir,
+                            stem_paths=stem_paths,
+                            target_specific_composition=target_specific_composition,
+                            reconstruction=reconstruction,
+                            damage_score=damage_score,
+                            voice_presence_score=voice_presence_score,
+                            contamination_score=contamination_score,
+                            cross_stem_forensic_score=cross_stem_forensic_score,
+                            vocal_projection_debleed=vocal_projection_debleed,
+                            delivery_pair_gain_repair=delivery_pair_gain_repair,
+                            delivery_pair_residual_repair=delivery_pair_residual_repair,
+                            bass_stereo_width_repair=bass_stereo_width_repair,
+                            stem_region_repair=stem_region_repair,
+                        )
+                    )
+                    if composite_candidates[-1].get("verdict") == "auto_accept":
+                        return composite_candidates
     return composite_candidates
 
 
@@ -3731,17 +4181,27 @@ def execute_recipe_candidate(
         return manifest
 
     score = _score_candidate_contamination(candidate=candidate, candidate_dir=candidate_dir, stem_paths=stem_paths)
+    cross_stem_forensic_score = (
+        _score_candidate_cross_stem_forensic(candidate=candidate, candidate_dir=candidate_dir, stem_paths=stem_paths)
+        if score["verdict"] == "auto_accept"
+        else None
+    )
+    final_verdict = (
+        _candidate_verdict_from_cross_stem_forensic(cross_stem_forensic_score)
+        if cross_stem_forensic_score is not None and cross_stem_forensic_score["verdict"] != "auto_accept"
+        else score["verdict"]
+    )
     next_action = choose_next_action(
         {
-            "verdict": score["verdict"],
-            "reason": ",".join(score.get("blocker_reasons") or []),
+            "verdict": final_verdict,
+            "reason": ",".join(list(score.get("blocker_reasons") or []) + list((cross_stem_forensic_score or {}).get("blocker_reasons") or [])),
         }
     )
     manifest.update(
         {
             "execution_status": "completed",
-            "candidate_untrusted": score["verdict"] != "auto_accept",
-            "verdict": score["verdict"],
+            "candidate_untrusted": final_verdict != "auto_accept",
+            "verdict": final_verdict,
             "stem_paths": stem_paths,
             "missing_stems": [],
             "reconstruction": reconstruction,
@@ -3751,18 +4211,26 @@ def execute_recipe_candidate(
             "stem_merges": stem_merges,
             "post_minus_vocal_debleed": post_minus_vocal_debleed,
             "target_specific_composition": target_specific_composition,
+            "cross_stem_forensic_gate": _cross_stem_forensic_gate_config(candidate),
             "damage_score": damage_score,
             "voice_presence_score": voice_presence_score,
             "contamination_score": score,
+            "cross_stem_forensic_score": cross_stem_forensic_score,
             "next_action": next_action,
-            "delivery_allowed": score["verdict"] == "auto_accept",
-            "presentation_status": "accepted_for_listen_pack" if score["verdict"] == "auto_accept" else "blocked_from_listen_pack",
+            "delivery_allowed": final_verdict == "auto_accept",
+            "presentation_status": "accepted_for_listen_pack" if final_verdict == "auto_accept" else "blocked_from_listen_pack",
             "minus_source": _candidate_minus_source(candidate),
             "minus_rebuilt_from_non_vocal_stems": minus_rebuilt_from_non_vocal_stems,
         }
     )
-    score["next_action"] = next_action
-    _write_json(candidate_dir / "score.json", score)
+    score_payload = {
+        **score,
+        "verdict": final_verdict,
+        "contamination_score": score,
+        "cross_stem_forensic_score": cross_stem_forensic_score,
+        "next_action": next_action,
+    }
+    _write_json(candidate_dir / "score.json", score_payload)
     _write_json(candidate_dir / "manifest.json", manifest)
     return manifest
 
@@ -3866,6 +4334,18 @@ def _write_run_manifest_with_training_queue(output_dir: Path, run_manifest: dict
     return _write_json(output_dir / "run.json", run_manifest)
 
 
+def _effective_model_split_composite_limit(
+    *,
+    recipe: Mapping[str, Any],
+    max_candidates: int,
+    default_recipe: bool,
+) -> int:
+    configured = int(recipe.get("model_split_composite_max_candidates") or 72)
+    if not default_recipe:
+        return configured
+    return max(0, min(configured, int(max_candidates)))
+
+
 def run_fully_automatic_stem_search(
     *,
     mix_path: Path,
@@ -3880,6 +4360,7 @@ def run_fully_automatic_stem_search(
     demucs_available: bool | None = None,
     contamination_model_manifest: Path | None = None,
     profile: str = "",
+    stem_region_repair_checkpoints: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if no_artifact_rag:
         validate_no_artifact_rag_output(output_dir)
@@ -3911,6 +4392,7 @@ def run_fully_automatic_stem_search(
             recipe = build_model_split_v2_recipe(
                 demucs_available=demucs_available,
                 contamination_model_manifest=model_manifest,
+                stem_region_repair_checkpoints=stem_region_repair_checkpoints,
             )
         else:
             recipe = build_default_from_scratch_recipe(
@@ -3991,6 +4473,7 @@ def run_fully_automatic_stem_search(
         timeout_sec = int(recipe.get("timeout_sec") or 300)
         recipe_model_manifest = str(recipe.get("contamination_model_manifest") or "").strip()
         recipe_profile = str(recipe.get("profile") or profile or "").strip()
+        recipe_forensic_gate = _cross_stem_forensic_gate_config(recipe)
         for window in windows:
             window_dir = output_dir / str(window["window_id"])
             window_candidates: list[dict[str, Any]] = []
@@ -4000,6 +4483,8 @@ def run_fully_automatic_stem_search(
                 item.setdefault("candidate_id", f"c{idx:03d}")
                 if recipe_model_manifest and not item.get("contamination_model_manifest"):
                     item["contamination_model_manifest"] = recipe_model_manifest
+                if recipe_forensic_gate and not _cross_stem_forensic_gate_config(item):
+                    item["cross_stem_forensic_gate"] = dict(recipe_forensic_gate)
                 _append_jsonl(
                     progress_path,
                     {
@@ -4048,7 +4533,11 @@ def run_fully_automatic_stem_search(
                     window_dir=window_dir,
                     window_candidates=window_candidates,
                     candidate_template=composite_template,
-                    max_composites=int(recipe.get("model_split_composite_max_candidates") or 72),
+                    max_composites=_effective_model_split_composite_limit(
+                        recipe=recipe,
+                        max_candidates=max_candidates,
+                        default_recipe=recipe_path is None,
+                    ),
                     progress_callback=_write_composite_progress,
                 )
                 for composite in composite_candidates:
@@ -4074,6 +4563,7 @@ def run_fully_automatic_stem_search(
     failed_checks = [] if verdict == "auto_accept" else [verdict]
     listen_pack: dict[str, Any] = {}
     listen_pack_error: dict[str, str] | None = None
+    listen_pack_forensic_score: dict[str, Any] | None = None
     if verdict == "auto_accept":
         try:
             listen_pack = build_listen_pack(
@@ -4082,6 +4572,33 @@ def run_fully_automatic_stem_search(
                 windows=windows,
                 accepted_window_candidates=selection.get("accepted_window_candidates") or {},
             )
+            listen_forensic_config, listen_forensic_config_blockers = _resolve_listen_pack_forensic_config(
+                recipe=recipe or {},
+                windows=windows,
+                accepted_window_candidates=selection.get("accepted_window_candidates") or {},
+            )
+            if listen_forensic_config_blockers:
+                listen_pack_forensic_score = {
+                    "schema": "cross_stem_forensic_matrix.v1",
+                    "verdict": "blocked_unknown",
+                    "blocker_reasons": listen_forensic_config_blockers,
+                    "pair_results": [],
+                    "config": listen_forensic_config,
+                }
+            else:
+                listen_pack_forensic_score = validate_listen_pack_forensic(
+                    listen_audio_paths=listen_pack.get("audio_paths") or {},
+                    output_dir=output_dir / "listen_forensic",
+                    config=listen_forensic_config,
+                )
+            if listen_pack_forensic_score.get("verdict") != "auto_accept":
+                verdict = "blocked_unknown"
+                delivery_allowed = False
+                presentation_status = "blocked_from_listen_pack"
+                delivery_status = "blocked"
+                failed_checks = ["listen_pack_forensic_failed"]
+                listen_pack = {}
+                _remove_listen_pack(output_dir)
         except Exception as exc:
             verdict = "blocked_unknown"
             delivery_allowed = False
@@ -4117,6 +4634,8 @@ def run_fully_automatic_stem_search(
     }
     if listen_pack_error is not None:
         run_manifest["listen_pack_error"] = listen_pack_error
+    if listen_pack_forensic_score is not None:
+        run_manifest["listen_pack_forensic_score"] = listen_pack_forensic_score
     _write_run_manifest_with_training_queue(output_dir, run_manifest)
     _write_json(output_dir / "windows.json", {"schema": "fully_automatic_stem_windows.v1", "windows": windows})
     for window in windows:
@@ -4139,6 +4658,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recipe")
     parser.add_argument("--profile", choices=("", MODEL_SPLIT_V2_PROFILE), default="")
     parser.add_argument("--contamination-model-manifest")
+    parser.add_argument(
+        "--stem-region-repair-checkpoint",
+        action="append",
+        default=[],
+        help="Learned repair checkpoint spec: stem:issue_type:checkpoint_path",
+    )
     parser.add_argument("--disable-default-recipe", action="store_true")
     return parser.parse_args()
 
@@ -4147,8 +4672,27 @@ def _parse_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _parse_stem_region_repair_checkpoint_spec(value: str, *, index: int = 1) -> dict[str, str]:
+    parts = str(value or "").split(":", 2)
+    if len(parts) != 3 or not all(part.strip() for part in parts):
+        raise argparse.ArgumentTypeError(
+            "stem region repair checkpoint must be formatted as stem:issue_type:checkpoint_path"
+        )
+    stem, issue_type, checkpoint = (part.strip() for part in parts)
+    return {
+        "repair_id": f"sr{int(index):03d}",
+        "stem": stem.lower(),
+        "issue_type": issue_type.lower(),
+        "checkpoint": checkpoint,
+    }
+
+
 def main() -> None:
     args = parse_args()
+    stem_region_repair_checkpoints = [
+        _parse_stem_region_repair_checkpoint_spec(spec, index=index)
+        for index, spec in enumerate(args.stem_region_repair_checkpoint or [], start=1)
+    ]
     result = run_fully_automatic_stem_search(
         mix_path=Path(args.mix),
         output_dir=Path(args.out),
@@ -4160,6 +4704,7 @@ def main() -> None:
         allow_default_recipe=not args.disable_default_recipe,
         contamination_model_manifest=Path(args.contamination_model_manifest) if args.contamination_model_manifest else None,
         profile=args.profile,
+        stem_region_repair_checkpoints=stem_region_repair_checkpoints,
     )
     print(json.dumps(result, sort_keys=True))
 

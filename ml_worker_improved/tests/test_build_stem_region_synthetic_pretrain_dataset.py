@@ -101,3 +101,116 @@ def test_synthetic_pretrain_dataset_supports_vocal_leak_rows(tmp_path: Path) -> 
 
     assert manifest["issue_type_counts"] == {"vocal_leak": 1}
     assert manifest["stem_counts"] == {"drums": 1}
+
+
+def test_synthetic_pretrain_dataset_can_filter_issue_type(tmp_path: Path) -> None:
+    stereo_bad = _write_hardcase_audio(tmp_path / "hardcase" / "audio" / "b000.flac")
+    leak_bad = _write_hardcase_audio(tmp_path / "hardcase" / "audio" / "b001.flac")
+    rows_jsonl = _write_hardcase_rows(
+        tmp_path / "hardcase" / "rows.jsonl",
+        [
+            {
+                "row_id": "hc000000",
+                "training_state": "data_gap",
+                "issue_type": "stereo_collapse",
+                "affected_stem": "bass",
+                "bad_stem_path": str(stereo_bad),
+                "is_ground_truth": False,
+            },
+            {
+                "row_id": "hc000001",
+                "training_state": "data_gap",
+                "issue_type": "vocal_leak",
+                "affected_stem": "bass",
+                "foreign_source": "vocals",
+                "bad_stem_path": str(leak_bad),
+                "is_ground_truth": False,
+            },
+        ],
+    )
+
+    manifest = build_stem_region_synthetic_pretrain_dataset(
+        hardcase_rows_jsonl=rows_jsonl,
+        output_dir=tmp_path / "pretrain",
+        max_rows=1,
+        duration_sec=0.4,
+        issue_type_filter="vocal_leak",
+    )
+    row = json.loads(Path(manifest["rows_jsonl"]).read_text(encoding="utf-8").splitlines()[0])
+
+    assert manifest["issue_type_counts"] == {"vocal_leak": 1}
+    assert row["source_hardcase_row_id"] == "hc000001"
+
+
+def test_synthetic_pretrain_dataset_supports_instrument_leak_rows(tmp_path: Path) -> None:
+    source_bad = _write_hardcase_audio(tmp_path / "hardcase" / "audio" / "b002.flac")
+    rows_jsonl = _write_hardcase_rows(
+        tmp_path / "hardcase" / "rows.jsonl",
+        [
+            {
+                "row_id": "hc000002",
+                "training_state": "data_gap",
+                "issue_type": "instrument_leak",
+                "affected_stem": "other",
+                "foreign_source": "guitar",
+                "bad_stem_path": str(source_bad),
+                "blocker_reason": "foreign_source_recovered:other:guitar",
+                "is_ground_truth": False,
+            }
+        ],
+    )
+
+    manifest = build_stem_region_synthetic_pretrain_dataset(
+        hardcase_rows_jsonl=rows_jsonl,
+        output_dir=tmp_path / "pretrain",
+        max_rows=1,
+        duration_sec=0.4,
+    )
+    row = json.loads(Path(manifest["rows_jsonl"]).read_text(encoding="utf-8").splitlines()[0])
+
+    assert manifest["issue_type_counts"] == {"instrument_leak": 1}
+    assert manifest["stem_counts"] == {"other": 1}
+    assert row["source_hardcase_row_id"] == "hc000002"
+    assert row["corruption"]["corruption"] == "instrument_leak_injection"
+
+
+def test_synthetic_pretrain_dataset_can_filter_target_stem(tmp_path: Path) -> None:
+    bass_bad = _write_hardcase_audio(tmp_path / "hardcase" / "audio" / "b003.flac")
+    other_bad = _write_hardcase_audio(tmp_path / "hardcase" / "audio" / "b004.flac")
+    rows_jsonl = _write_hardcase_rows(
+        tmp_path / "hardcase" / "rows.jsonl",
+        [
+            {
+                "row_id": "hc000003",
+                "training_state": "data_gap",
+                "issue_type": "vocal_leak",
+                "affected_stem": "bass",
+                "foreign_source": "vocals",
+                "bad_stem_path": str(bass_bad),
+                "is_ground_truth": False,
+            },
+            {
+                "row_id": "hc000004",
+                "training_state": "data_gap",
+                "issue_type": "vocal_leak",
+                "affected_stem": "other",
+                "foreign_source": "vocals",
+                "bad_stem_path": str(other_bad),
+                "is_ground_truth": False,
+            },
+        ],
+    )
+
+    manifest = build_stem_region_synthetic_pretrain_dataset(
+        hardcase_rows_jsonl=rows_jsonl,
+        output_dir=tmp_path / "pretrain",
+        max_rows=1,
+        duration_sec=0.4,
+        issue_type_filter="vocal_leak",
+        stem_filter="other",
+    )
+    row = json.loads(Path(manifest["rows_jsonl"]).read_text(encoding="utf-8").splitlines()[0])
+
+    assert manifest["stem_filter"] == "other"
+    assert manifest["stem_counts"] == {"other": 1}
+    assert row["source_hardcase_row_id"] == "hc000004"

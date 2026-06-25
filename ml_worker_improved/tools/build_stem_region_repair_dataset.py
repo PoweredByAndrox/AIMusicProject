@@ -13,6 +13,7 @@ import numpy as np
 
 try:
     from tools.stem_region_repair_common import (
+        ISSUE_INSTRUMENT_LEAK,
         ISSUE_STEREO_COLLAPSE,
         ISSUE_VOCAL_LEAK,
         LABEL_TYPE_SYNTHETIC_CLEAN,
@@ -25,6 +26,7 @@ try:
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
     from stem_region_repair_common import (
+        ISSUE_INSTRUMENT_LEAK,
         ISSUE_STEREO_COLLAPSE,
         ISSUE_VOCAL_LEAK,
         LABEL_TYPE_SYNTHETIC_CLEAN,
@@ -57,6 +59,25 @@ def _synthetic_vocal_like(frames: int, sample_rate: int, amp: float) -> np.ndarr
     return stereo.astype(np.float32)
 
 
+def _synthetic_instrument_like(frames: int, sample_rate: int, amp: float) -> np.ndarray:
+    t = np.arange(frames, dtype=np.float32) / float(sample_rate)
+    pluck_spacing = max(1, int(round(sample_rate * 0.18)))
+    envelope = np.zeros(frames, dtype=np.float32)
+    decay = np.exp(-np.linspace(0.0, 5.0, max(8, int(sample_rate * 0.12)), dtype=np.float32))
+    for start in range(0, frames, pluck_spacing):
+        end = min(frames, start + decay.shape[0])
+        envelope[start:end] += decay[: end - start]
+    tone = (
+        0.72 * np.sin(2.0 * math.pi * 330.0 * t)
+        + 0.44 * np.sin(2.0 * math.pi * 495.0 * t + 0.17)
+        + 0.23 * np.sin(2.0 * math.pi * 660.0 * t + 0.29)
+    )
+    side = 0.22 * np.sin(2.0 * math.pi * 417.0 * t + 0.37)
+    left = float(amp) * envelope * (tone + side)
+    right = float(amp) * envelope * (tone - side)
+    return np.stack([left, right], axis=1).astype(np.float32)
+
+
 def corrupt_clean_stem(
     *,
     clean_stem: np.ndarray,
@@ -76,6 +97,16 @@ def corrupt_clean_stem(
         bad = clean + leak * mask
         return bad.astype(np.float32), {
             "corruption": "vocal_leak_injection",
+            "contamination_gain": float(contamination_gain),
+        }
+    if issue_type == ISSUE_INSTRUMENT_LEAK:
+        leak = foreign_source
+        if leak is None:
+            leak = _synthetic_instrument_like(clean.shape[0], sample_rate, contamination_gain)
+        leak = _fit_like(leak, clean.shape[0])
+        bad = clean + leak * mask
+        return bad.astype(np.float32), {
+            "corruption": "instrument_leak_injection",
             "contamination_gain": float(contamination_gain),
         }
     if issue_type == ISSUE_STEREO_COLLAPSE:
