@@ -19,7 +19,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 
 /**
- * LLMChatService - AI-powered music chat using local Ollama LLM.
+ * LLMChatService - AI-powered music chat using a local LLM backend.
  * 
  * Understands natural language queries about music library and
  * translates them into search/filter operations.
@@ -27,6 +27,8 @@ use Illuminate\Support\Facades\Redis;
 class LLMChatService
 {
     private string $ollamaUrl;
+    private string $provider;
+    private string $openAiCompatibleUrl;
     private string $model;
     private int $timeout;
     private TrackRatingService $ratingService;
@@ -34,9 +36,14 @@ class LLMChatService
 
     public function __construct()
     {
+        $this->provider = strtolower((string) env('LLM_PROVIDER', 'ollama'));
         $this->ollamaUrl = env('OLLAMA_URL', 'http://ollama:11434');
-        $this->model = env('OLLAMA_MODEL', 'llama3.1:8b');
-        $this->timeout = (int) env('OLLAMA_TIMEOUT', 120);
+        $this->openAiCompatibleUrl = rtrim((string) env('VLLM_URL', 'http://vllm:8000/v1'), '/');
+        $defaultModel = in_array($this->provider, ['vllm', 'openai_compatible', 'openai-compatible'], true)
+            ? env('VLLM_MODEL', '')
+            : env('OLLAMA_MODEL', 'llama3.1:8b');
+        $this->model = (string) env('LLM_MODEL', $defaultModel);
+        $this->timeout = (int) env('LLM_TIMEOUT', env('OLLAMA_TIMEOUT', 120));
         $this->ratingService = app(TrackRatingService::class);
         $this->fragmentService = app(FragmentService::class);
     }
@@ -49,8 +56,8 @@ class LLMChatService
         // Build system prompt with library context
         $systemPrompt = $this->buildSystemPrompt($context);
         
-        // Call Ollama
-        $response = $this->callOllama($systemPrompt, $message);
+        // Call configured local LLM backend.
+        $response = $this->callLLM($systemPrompt, $message);
         
         if (isset($response['error'])) {
             return $response;
@@ -167,6 +174,17 @@ PROMPT;
         }
 
         return $prompt;
+    }
+
+    /**
+     * Call configured local LLM backend.
+     */
+    private function callLLM(string $systemPrompt, string $userMessage): array
+    {
+        return match ($this->provider) {
+            'vllm', 'openai_compatible', 'openai-compatible' => $this->callOpenAICompatible($systemPrompt, $userMessage),
+            default => $this->callOllama($systemPrompt, $userMessage),
+        };
     }
 
     /**
@@ -640,6 +658,42 @@ PROMPT;
         return $this->diversifyScoredRecommendations($ranked, $count, $genre !== null)
             ->values()
             ->toArray();
+    }
+
+    /**
+     * Call an OpenAI-compatible local LLM API, including vLLM.
+     */
+    private function callOpenAICompatible(string $systemPrompt, string $userMessage): array
+    {
+        if (trim($this->model) === '') {
+            return ['error' => 'LLM модель для OpenAI-compatible backend не настроена. Укажите LLM_MODEL или VLLM_MODEL.'];
+        }
+
+        try {
+            $response = Http::timeout($this->timeout)
+                ->post("{$this->openAiCompatibleUrl}/chat/completions", [
+                    'model' => $this->model,
+                    'messages' => [
+                        ['role' => 'system', 'content' => $systemPrompt],
+                        ['role' => 'user', 'content' => $userMessage],
+                    ],
+                    'stream' => false,
+                    'temperature' => 0.3,
+                    'max_tokens' => 500,
+                ]);
+
+            if (!$response->successful()) {
+                Log::error('OpenAI-compatible LLM API error', ['status' => $response->status(), 'body' => $response->body()]);
+                return ['error' => 'LLM сервис недоступен. Попробуйте позже.'];
+            }
+
+            $data = $response->json();
+            return ['content' => $data['choices'][0]['message']['content'] ?? ''];
+
+        } catch (\Exception $e) {
+            Log::error('OpenAI-compatible LLM connection error', ['error' => $e->getMessage()]);
+            return ['error' => 'Не удалось подключиться к LLM. Убедитесь что локальный LLM backend запущен.'];
+        }
     }
 
     private function diversifyScoredRecommendations($tracks, int $count, bool $preserveGenreOrder = false)
@@ -1432,10 +1486,14 @@ PROMPT;
     }
 
     /**
-     * Check if Ollama is available and model is loaded.
+     * Check if the configured local LLM backend is available and model is loaded.
      */
     public function checkHealth(): array
     {
+        if (in_array($this->provider, ['vllm', 'openai_compatible', 'openai-compatible'], true)) {
+            return $this->checkOpenAICompatibleHealth();
+        }
+
         try {
             $response = Http::timeout(5)->get("{$this->ollamaUrl}/api/tags");
             
@@ -1451,7 +1509,39 @@ PROMPT;
 
             return [
                 'status' => 'ok',
+                'provider' => 'ollama',
                 'ollama_url' => $this->ollamaUrl,
+                'model' => $this->model,
+                'model_loaded' => $hasModel,
+                'available_models' => $modelNames,
+            ];
+
+        } catch (\Exception $e) {
+            return ['status' => 'error', 'message' => $e->getMessage()];
+        }
+    }
+
+    private function checkOpenAICompatibleHealth(): array
+    {
+        if (trim($this->model) === '') {
+            return ['status' => 'error', 'message' => 'LLM_MODEL или VLLM_MODEL не задан для OpenAI-compatible backend'];
+        }
+
+        try {
+            $response = Http::timeout(5)->get("{$this->openAiCompatibleUrl}/models");
+
+            if (!$response->successful()) {
+                return ['status' => 'error', 'message' => 'OpenAI-compatible LLM недоступен'];
+            }
+
+            $models = $response->json()['data'] ?? [];
+            $modelNames = array_values(array_filter(array_map(fn($model) => $model['id'] ?? null, $models)));
+            $hasModel = in_array($this->model, $modelNames, true);
+
+            return [
+                'status' => 'ok',
+                'provider' => $this->provider,
+                'openai_compatible_url' => $this->openAiCompatibleUrl,
                 'model' => $this->model,
                 'model_loaded' => $hasModel,
                 'available_models' => $modelNames,

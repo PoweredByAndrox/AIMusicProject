@@ -28,6 +28,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "peak_percentile": 82.0,
     "peak_tolerance_sec": 0.05,
     "min_source_hf_dbfs": -70.0,
+    "min_tested_hf_dbfs": -72.0,
+    "min_region_tested_hf_dbfs": -72.0,
     "min_tested_hf_relative_db": -36.0,
     "vocal_drum_score_threshold": 0.55,
     "vocal_drum_flux_corr_threshold": 0.34,
@@ -261,6 +263,7 @@ def _score_vocals_drums(
     low_hz, high_hz = [float(value) for value in config["high_band_hz"]]
     tested_hf = _band_limited_mono(tested_audio, sample_rate, low_hz, high_hz)
     full_rms = max(_rms(_mono(tested_audio)), 1.0e-12)
+    tested_hf_dbfs = _dbfs(_rms(tested_hf))
     tested_hf_relative_db = _dbfs(_rms(tested_hf) / full_rms)
     best: dict[str, Any] | None = None
     for gain in [float(value) for value in config["probe_gains"]]:
@@ -292,11 +295,13 @@ def _score_vocals_drums(
         float(best.get("projection_rel_db") or -240.0) >= float(config["vocal_drum_projection_rel_db_threshold"])
         and float(best.get("projection_corr") or 0.0) >= float(config["vocal_drum_projection_corr_threshold"])
         and float(best["source_hf_dbfs"]) >= float(config["min_source_hf_dbfs"])
+        and float(tested_hf_dbfs) >= float(config["min_tested_hf_dbfs"])
         and float(best["tested_hf_relative_db"]) >= float(config["min_tested_hf_relative_db"])
     )
     region_fail = (
         float(best["score"]) >= float(config["vocal_drum_score_threshold"])
         and float(best["source_hf_dbfs"]) >= float(config["min_source_hf_dbfs"])
+        and float(top.get("tested_hf_dbfs") or -240.0) >= float(config["min_region_tested_hf_dbfs"])
         and float(best["tested_hf_relative_db"]) >= float(config["min_tested_hf_relative_db"])
         and (
             float(top.get("hf_flux_corr") or 0.0) >= float(config["vocal_drum_flux_corr_threshold"])
@@ -324,6 +329,7 @@ def _score_vocals_drums(
         "imprint_score": round(float(best["score"]), 6),
         "best_probe_gain": float(best["probe_gain"]),
         "source_hf_dbfs": round(float(best["source_hf_dbfs"]), 6),
+        "tested_hf_dbfs": round(float(tested_hf_dbfs), 6),
         "tested_hf_relative_db": round(float(best["tested_hf_relative_db"]), 6),
         "projection_coeff": round(float(best.get("projection_coeff") or 0.0), 8),
         "projection_corr": round(float(best.get("projection_corr") or 0.0), 6),

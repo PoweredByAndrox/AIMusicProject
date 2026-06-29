@@ -14,6 +14,7 @@ import numpy as np
 try:
     from tools.stem_region_repair_common import (
         ISSUE_INSTRUMENT_LEAK,
+        ISSUE_BAD_RECONSTRUCTION,
         ISSUE_STEREO_COLLAPSE,
         ISSUE_VOCAL_LEAK,
         LABEL_TYPE_SYNTHETIC_CLEAN,
@@ -27,6 +28,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
     from stem_region_repair_common import (
         ISSUE_INSTRUMENT_LEAK,
+        ISSUE_BAD_RECONSTRUCTION,
         ISSUE_STEREO_COLLAPSE,
         ISSUE_VOCAL_LEAK,
         LABEL_TYPE_SYNTHETIC_CLEAN,
@@ -114,6 +116,16 @@ def corrupt_clean_stem(
         collapsed = np.repeat(mid, 2, axis=1)
         bad = clean * (1.0 - mask) + collapsed * mask
         return bad.astype(np.float32), {"corruption": "region_stereo_collapse"}
+    if issue_type == ISSUE_BAD_RECONSTRUCTION:
+        missing = foreign_source
+        if missing is None:
+            missing = _synthetic_instrument_like(clean.shape[0], sample_rate, contamination_gain)
+        missing = _fit_like(missing, clean.shape[0])
+        bad = clean - missing * mask
+        return bad.astype(np.float32), {
+            "corruption": "region_missing_reconstruction_detail",
+            "missing_detail_gain": float(contamination_gain),
+        }
     raise ValueError(f"unsupported synthetic repair issue_type: {issue_type}")
 
 
@@ -127,6 +139,8 @@ def build_stem_region_repair_dataset(
     start_sec: float,
     end_sec: float,
     foreign_source_path: Path | None = None,
+    sibling_stem_paths: dict[str, Path] | None = None,
+    root_cause_row_id: str = "",
 ) -> dict[str, Any]:
     clean, sample_rate = read_audio_stereo(clean_stem_path)
     mix, mix_rate = read_audio_stereo(mix_path)
@@ -169,6 +183,13 @@ def build_stem_region_repair_dataset(
         "region": {"start_sec": float(start_sec), "end_sec": float(end_sec)},
         "corruption": corruption,
     }
+    siblings = sibling_stem_paths or {}
+    if siblings:
+        row["sibling_stem_paths"] = {str(stem): str(path) for stem, path in sorted(siblings.items())}
+        row["reconstruction_surface"] = "vocals_plus_minus" if stem in {"vocals", "minus"} else "six_stem_sum"
+        row["target_surface"] = "mix"
+    if root_cause_row_id:
+        row["root_cause_row_id"] = str(root_cause_row_id)
     validate_region_repair_row(row)
     write_jsonl(output_dir / "rows.jsonl", [row])
     manifest = {
@@ -193,10 +214,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mix", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--stem", required=True)
-    parser.add_argument("--issue-type", choices=[ISSUE_VOCAL_LEAK, ISSUE_STEREO_COLLAPSE], required=True)
+    parser.add_argument(
+        "--issue-type",
+        choices=[ISSUE_VOCAL_LEAK, ISSUE_INSTRUMENT_LEAK, ISSUE_STEREO_COLLAPSE, ISSUE_BAD_RECONSTRUCTION],
+        required=True,
+    )
     parser.add_argument("--start-sec", type=float, required=True)
     parser.add_argument("--end-sec", type=float, required=True)
     parser.add_argument("--foreign-source", type=Path)
+    parser.add_argument(
+        "--sibling-stem",
+        action="append",
+        default=[],
+        help="Optional reconstruction sibling in STEM=PATH form. Repeatable.",
+    )
+    parser.add_argument("--root-cause-row-id", default="")
     return parser
 
 
@@ -211,6 +243,12 @@ def main() -> int:
         start_sec=args.start_sec,
         end_sec=args.end_sec,
         foreign_source_path=args.foreign_source,
+        sibling_stem_paths={
+            key: Path(value)
+            for item in args.sibling_stem
+            for key, value in [item.split("=", 1)]
+        },
+        root_cause_row_id=args.root_cause_row_id,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0

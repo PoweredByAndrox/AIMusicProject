@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
@@ -46,9 +48,11 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
         sf.write(source_path, source_audio, sample_rate)
 
         executed_commands: list[list[str]] = []
+        executed_timeouts: list[int] = []
 
-        def fake_run(command, *, cwd, capture_output, text, check):
+        def fake_run(command, *, cwd, capture_output, text, check, timeout):
             executed_commands.append([str(part) for part in command])
+            executed_timeouts.append(timeout)
             store_dir = Path(command[command.index("--store_dir") + 1])
             stem_dir = store_dir / "full_track"
             stem_dir.mkdir(parents=True)
@@ -78,6 +82,8 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
                     "0",
                     "--num-overlap",
                     "2",
+                    "--timeout-sec",
+                    "11",
                 ]
             )
 
@@ -86,6 +92,7 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
     assert exit_code == 0
     assert executed_commands
     command = executed_commands[0]
+    assert executed_timeouts == [11]
     assert "inference.py" in command
     assert command[command.index("--model_type") + 1] == "scnet"
     assert command[command.index("--filename_template") + 1] == "{file_name}/{instr}"
@@ -156,3 +163,51 @@ def test_scnet_manifest_records_cuda_preflight(tmp_path: Path) -> None:
     )
 
     assert manifest["execution_contract"]["cuda_preflight"]["device_name"] == "NVIDIA GeForce RTX 4080 Laptop GPU"
+
+
+def test_scnet_subprocess_timeout_reports_explicit_blocker(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+    repo_path = tmp_path / "repo"
+    config_path = tmp_path / "config.yaml"
+    model_path = tmp_path / "model.ckpt"
+    source_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "out"
+    repo_path.mkdir()
+    config_path.write_text("inference:\n  num_overlap: 4\n", encoding="utf-8")
+    model_path.write_bytes(b"fake checkpoint")
+    sf.write(source_path, np.zeros((64, 2), dtype=np.float32), 44100)
+
+    monkeypatch.setattr(module, "require_docker_runtime", lambda **_: None)
+    monkeypatch.setattr(
+        module,
+        "verify_cuda_inference_device",
+        lambda device_id: {"device_id": device_id, "device_count": 1, "device_name": "test-gpu"},
+    )
+    monkeypatch.setattr(
+        module,
+        "save_audio_window_as_wav",
+        lambda source, target, start_sec, end_sec: (sf.write(target, np.zeros((64, 2), dtype=np.float32), 44100), (44100, 64))[1],
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(command, timeout=5, output="partial stdout", stderr="partial stderr")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="scnet_subprocess_timeout"):
+        module.main(
+            [
+                str(source_path),
+                str(output_dir),
+                "--repo-path",
+                str(repo_path),
+                "--config-path",
+                str(config_path),
+                "--model-path",
+                str(model_path),
+                "--timeout-sec",
+                "5",
+            ]
+        )

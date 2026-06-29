@@ -13,6 +13,7 @@
 | `postgres` | `postgres:16-alpine` | `${DB_PORT:-5432}:5432` | Основная БД |
 | `redis` | `redis:7-alpine` | (только внутри сети) | Очередь ML-воркеров и кэш |
 | `ollama` | `ollama/ollama:latest` | `${OLLAMA_PORT:-11434}:11434` | Локальный LLM для AI Music Chat |
+| `vllm` | `vllm/vllm-openai:latest` | `${VLLM_PORT:-8001}:8000` | Опциональный OpenAI-compatible LLM backend, profile `llm-vllm` |
 | `node` | `node:20-alpine` | `${VITE_PORT:-5173}:5173` | Vite dev-сервер + WebSocket-сервер public-radio (`scripts/public-radio-ws-server.mjs`, порт 8080 внутри контейнера) |
 
 Ключевые особенности:
@@ -59,7 +60,7 @@
                                                                 |
                                                                 v
                                                   +-----------------------------+
-                                                  |  Ollama (LLM, port 11434)   |
+                                                  |  Ollama / vLLM (local LLM)  |
                                                   |  для ChatController         |
                                                   +-----------------------------+
 ```
@@ -238,7 +239,8 @@ Scheduler и стандартные Laravel queue-воркеры запуска�
 
 ## 11. Внешние сервисы
 
-- **Ollama** — локальный LLM (по умолчанию слушает `0.0.0.0:11434`). Используется `ChatController::aiChat` / `aiHealth`. Конкретная модель не зашита в код приложения — её нужно подтянуть командой `docker exec music-ollama ollama pull <model>`.
+- **Ollama** — локальный LLM по умолчанию (слушает `0.0.0.0:11434`). Используется `ChatController::aiChat` / `aiHealth`, если `LLM_PROVIDER=ollama`. Конкретная модель задается `OLLAMA_MODEL` или `LLM_MODEL`; её нужно подтянуть командой `docker exec music-ollama ollama pull <model>`.
+- **vLLM** — опциональный OpenAI-compatible LLM backend, profile-gated через `docker compose --profile llm-vllm up -d vllm`. Приложение использует его при `LLM_PROVIDER=vllm`, `VLLM_URL=http://vllm:8000/v1`, `VLLM_MODEL=<hf-model>`. Это ускоряет LLM/chat/controller inference, но не заменяет Demucs/BS-RoFormer/SCNet/audio-separator waveform inference.
 - **Cloudflare Quick Tunnel** — `cloudflare_tunnel/README.md` описывает временный туннель, проксирующий `localhost:8000` наружу через `cloudflared tunnel --url http://localhost:8000`.
 - **YouTube** — импорт через `yt-dlp` (установлен и в `app`-контейнере, и в `ml-worker`). Эндпоинты `POST /api/tracks/youtube` и `POST /api/tracks/youtube/batch`.
 

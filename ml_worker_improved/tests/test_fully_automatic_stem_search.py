@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,7 @@ from tools.run_fully_automatic_stem_search import (
     _candidate_contamination_checks,
     _copy_target_specific_outputs,
     _discover_default_contamination_model_manifest,
+    _parse_teacher_mask_checkpoint_spec,
     apply_minus_vocal_debleed,
     apply_stem_merges,
     build_candidate_manifest,
@@ -31,7 +34,7 @@ from tools.stem_contamination_common import (
 )
 from tools.stem_contamination_model import band_limited_audio
 from tools.train_stem_contamination_detector import train_stem_contamination_detector
-from tools.stem_region_repair_common import ISSUE_STEREO_COLLAPSE, make_region_mask
+from tools.stem_region_repair_common import ISSUE_BAD_RECONSTRUCTION, ISSUE_STEREO_COLLAPSE, make_region_mask
 from tools.stem_region_repair_model import (
     StemRegionRepairTrainConfig,
     save_region_repair_checkpoint,
@@ -161,6 +164,1351 @@ def test_candidate_untrusted_by_default(tmp_path: Path) -> None:
     assert manifest["candidate_id"] == "c001"
     assert manifest["candidate_untrusted"] is True
     assert manifest["verdict"] == "blocked_unknown"
+
+
+def test_cli_enables_live_progress_echo_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_run_fully_automatic_stem_search(**_kwargs):
+        captured["echo_progress"] = stem_search.os.environ.get("STEM_SEARCH_ECHO_PROGRESS", "")
+        return {"verdict": "blocked_unknown"}
+
+    monkeypatch.delenv("STEM_SEARCH_ECHO_PROGRESS", raising=False)
+    monkeypatch.setattr(stem_search, "run_fully_automatic_stem_search", fake_run_fully_automatic_stem_search)
+    monkeypatch.setattr(
+        stem_search.sys,
+        "argv",
+        [
+            "run_fully_automatic_stem_search.py",
+            "--mix",
+            str(tmp_path / "mix.flac"),
+            "--out",
+            str(tmp_path / "out"),
+            "--no-artifact-rag",
+        ],
+    )
+
+    stem_search.main()
+    capsys.readouterr()
+
+    assert captured["echo_progress"] == "1"
+
+
+def test_cli_can_disable_live_progress_echo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_run_fully_automatic_stem_search(**_kwargs):
+        captured["echo_progress"] = stem_search.os.environ.get("STEM_SEARCH_ECHO_PROGRESS", "")
+        return {"verdict": "blocked_unknown"}
+
+    monkeypatch.setenv("STEM_SEARCH_ECHO_PROGRESS", "1")
+    monkeypatch.setattr(stem_search, "run_fully_automatic_stem_search", fake_run_fully_automatic_stem_search)
+    monkeypatch.setattr(
+        stem_search.sys,
+        "argv",
+        [
+            "run_fully_automatic_stem_search.py",
+            "--mix",
+            str(tmp_path / "mix.flac"),
+            "--out",
+            str(tmp_path / "out"),
+            "--no-artifact-rag",
+            "--no-echo-progress",
+        ],
+    )
+
+    stem_search.main()
+    capsys.readouterr()
+
+    assert captured["echo_progress"] == "0"
+
+
+def test_cli_passes_gpu_wait_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+    captured: dict[str, float] = {}
+
+    def fake_run_fully_automatic_stem_search(**kwargs):
+        captured["wait_for_gpu_free_sec"] = kwargs["wait_for_gpu_free_sec"]
+        captured["gpu_preflight_poll_sec"] = kwargs["gpu_preflight_poll_sec"]
+        return {"verdict": "blocked_unknown"}
+
+    monkeypatch.setattr(stem_search, "run_fully_automatic_stem_search", fake_run_fully_automatic_stem_search)
+    monkeypatch.setattr(
+        stem_search.sys,
+        "argv",
+        [
+            "run_fully_automatic_stem_search.py",
+            "--mix",
+            str(tmp_path / "mix.flac"),
+            "--out",
+            str(tmp_path / "out"),
+            "--no-artifact-rag",
+            "--wait-for-gpu-free-sec",
+            "30",
+            "--gpu-preflight-poll-sec",
+            "2.5",
+        ],
+    )
+
+    stem_search.main()
+    capsys.readouterr()
+
+    assert captured == {"wait_for_gpu_free_sec": 30.0, "gpu_preflight_poll_sec": 2.5}
+
+
+def test_gpu_preflight_blocks_busy_gpu_before_candidate_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_collect_cuda_preflight(*, require_gpu: bool, min_free_mib: int) -> dict:
+        return {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": require_gpu,
+            "min_free_mib": min_free_mib,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 512,
+            "total_mib": 12_288,
+            "used_mib": 11_776,
+        }
+
+    monkeypatch.setattr(stem_search, "_collect_cuda_preflight", fake_collect_cuda_preflight)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "run",
+        require_gpu=True,
+        no_artifact_rag=True,
+        allow_default_recipe=False,
+        min_gpu_free_mib=4096,
+    )
+    progress_rows = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert result["verdict"] == "blocked_unknown"
+    assert result["root_cause"] == "infra_gap"
+    assert result["failed_checks"] == ["gpu_preflight_failed"]
+    assert result["gpu_preflight"]["reason"] == "gpu_free_memory_too_low"
+    assert result["candidate_count"] == 0
+    assert [row["event"] for row in progress_rows] == ["start", "gpu_preflight", "end"]
+    assert not any(row["event"] == "candidate_start" for row in progress_rows)
+
+
+def test_gpu_preflight_block_manifest_keeps_root_cause_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkpoint = "/repo/artifacts/stem_eval/t337_recon_synth/model_vocals/model.pt"
+    queue_jsonl = tmp_path / "queue.jsonl"
+    queue_jsonl.write_text(
+        json.dumps(
+            {
+                "row_id": "rc000001",
+                "root_cause": "repair_gap",
+                "issue_type": "bad_reconstruction",
+                "failed_repair_id": "probe_repair",
+                "failed_repair_checkpoint": checkpoint,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_collect_cuda_preflight(*, require_gpu: bool, min_free_mib: int) -> dict:
+        return {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": require_gpu,
+            "min_free_mib": min_free_mib,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 512,
+            "total_mib": 12_288,
+            "used_mib": 11_776,
+        }
+
+    monkeypatch.setattr(stem_search, "_collect_cuda_preflight", fake_collect_cuda_preflight)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "run",
+        require_gpu=True,
+        no_artifact_rag=True,
+        allow_default_recipe=False,
+        root_cause_queue_jsonl=queue_jsonl,
+        min_gpu_free_mib=4096,
+    )
+
+    assert result["verdict"] == "blocked_unknown"
+    assert result["root_cause_route_policy"]["source_queue_jsonl"] == str(queue_jsonl)
+    assert result["root_cause_route_policy"]["blocked_repair_ids"] == ["probe_repair"]
+    assert result["root_cause_route_policy"]["blocked_repair_checkpoints"] == [checkpoint]
+
+
+def test_gpu_preflight_waits_for_free_memory_before_candidate_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    preflight_rows = [
+        {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 1024,
+            "total_mib": 12_288,
+            "used_mib": 11_264,
+        },
+        {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "passed",
+            "reason": "",
+            "free_mib": 9000,
+            "total_mib": 12_288,
+            "used_mib": 3288,
+        },
+    ]
+    calls: list[int] = []
+
+    def fake_collect_cuda_preflight(*, require_gpu: bool, min_free_mib: int) -> dict:
+        calls.append(min_free_mib)
+        return dict(preflight_rows[min(len(calls) - 1, len(preflight_rows) - 1)])
+
+    monkeypatch.setattr(stem_search, "_collect_cuda_preflight", fake_collect_cuda_preflight)
+    monkeypatch.setattr(stem_search.time, "sleep", lambda _seconds: None)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "run",
+        require_gpu=True,
+        no_artifact_rag=True,
+        allow_default_recipe=False,
+        min_gpu_free_mib=4096,
+        wait_for_gpu_free_sec=30,
+        gpu_preflight_poll_sec=5,
+    )
+    progress_rows = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert len(calls) == 2
+    assert result["gpu_preflight"]["status"] == "passed"
+    assert any(row["event"] == "gpu_preflight_wait" for row in progress_rows)
+    assert any(row["event"] == "gpu_preflight" and row["status"] == "passed" for row in progress_rows)
+    assert not any(row["event"] == "candidate_start" for row in progress_rows)
+
+
+def test_root_cause_route_policy_skips_quarantined_and_prioritizes_repairable(tmp_path: Path) -> None:
+    queue_jsonl = tmp_path / "queue.jsonl"
+    queue_jsonl.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "row_id": "rc000001",
+                        "issue_type": "infra_failure",
+                        "route_signature": "vocal_lane:broken_vocal_model",
+                        "quarantined_for_next_run": True,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "row_id": "rc000002",
+                        "issue_type": "infra_failure",
+                        "route_signature": "minus_lane:bs_mamba2_vocals",
+                        "quarantined_for_next_run": True,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "row_id": "rc000003",
+                        "issue_type": "bad_reconstruction",
+                        "affected_stem": "drums",
+                        "route_signature": "stem_lane:repairable_stem_model",
+                        "quarantined_for_next_run": False,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    recipe = {
+        "schema": "stem_search_recipe.v2",
+        "candidates": [
+            {
+                "candidate_id": "c001",
+                "target_specific_commands": [{"lane": "vocal_lane", "route_id": "broken_vocal_model"}],
+            },
+            {
+                "candidate_id": "c002",
+                "target_specific_commands": [{"lane": "stem_lane", "route_id": "unseen_model"}],
+            },
+            {
+                "candidate_id": "c003",
+                "target_specific_commands": [{"lane": "stem_lane", "route_id": "repairable_stem_model"}],
+            },
+            {
+                "candidate_id": "c004",
+                "target_specific_commands": [{"lane": "minus_lane", "route_id": "bs_mamba2_vocals:instrumental"}],
+            },
+        ],
+    }
+
+    filtered = stem_search._apply_root_cause_route_policy(recipe, root_cause_queue_jsonl=queue_jsonl)
+
+    assert [candidate["candidate_id"] for candidate in filtered["candidates"]] == ["c003", "c002"]
+    assert filtered["root_cause_route_policy"]["skipped_candidate_count"] == 2
+    assert filtered["root_cause_route_policy"]["prioritized_candidate_count"] == 1
+    assert filtered["root_cause_route_policy"]["skipped_candidates"][0]["candidate_id"] == "c001"
+    assert filtered["root_cause_route_policy"]["skipped_candidates"][1]["candidate_id"] == "c004"
+
+
+def test_root_cause_route_policy_filters_failed_repair_checkpoint(tmp_path: Path) -> None:
+    failed_checkpoint = "/repo/artifacts/stem_eval/t337_recon_synth/model_vocals/model.pt"
+    safe_checkpoint = "/repo/artifacts/stem_eval/t334_bass_synth/model/model.pt"
+    queue_jsonl = tmp_path / "queue.jsonl"
+    queue_jsonl.write_text(
+        json.dumps(
+            {
+                "row_id": "rc000001",
+                "root_cause": "repair_gap",
+                "issue_type": "bad_reconstruction",
+                "affected_stem": "vocals",
+                "training_action": "retrain_failed_repair_checkpoint",
+                "route_signature": "stem_lane:htdemucs_6s|vocal_lane:mdx23c_vocals",
+                "failed_repair_id": "srseq_bad",
+                "failed_repair_checkpoint": failed_checkpoint,
+                "quarantined_for_next_run": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    recipe = {
+        "schema": "stem_search_recipe.v2",
+        "candidates": [
+            {
+                "candidate_id": "c001",
+                "target_specific_commands": [
+                    {"lane": "stem_lane", "route_id": "htdemucs_6s"},
+                    {"lane": "vocal_lane", "route_id": "mdx23c_vocals"},
+                ],
+                "model_split_composite_repair_options": [
+                    {
+                        "repair_id": "srseq_bad",
+                        "type": "stem_region_repair",
+                        "stem_region_repairs": [
+                            {
+                                "stem": "vocals",
+                                "issue_type": "bad_reconstruction",
+                                "checkpoint": failed_checkpoint,
+                            }
+                        ],
+                    },
+                    {
+                        "repair_id": "srseq_safe",
+                        "type": "stem_region_repair",
+                        "stem_region_repairs": [
+                            {
+                                "stem": "bass",
+                                "issue_type": "stereo_collapse",
+                                "checkpoint": safe_checkpoint,
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+
+    filtered = stem_search._apply_root_cause_route_policy(recipe, root_cause_queue_jsonl=queue_jsonl)
+    repair_options = filtered["candidates"][0]["model_split_composite_repair_options"]
+
+    assert [option["repair_id"] for option in repair_options] == ["srseq_safe"]
+    assert filtered["root_cause_route_policy"]["blocked_repair_ids"] == ["srseq_bad"]
+    assert filtered["root_cause_route_policy"]["blocked_repair_checkpoints"] == [failed_checkpoint]
+    assert filtered["root_cause_route_policy"]["skipped_repair_option_count"] == 1
+
+
+def test_root_cause_route_policy_inspection_writes_diagnostic_manifest(tmp_path: Path) -> None:
+    from tools.inspect_root_cause_route_policy import _manifest_cli_summary, inspect_root_cause_route_policy
+
+    failed_checkpoint = "/repo/artifacts/stem_eval/t337_recon_synth/model_vocals/model.pt"
+    safe_checkpoint = "/repo/artifacts/stem_eval/t334_bass_synth/model/model.pt"
+    queue_jsonl = tmp_path / "queue.jsonl"
+    queue_jsonl.write_text(
+        json.dumps(
+            {
+                "row_id": "rc000001",
+                "root_cause": "repair_gap",
+                "issue_type": "bad_reconstruction",
+                "affected_stem": "vocals",
+                "training_action": "retrain_failed_repair_checkpoint",
+                "failed_repair_id": "srseq_bad",
+                "failed_repair_checkpoint": failed_checkpoint,
+                "quarantined_for_next_run": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v2",
+                "profile": "model_split_v2",
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "target_specific_commands": [{"lane": "vocal_lane", "route_id": "mdx23c_vocals"}],
+                        "model_split_composite_repair_options": [
+                            {
+                                "repair_id": "srseq_bad",
+                                "type": "stem_region_repair",
+                                "stem_region_repairs": [
+                                    {
+                                        "stem": "vocals",
+                                        "issue_type": "bad_reconstruction",
+                                        "checkpoint": failed_checkpoint,
+                                    }
+                                ],
+                            },
+                            {
+                                "repair_id": "srseq_safe",
+                                "type": "stem_region_repair",
+                                "stem_region_repairs": [
+                                    {
+                                        "stem": "bass",
+                                        "issue_type": "stereo_collapse",
+                                        "checkpoint": safe_checkpoint,
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = inspect_root_cause_route_policy(
+        output_dir=tmp_path / "policy",
+        root_cause_queue_jsonl=queue_jsonl,
+        recipe_path=recipe_path,
+        no_artifact_rag=True,
+    )
+
+    assert manifest["delivery_allowed"] is False
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["presentation_status"] == "diagnostic_policy_only"
+    assert manifest["listen_pack"] == {}
+    assert manifest["candidate_count_before_policy"] == 1
+    assert manifest["candidate_count_after_policy"] == 1
+    assert manifest["root_cause_route_policy"]["blocked_repair_ids"] == ["srseq_bad"]
+    assert manifest["root_cause_route_policy"]["blocked_repair_checkpoints"] == [failed_checkpoint]
+    assert manifest["root_cause_route_policy"]["skipped_repair_option_count"] == 1
+    assert manifest["remaining_repair_option_count"] == 1
+    assert manifest["active_blocked_repair_option_count"] == 0
+    assert manifest["active_blocked_repair_options"] == []
+    assert (tmp_path / "policy" / "manifest.json").exists()
+    progress_events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "policy" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert progress_events == ["start", "end"]
+    summary = _manifest_cli_summary(manifest)
+    assert "skipped_repair_options" not in summary
+    assert summary["skipped_repair_option_count"] == 1
+    assert summary["active_blocked_repair_option_count"] == 0
+    assert summary["manifest_path"].endswith("manifest.json")
+
+
+def test_build_stem_search_launch_manifest_records_preflight_and_command(tmp_path: Path) -> None:
+    from tools.build_stem_search_launch_manifest import build_stem_search_launch_manifest
+
+    recipe_path = tmp_path / "recipe_after_policy.json"
+    recipe_path.write_text(json.dumps({"schema": "stem_search_recipe.v2", "candidates": []}), encoding="utf-8")
+    mix_path = Path("/repo/testing_stuff_music/source.mp3")
+    output_dir = Path("/repo/artifacts/stem_eval/t999_run")
+    preflight = {
+        "schema": "stem_search_cuda_preflight.v1",
+        "require_gpu": True,
+        "min_free_mib": 4096,
+        "status": "blocked",
+        "reason": "gpu_free_memory_too_low",
+        "free_mib": 1024,
+        "total_mib": 12282,
+        "used_mib": 11258,
+    }
+    resource_snapshot = {
+        "schema": "stem_search_resource_blocker_snapshot.v1",
+        "docker_container_stats_available": True,
+        "docker_container_stats_reason": "",
+        "top_container_memory": [
+            {
+                "name": "trading-vllm-server",
+                "cpu_percent": "105.99%",
+                "mem_usage": "2.901GiB / 23.46GiB",
+                "mem_percent": "12.36%",
+            }
+        ],
+        "gpu_processes": [{"pid": "41720", "process_name": "Codex.exe", "used_memory_mib": ""}],
+    }
+
+    manifest = build_stem_search_launch_manifest(
+        output_dir=tmp_path / "launch",
+        mix_path=mix_path,
+        recipe_path=recipe_path,
+        run_output_dir=output_dir,
+        max_candidates=10,
+        require_gpu=True,
+        min_gpu_free_mib=4096,
+        wait_for_gpu_free_sec=600.0,
+        gpu_preflight=preflight,
+        resource_snapshot=resource_snapshot,
+        no_artifact_rag=True,
+    )
+
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "diagnostic_launch_only"
+    assert manifest["listen_pack"] == {}
+    assert manifest["gpu_ready"] is False
+    assert manifest["gpu_preflight"]["reason"] == "gpu_free_memory_too_low"
+    assert manifest["gpu_preflight_summary"]["status"] == "blocked"
+    assert manifest["gpu_preflight_summary"]["free_mib"] == 1024
+    assert manifest["status_summary"]["result_status"] == "not_started"
+    assert manifest["status_summary"]["blocked_reason"] == "gpu_free_memory_too_low"
+    assert manifest["resource_blocker_snapshot"]["top_container_memory"][0]["name"] == "trading-vllm-server"
+    assert manifest["resource_blocker_summary"]["top_container_memory_names"] == ["trading-vllm-server"]
+    assert manifest["recipe_sha256"]
+    assert manifest["launch_status"] == "blocked_gpu_preflight"
+    assert manifest["in_container_command"][:2] == ["python", "tools/run_fully_automatic_stem_search.py"]
+    assert "--recipe" in manifest["in_container_command"]
+    assert str(recipe_path) in manifest["in_container_command"]
+    assert "--wait-for-gpu-free-sec" in manifest["in_container_command"]
+    assert manifest["docker_compose_command_host"][:4] == ["docker", "compose", "run", "--rm"]
+    assert "-v" in manifest["docker_compose_command_host"]
+    socket_mount_index = manifest["docker_compose_command_host"].index("-v") + 1
+    assert manifest["docker_compose_command_host"][socket_mount_index] == "/var/run/docker.sock:/var/run/docker.sock"
+    progress_events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "launch" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert progress_events == ["start", "resource_snapshot_start", "resource_snapshot_end", "end"]
+    summary_md = (tmp_path / "launch" / "summary.md").read_text(encoding="utf-8")
+    assert "GPU preflight: blocked" in summary_md
+    assert "free_mib=1024" in summary_md
+    assert "Top container memory: trading-vllm-server" in summary_md
+    assert "Result: not started" in summary_md
+
+
+def test_resource_snapshot_ignores_nvidia_not_found_rows() -> None:
+    from tools.build_stem_search_launch_manifest import _parse_gpu_process_rows
+
+    rows = _parse_gpu_process_rows(
+        "[Not Found], [Not Found], [Not Found]\n"
+        "204, [Not Found], [N/A]\n"
+        "4, [Insufficient Permissions], [N/A]\n"
+    )
+
+    assert rows == [{"pid": "4", "process_name": "[Insufficient Permissions]", "used_memory_mib": "[N/A]"}]
+
+
+def test_docker_socket_stats_fallback_reports_top_container_memory() -> None:
+    from tools.build_stem_search_launch_manifest import _collect_docker_socket_stats
+
+    def fake_api_get(path: str):
+        if path == "/containers/json?all=0":
+            return [
+                {
+                    "Id": "abc123",
+                    "Names": ["/trading-vllm-server"],
+                    "Image": "vllm/vllm-openai:latest",
+                    "Status": "Up 4 hours",
+                },
+                {
+                    "Id": "def456",
+                    "Names": ["/music-postgres"],
+                    "Image": "postgres:16-alpine",
+                    "Status": "Up 44 hours",
+                },
+            ]
+        if path == "/containers/abc123/stats?stream=false":
+            return {"memory_stats": {"usage": 3 * 1024 * 1024 * 1024, "limit": 24 * 1024 * 1024 * 1024}}
+        if path == "/containers/def456/stats?stream=false":
+            return {"memory_stats": {"usage": 32 * 1024 * 1024, "limit": 24 * 1024 * 1024 * 1024}}
+        raise AssertionError(path)
+
+    result = _collect_docker_socket_stats(api_get=fake_api_get)
+
+    assert result["available"] is True
+    assert result["reason"] == ""
+    assert result["top_container_memory"][0]["name"] == "trading-vllm-server"
+    assert result["top_container_memory"][0]["mem_usage"] == "3.000GiB / 24.000GiB"
+    assert result["top_container_memory"][0]["mem_percent"] == "12.50%"
+    assert result["container_states"][0]["name"] == "trading-vllm-server"
+
+
+def test_resource_snapshot_uses_docker_socket_when_docker_cli_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tools.build_stem_search_launch_manifest as launch_manifest
+
+    def fake_run_text_command(command: list[str], *, timeout_sec: float = 10.0) -> dict:
+        if command[0] == "nvidia-smi":
+            return {
+                "available": True,
+                "reason": "",
+                "stdout": "41720, Codex.exe, [N/A]\n",
+                "stderr": "",
+                "returncode": 0,
+            }
+        if command[0] == "docker":
+            return {
+                "available": False,
+                "reason": "docker_cli_unavailable",
+                "stdout": "",
+                "stderr": "",
+                "returncode": None,
+            }
+        raise AssertionError(command)
+
+    monkeypatch.setattr(launch_manifest, "_run_text_command", fake_run_text_command)
+    monkeypatch.setattr(
+        launch_manifest,
+        "_collect_docker_socket_stats",
+        lambda: {
+            "available": True,
+            "reason": "",
+            "source": "docker_engine_socket",
+            "top_container_memory": [
+                {
+                    "name": "trading-vllm-server",
+                    "cpu_percent": "",
+                    "mem_usage": "3.000GiB / 24.000GiB",
+                    "mem_percent": "12.50%",
+                }
+            ],
+            "container_states": [{"name": "trading-vllm-server", "image": "vllm/vllm-openai:latest", "status": "Up"}],
+        },
+    )
+
+    snapshot = launch_manifest._collect_resource_blocker_snapshot()
+    summary = launch_manifest._resource_blocker_summary(snapshot)
+
+    assert snapshot["docker_container_stats_available"] is True
+    assert snapshot["docker_container_stats_reason"] == ""
+    assert snapshot["docker_container_stats_source"] == "docker_engine_socket"
+    assert summary["top_container_memory_names"] == ["trading-vllm-server"]
+
+
+def test_run_stem_search_launch_manifest_blocks_without_running_when_gpu_busy(tmp_path: Path) -> None:
+    from tools.build_stem_search_launch_manifest import build_stem_search_launch_manifest
+    from tools.run_stem_search_launch_manifest import run_stem_search_launch_manifest
+
+    recipe_path = tmp_path / "recipe_after_policy.json"
+    recipe_path.write_text(json.dumps({"schema": "stem_search_recipe.v2", "candidates": []}), encoding="utf-8")
+    launch_manifest = build_stem_search_launch_manifest(
+        output_dir=tmp_path / "launch",
+        mix_path=Path("/repo/testing_stuff_music/source.mp3"),
+        recipe_path=recipe_path,
+        run_output_dir=Path("/repo/artifacts/stem_eval/t999_run"),
+        wait_for_gpu_free_sec=0.0,
+        gpu_preflight={
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 1024,
+            "total_mib": 12282,
+            "used_mib": 11258,
+        },
+    )
+    calls: list[list[str]] = []
+
+    result = run_stem_search_launch_manifest(
+        launch_manifest_path=tmp_path / "launch" / "manifest.json",
+        output_dir=tmp_path / "exec",
+        command_runner=lambda command, timeout_sec: calls.append(command),
+        gpu_preflight_collector=lambda require_gpu, min_free_mib: {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": require_gpu,
+            "min_free_mib": min_free_mib,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 2048,
+            "total_mib": 12282,
+            "used_mib": 10234,
+        },
+        resource_snapshot_collector=lambda: {
+            "schema": "stem_search_resource_blocker_snapshot.v1",
+            "docker_container_stats_available": False,
+            "docker_container_stats_reason": "docker_cli_unavailable",
+            "top_container_memory": [],
+            "gpu_processes": [{"pid": "4", "process_name": "Insufficient Permissions", "used_memory_mib": ""}],
+        },
+        no_artifact_rag=True,
+    )
+
+    assert launch_manifest["delivery_allowed"] is False
+    assert calls == []
+    assert result["execution_status"] == "blocked_gpu_preflight"
+    assert result["delivery_allowed"] is False
+    assert result["presentation_status"] == "diagnostic_launch_execution_only"
+    assert result["listen_pack"] == {}
+    assert result["recipe_sha256_verified"] is True
+    assert result["run_command_started"] is False
+    assert result["gpu_preflight_summary"]["status"] == "blocked"
+    assert result["gpu_preflight_summary"]["free_mib"] == 2048
+    assert result["status_summary"]["result_status"] == "not_started"
+    assert result["status_summary"]["blocked_reason"] == "gpu_free_memory_too_low"
+    assert result["resource_blocker_snapshot"]["docker_container_stats_available"] is False
+    assert result["resource_blocker_summary"]["docker_container_stats_reason"] == "docker_cli_unavailable"
+    progress_events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "exec" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert progress_events == ["start", "gpu_preflight", "resource_snapshot_start", "resource_blocker_snapshot", "end"]
+    summary_md = (tmp_path / "exec" / "summary.md").read_text(encoding="utf-8")
+    assert "GPU preflight: blocked" in summary_md
+    assert "free_mib=2048" in summary_md
+    assert "Docker stats: unavailable (docker_cli_unavailable)" in summary_md
+    assert "Result: not started" in summary_md
+
+
+def test_run_stem_search_launch_manifest_blocks_on_recipe_sha_mismatch(tmp_path: Path) -> None:
+    from tools.build_stem_search_launch_manifest import build_stem_search_launch_manifest
+    from tools.run_stem_search_launch_manifest import run_stem_search_launch_manifest
+
+    recipe_path = tmp_path / "recipe_after_policy.json"
+    recipe_path.write_text(json.dumps({"schema": "stem_search_recipe.v2", "candidates": []}), encoding="utf-8")
+    build_stem_search_launch_manifest(
+        output_dir=tmp_path / "launch",
+        mix_path=Path("/repo/testing_stuff_music/source.mp3"),
+        recipe_path=recipe_path,
+        run_output_dir=Path("/repo/artifacts/stem_eval/t999_run"),
+        require_gpu=False,
+        gpu_preflight={
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": False,
+            "min_free_mib": 0,
+            "status": "not_required",
+            "reason": "",
+        },
+    )
+    recipe_path.write_text(json.dumps({"schema": "stem_search_recipe.v2", "candidates": [{"candidate_id": "c999"}]}), encoding="utf-8")
+
+    result = run_stem_search_launch_manifest(
+        launch_manifest_path=tmp_path / "launch" / "manifest.json",
+        output_dir=tmp_path / "exec",
+        command_runner=lambda command, timeout_sec: (_ for _ in ()).throw(AssertionError("must not run")),
+        no_artifact_rag=True,
+    )
+
+    assert result["execution_status"] == "blocked_recipe_sha_mismatch"
+    assert result["recipe_sha256_verified"] is False
+    assert result["run_command_started"] is False
+    assert result["delivery_allowed"] is False
+
+
+def test_run_stem_search_launch_manifest_waits_until_gpu_ready(tmp_path: Path) -> None:
+    from tools.build_stem_search_launch_manifest import build_stem_search_launch_manifest
+    from tools.run_stem_search_launch_manifest import run_stem_search_launch_manifest
+
+    recipe_path = tmp_path / "recipe_after_policy.json"
+    recipe_path.write_text(json.dumps({"schema": "stem_search_recipe.v2", "candidates": []}), encoding="utf-8")
+    build_stem_search_launch_manifest(
+        output_dir=tmp_path / "launch",
+        mix_path=Path("/repo/testing_stuff_music/source.mp3"),
+        recipe_path=recipe_path,
+        run_output_dir=Path("/repo/artifacts/stem_eval/t999_run"),
+        wait_for_gpu_free_sec=5.0,
+        gpu_preflight_poll_sec=1.0,
+        gpu_preflight={
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 1024,
+            "total_mib": 12282,
+            "used_mib": 11258,
+        },
+    )
+    preflights = [
+        {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 2048,
+            "total_mib": 12282,
+            "used_mib": 10234,
+        },
+        {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "passed",
+            "reason": "",
+            "free_mib": 8192,
+            "total_mib": 12282,
+            "used_mib": 4090,
+        },
+    ]
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    result = run_stem_search_launch_manifest(
+        launch_manifest_path=tmp_path / "launch" / "manifest.json",
+        output_dir=tmp_path / "exec",
+        command_runner=lambda command, timeout_sec: calls.append(command),
+        gpu_preflight_collector=lambda require_gpu, min_free_mib: preflights.pop(0),
+        sleep_fn=lambda seconds: sleeps.append(seconds),
+        no_artifact_rag=True,
+    )
+
+    assert result["execution_status"] == "command_completed"
+    assert result["run_command_started"] is True
+    assert result["recipe_sha256_verified"] is True
+    assert len(calls) == 1
+    assert sleeps == [1.0]
+    assert result["gpu_preflight_summary"]["status"] == "passed"
+    assert result["status_summary"]["result_status"] == "command_completed"
+    assert result["status_summary"]["run_command_started"] is True
+    progress_events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "exec" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert progress_events == [
+        "start",
+        "gpu_preflight_wait",
+        "gpu_preflight",
+        "resource_snapshot_start",
+        "resource_blocker_snapshot",
+        "command_start",
+        "end",
+    ]
+
+
+def test_run_stem_search_launch_manifest_wait_override_extends_saved_launch(tmp_path: Path) -> None:
+    from tools.build_stem_search_launch_manifest import build_stem_search_launch_manifest
+    from tools.run_stem_search_launch_manifest import run_stem_search_launch_manifest
+
+    recipe_path = tmp_path / "recipe_after_policy.json"
+    recipe_path.write_text(json.dumps({"schema": "stem_search_recipe.v2", "candidates": []}), encoding="utf-8")
+    build_stem_search_launch_manifest(
+        output_dir=tmp_path / "launch",
+        mix_path=Path("/repo/testing_stuff_music/source.mp3"),
+        recipe_path=recipe_path,
+        run_output_dir=Path("/repo/artifacts/stem_eval/t999_run"),
+        wait_for_gpu_free_sec=0.0,
+        gpu_preflight_poll_sec=1.0,
+        gpu_preflight={
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 1024,
+            "total_mib": 12282,
+            "used_mib": 11258,
+        },
+    )
+    preflights = [
+        {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "blocked",
+            "reason": "gpu_free_memory_too_low",
+            "free_mib": 2048,
+            "total_mib": 12282,
+            "used_mib": 10234,
+        },
+        {
+            "schema": "stem_search_cuda_preflight.v1",
+            "require_gpu": True,
+            "min_free_mib": 4096,
+            "status": "passed",
+            "reason": "",
+            "free_mib": 8192,
+            "total_mib": 12282,
+            "used_mib": 4090,
+        },
+    ]
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    result = run_stem_search_launch_manifest(
+        launch_manifest_path=tmp_path / "launch" / "manifest.json",
+        output_dir=tmp_path / "exec",
+        command_runner=lambda command, timeout_sec: calls.append(command),
+        gpu_preflight_collector=lambda require_gpu, min_free_mib: preflights.pop(0),
+        resource_snapshot_collector=lambda: {
+            "schema": "stem_search_resource_blocker_snapshot.v1",
+            "docker_container_stats_available": True,
+            "docker_container_stats_reason": "",
+            "top_container_memory": [],
+            "gpu_processes": [],
+        },
+        sleep_fn=lambda seconds: sleeps.append(seconds),
+        wait_for_gpu_free_sec_override=30.0,
+        gpu_preflight_poll_sec_override=2.5,
+        no_artifact_rag=True,
+    )
+
+    assert result["execution_status"] == "command_completed"
+    assert result["run_command_started"] is True
+    assert len(calls) == 1
+    assert sleeps == [2.5]
+
+
+def test_build_audio_iteration_analysis_ranks_current_next_action(tmp_path: Path) -> None:
+    from tools.build_audio_iteration_analysis import build_audio_iteration_analysis
+
+    policy_manifest = tmp_path / "policy.json"
+    policy_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "root_cause_route_policy_inspection.v1",
+                "delivery_allowed": False,
+                "presentation_status": "diagnostic_policy_only",
+                "repair_option_count_before_policy": 220,
+                "remaining_repair_option_count": 110,
+                "active_blocked_repair_option_count": 0,
+                "root_cause_route_policy": {"skipped_repair_option_count": 110},
+            }
+        ),
+        encoding="utf-8",
+    )
+    launch_manifest = tmp_path / "launch.json"
+    launch_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_launch_manifest.v1",
+                "delivery_allowed": False,
+                "presentation_status": "diagnostic_launch_only",
+                "recipe_path": "/repo/artifacts/stem_eval/t353_policy_ready/recipe_after_policy.json",
+                "run_output_dir": "/repo/artifacts/stem_eval/t355_full_filtered_replay",
+                "launch_status": "blocked_gpu_preflight",
+                "gpu_preflight": {"status": "blocked", "reason": "gpu_free_memory_too_low", "free_mib": 1488},
+            }
+        ),
+        encoding="utf-8",
+    )
+    execution_manifest = tmp_path / "exec.json"
+    execution_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_launch_execution.v1",
+                "delivery_allowed": False,
+                "presentation_status": "diagnostic_launch_execution_only",
+                "execution_status": "blocked_gpu_preflight",
+                "run_command_started": False,
+                "recipe_sha256_verified": True,
+                "gpu_preflight": {"status": "blocked", "reason": "gpu_free_memory_too_low", "free_mib": 1488},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_audio_iteration_analysis(
+        output_dir=tmp_path / "iter",
+        current_task="НАПИШИ_ЗАДАЧУ_ЗДЕСЬ: get filtered full-track replay running after GPU preflight blocker",
+        policy_manifest_path=policy_manifest,
+        launch_manifest_path=launch_manifest,
+        launch_execution_manifest_path=execution_manifest,
+        no_artifact_rag=True,
+    )
+
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "diagnostic_iteration_analysis_only"
+    assert manifest["current_task"].startswith("get filtered full-track replay")
+    assert "НАПИШИ_ЗАДАЧУ_ЗДЕСЬ" not in manifest["current_task"]
+    assert manifest["confirmed"]["active_blocked_repair_option_count"] == 0
+    assert manifest["confirmed"]["run_command_started"] is False
+    assert manifest["selected_top_action"] == "gpu_resource_arbitration"
+    assert manifest["rejected_idea_ids"] == ["threshold_relaxation", "human_review", "deliver_blocked_output"]
+    assert (tmp_path / "iter" / "ideas.jsonl").exists()
+    assert (tmp_path / "iter" / "summary.md").exists()
+    progress_events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "iter" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert progress_events == ["start", "end"]
+
+
+def test_audio_iteration_analysis_moves_to_gpu_arbitration_after_waited_preflight_block(tmp_path: Path) -> None:
+    from tools.build_audio_iteration_analysis import build_audio_iteration_analysis
+
+    execution_manifest = tmp_path / "exec.json"
+    execution_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_launch_execution.v1",
+                "delivery_allowed": False,
+                "presentation_status": "diagnostic_launch_execution_only",
+                "execution_status": "blocked_gpu_preflight",
+                "run_command_started": False,
+                "recipe_sha256_verified": True,
+                "gpu_preflight_summary": {
+                    "status": "blocked",
+                    "reason": "gpu_free_memory_too_low",
+                    "free_mib": 1421,
+                    "min_free_mib": 4096,
+                    "used_mib": 10861,
+                },
+                "resource_blocker_summary": {
+                    "docker_container_stats_available": False,
+                    "docker_container_stats_reason": "docker_cli_unavailable",
+                    "gpu_process_count": 0,
+                    "top_container_memory_names": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_audio_iteration_analysis(
+        output_dir=tmp_path / "iter",
+        current_task="НАПИШИ_ЗАДАЧУ_ЗДЕСЬ: continue after waited GPU preflight blocker",
+        launch_execution_manifest_path=execution_manifest,
+        no_artifact_rag=True,
+    )
+
+    assert manifest["selected_top_action"] == "gpu_resource_arbitration"
+    assert manifest["confirmed"]["resource_blocker_summary"]["docker_container_stats_reason"] == "docker_cli_unavailable"
+    assert manifest["confirmed"]["gpu_preflight_summary"]["free_mib"] == 1421
+    summary_md = (tmp_path / "iter" / "summary.md").read_text(encoding="utf-8")
+    assert "Selected top action: `gpu_resource_arbitration`" in summary_md
+    assert "GPU free MiB: `1421`" in summary_md
+
+
+def test_gpu_resource_arbitration_plan_is_diagnostic_and_non_destructive(tmp_path: Path) -> None:
+    from tools.build_gpu_resource_arbitration_plan import build_gpu_resource_arbitration_plan
+
+    iteration_manifest = tmp_path / "iter.json"
+    iteration_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "audio_iteration_analysis.v1",
+                "selected_top_action": "gpu_resource_arbitration",
+                "delivery_allowed": False,
+                "presentation_status": "diagnostic_iteration_analysis_only",
+            }
+        ),
+        encoding="utf-8",
+    )
+    execution_manifest = tmp_path / "exec.json"
+    execution_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_launch_execution.v1",
+                "execution_status": "blocked_gpu_preflight",
+                "run_command_started": False,
+                "delivery_allowed": False,
+                "presentation_status": "diagnostic_launch_execution_only",
+                "gpu_preflight_summary": {
+                    "status": "blocked",
+                    "reason": "gpu_free_memory_too_low",
+                    "free_mib": 1406,
+                    "min_free_mib": 4096,
+                    "used_mib": 10592,
+                    "total_mib": 12282,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    host_snapshot = {
+        "schema": "stem_search_resource_blocker_snapshot.v1",
+        "source": "test_host_snapshot",
+        "docker_container_stats_available": True,
+        "docker_container_stats_reason": "",
+        "top_container_memory": [
+            {
+                "name": "trading-vllm-server",
+                "cpu_percent": "2.32%",
+                "mem_usage": "2.901GiB / 23.46GiB",
+                "mem_percent": "12.36%",
+            },
+            {
+                "name": "music-postgres",
+                "cpu_percent": "0.00%",
+                "mem_usage": "26.58MiB / 23.46GiB",
+                "mem_percent": "0.11%",
+            },
+        ],
+        "gpu_processes": [],
+    }
+
+    manifest = build_gpu_resource_arbitration_plan(
+        output_dir=tmp_path / "arb",
+        iteration_manifest_path=iteration_manifest,
+        launch_execution_manifest_path=execution_manifest,
+        resource_snapshot=host_snapshot,
+        no_artifact_rag=True,
+    )
+
+    assert manifest["schema"] == "gpu_resource_arbitration_plan.v1"
+    assert manifest["arbitration_status"] == "blocked_requires_external_gpu_release"
+    assert manifest["recommended_action"] == "request_external_gpu_release_or_wait"
+    assert manifest["destructive_action_started"] is False
+    assert manifest["audio_replay_started"] is False
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "diagnostic_gpu_resource_arbitration_only"
+    assert manifest["resource_blocker_summary"]["top_container_memory_names"][0] == "trading-vllm-server"
+    assert "stop_container_without_permission" in manifest["forbidden_actions"]
+    assert (tmp_path / "arb" / "actions.jsonl").exists()
+    summary_md = (tmp_path / "arb" / "summary.md").read_text(encoding="utf-8")
+    assert "Recommended action: `request_external_gpu_release_or_wait`" in summary_md
+    assert "trading-vllm-server" in summary_md
+
+
+def test_gpu_resource_arbitration_uses_execution_resource_snapshot_by_default(tmp_path: Path) -> None:
+    from tools.build_gpu_resource_arbitration_plan import build_gpu_resource_arbitration_plan
+
+    execution_manifest = tmp_path / "exec.json"
+    execution_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_launch_execution.v1",
+                "execution_status": "blocked_gpu_preflight",
+                "run_command_started": False,
+                "gpu_preflight_summary": {
+                    "status": "blocked",
+                    "reason": "gpu_free_memory_too_low",
+                    "free_mib": 1405,
+                    "min_free_mib": 4096,
+                    "used_mib": 10877,
+                    "total_mib": 12282,
+                },
+                "resource_blocker_snapshot": {
+                    "schema": "stem_search_resource_blocker_snapshot.v1",
+                    "docker_container_stats_available": True,
+                    "docker_container_stats_reason": "",
+                    "docker_container_stats_source": "docker_engine_socket",
+                    "top_container_memory": [
+                        {
+                            "name": "trading-vllm-server",
+                            "cpu_percent": "",
+                            "mem_usage": "3.000GiB / 24.000GiB",
+                            "mem_percent": "12.50%",
+                        }
+                    ],
+                    "gpu_processes": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_gpu_resource_arbitration_plan(
+        output_dir=tmp_path / "arb",
+        launch_execution_manifest_path=execution_manifest,
+        no_artifact_rag=True,
+    )
+
+    assert manifest["resource_blocker_summary"]["docker_container_stats_available"] is True
+    assert manifest["resource_blocker_summary"]["top_container_memory_names"] == ["trading-vllm-server"]
+    assert "trading-vllm-server" in (tmp_path / "arb" / "summary.md").read_text(encoding="utf-8")
+
+
+def test_host_resource_snapshot_records_container_offenders_without_actions(tmp_path: Path) -> None:
+    from tools.build_gpu_resource_arbitration_plan import build_gpu_resource_arbitration_plan
+    from tools.build_host_resource_snapshot import build_host_resource_snapshot
+
+    def fake_runner(command: list[str], timeout_sec: float) -> dict[str, object]:
+        joined = " ".join(command)
+        if "query-gpu" in joined:
+            return {
+                "available": True,
+                "reason": "",
+                "returncode": 0,
+                "stdout": "NVIDIA GeForce RTX 4080 Laptop GPU, 12282, 10593, 1405, 99\n",
+                "stderr": "",
+            }
+        if "query-compute-apps" in joined:
+            return {
+                "available": True,
+                "reason": "",
+                "returncode": 0,
+                "stdout": "41720, Codex.exe, [N/A]\n",
+                "stderr": "",
+            }
+        if command[:3] == ["docker", "stats", "--no-stream"]:
+            return {
+                "available": True,
+                "reason": "",
+                "returncode": 0,
+                "stdout": (
+                    "trading-vllm-server|109.06%|2.901GiB / 23.46GiB|12.36%\n"
+                    "trading-view-llm-llama-web-proxy-1|0.28%|1.707GiB / 23.46GiB|7.28%\n"
+                ),
+                "stderr": "",
+            }
+        if command[:2] == ["docker", "ps"]:
+            return {
+                "available": True,
+                "reason": "",
+                "returncode": 0,
+                "stdout": (
+                    "trading-vllm-server|vllm/vllm-openai:latest|Up 4 hours (healthy)\n"
+                    "trading-view-llm-llama-web-proxy-1|trading-view-llm-llama-web-proxy-portable:latest|Up 57 seconds\n"
+                ),
+                "stderr": "",
+            }
+        raise AssertionError(command)
+
+    manifest = build_host_resource_snapshot(
+        output_dir=tmp_path / "host",
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    assert manifest["schema"] == "host_resource_snapshot.v1"
+    assert manifest["diagnostic_only"] is True
+    assert manifest["execution_mode"] == "host_observability_only"
+    assert manifest["destructive_action_started"] is False
+    assert manifest["audio_replay_started"] is False
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "diagnostic_host_resource_snapshot_only"
+    assert manifest["gpu_preflight_summary"]["free_mib"] == 1405
+    assert manifest["resource_blocker_summary"]["top_container_memory_names"][0] == "trading-vllm-server"
+    assert (tmp_path / "host" / "resource.json").exists()
+    assert (tmp_path / "host" / "progress.jsonl").exists()
+
+    arb = build_gpu_resource_arbitration_plan(
+        output_dir=tmp_path / "arb_from_host",
+        resource_snapshot=manifest["resource_blocker_snapshot"],
+        no_artifact_rag=True,
+    )
+    assert arb["resource_blocker_summary"]["top_container_memory_names"][0] == "trading-vllm-server"
+
+
+def test_host_resource_snapshot_import_does_not_require_audio_runtime_dependencies() -> None:
+    script = """
+import builtins
+real_import = builtins.__import__
+blocked = {"torch", "soundfile", "numpy", "tools.run_fully_automatic_stem_search"}
+def guard(name, globals=None, locals=None, fromlist=(), level=0):
+    if name in blocked:
+        raise AssertionError(f"blocked heavy import: {name}")
+    return real_import(name, globals, locals, fromlist, level)
+builtins.__import__ = guard
+import tools.build_host_resource_snapshot  # noqa: F401
+"""
+    completed = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_route_policy_shadow_mode_writes_scores_without_reordering(tmp_path: Path) -> None:
+    from tools.stem_route_policy_common import ACTION_PRIORITIZE_ROUTE
+    from tools.stem_route_policy_model import save_stem_route_policy_checkpoint, train_stem_route_policy_from_rows
+
+    row = {
+        "schema": "stem_route_policy_row.v1",
+        "row_id": "p000001",
+        "source_run": "run.json",
+        "window_id": "w000",
+        "candidate_id": "c002",
+        "route_signature": "stem_lane:better",
+        "lane_routes": {"stem_lane": ["better"]},
+        "issue_type": "bad_reconstruction",
+        "root_cause": "routing_gap",
+        "affected_stem": "drums",
+        "gate_verdicts": {},
+        "forensic_features": {},
+        "damage_features": {},
+        "reconstruction_features": {},
+        "current_action": "block_unknown",
+        "oracle_action": ACTION_PRIORITIZE_ROUTE,
+        "oracle_label_source": "counterfactual_replay",
+        "usable_for_training": True,
+        "usable_for_promotion": False,
+        "is_ground_truth": False,
+        "label_type": "blocked_candidate_mining",
+    }
+    checkpoint = save_stem_route_policy_checkpoint(train_stem_route_policy_from_rows([row]), tmp_path / "model.pt")
+    model = stem_search._load_learned_route_policy_checkpoint(checkpoint)
+    recipe = {
+        "schema": "stem_search_recipe.v2",
+        "candidates": [
+            {"candidate_id": "c001", "route_signature": "stem_lane:worse"},
+            {"candidate_id": "c002", "route_signature": "stem_lane:better"},
+        ],
+    }
+
+    updated = stem_search._apply_learned_route_policy_to_recipe(recipe, route_policy_model=model, route_policy_mode="shadow")
+    manifest = build_candidate_manifest("c002", tmp_path / "c002")
+    manifest.update({"route_signature": "stem_lane:better", "verdict": "blocked_bad_reconstruction", "delivery_allowed": False})
+    annotated = stem_search._annotate_candidate_with_learned_route_policy(
+        manifest,
+        route_policy_model=model,
+        route_policy_mode="shadow",
+    )
+
+    assert [candidate["candidate_id"] for candidate in updated["candidates"]] == ["c001", "c002"]
+    assert annotated["route_policy_action"] == ACTION_PRIORITIZE_ROUTE
+    assert annotated["route_policy_shadow_only"] is True
+    assert annotated["delivery_allowed"] is False
+
+
+def test_route_policy_rank_mode_reorders_but_cannot_accept(tmp_path: Path) -> None:
+    from tools.stem_route_policy_common import ACTION_PRIORITIZE_ROUTE
+    from tools.stem_route_policy_model import save_stem_route_policy_checkpoint, train_stem_route_policy_from_rows
+
+    row = {
+        "schema": "stem_route_policy_row.v1",
+        "row_id": "p000001",
+        "source_run": "run.json",
+        "window_id": "w000",
+        "candidate_id": "c002",
+        "route_signature": "stem_lane:better",
+        "lane_routes": {"stem_lane": ["better"]},
+        "issue_type": "bad_reconstruction",
+        "root_cause": "routing_gap",
+        "affected_stem": "drums",
+        "gate_verdicts": {},
+        "forensic_features": {},
+        "damage_features": {},
+        "reconstruction_features": {},
+        "current_action": "block_unknown",
+        "oracle_action": ACTION_PRIORITIZE_ROUTE,
+        "oracle_label_source": "counterfactual_replay",
+        "usable_for_training": True,
+        "usable_for_promotion": False,
+        "is_ground_truth": False,
+        "label_type": "blocked_candidate_mining",
+    }
+    checkpoint = save_stem_route_policy_checkpoint(train_stem_route_policy_from_rows([row]), tmp_path / "model.pt")
+    model = stem_search._load_learned_route_policy_checkpoint(checkpoint)
+    recipe = {
+        "schema": "stem_search_recipe.v2",
+        "candidates": [
+            {"candidate_id": "c001", "route_signature": "stem_lane:worse"},
+            {"candidate_id": "c002", "route_signature": "stem_lane:better"},
+        ],
+    }
+
+    updated = stem_search._apply_learned_route_policy_to_recipe(recipe, route_policy_model=model, route_policy_mode="rank")
+    manifest = build_candidate_manifest("c002", tmp_path / "c002")
+    manifest.update({"route_signature": "stem_lane:better", "verdict": "blocked_unknown", "delivery_allowed": False})
+    annotated = stem_search._annotate_candidate_with_learned_route_policy(
+        manifest,
+        route_policy_model=model,
+        route_policy_mode="rank",
+    )
+
+    assert [candidate["candidate_id"] for candidate in updated["candidates"]] == ["c002", "c001"]
+    assert annotated["route_policy_action"] == ACTION_PRIORITIZE_ROUTE
+    assert annotated["delivery_allowed"] is False
+    assert annotated["presentation_status"] == "blocked_from_listen_pack"
 
 
 def test_best_bad_candidate_is_not_accepted() -> None:
@@ -335,6 +1683,8 @@ def test_default_contamination_model_manifest_discovery_uses_latest_cycle(tmp_pa
 
 def test_default_contamination_model_manifest_searches_project_artifacts_mount() -> None:
     assert stem_search.DEFAULT_CONTAMINATION_MODEL_SEARCH_ROOTS[0] == Path("/project_artifacts/stem_eval")
+    assert Path("/repo/artifacts/stem_eval") in stem_search.DEFAULT_CONTAMINATION_MODEL_SEARCH_ROOTS
+    assert Path("../artifacts/stem_eval") in stem_search.DEFAULT_CONTAMINATION_MODEL_SEARCH_ROOTS
 
 
 def test_default_from_scratch_recipe_blocks_without_specialized_vocal_route() -> None:
@@ -354,13 +1704,11 @@ def test_model_split_v2_recipe_builds_separate_lanes() -> None:
     assert recipe["schema"] == "stem_search_recipe.v2"
     assert recipe["profile"] == "model_split_v2"
     assert recipe["target_specific_routes"]["vocal_lane"] == [
-        "bs_mamba2_vocals",
         "audio_separator_bs_roformer_vocals",
         "mdx23c_vocals",
         "melband_roformer_vocals",
     ]
     assert recipe["target_specific_routes"]["minus_lane"] == [
-        "bs_mamba2_vocals:instrumental",
         "becruily_instrumental_vocals",
         "audio_separator_bs_roformer_vocals:instrumental",
         "mdx23c_vocals:instrumental",
@@ -386,6 +1734,30 @@ def test_model_split_v2_recipe_builds_separate_lanes() -> None:
         "max_delivery_pair_residual_ratio": 0.06,
         "six_stem_diagnostic_residual_ratio": 0.01,
     }
+
+
+def test_model_split_v2_prefers_resident_capable_separator_routes() -> None:
+    recipe = build_model_split_v2_recipe(
+        demucs_available=True,
+        available_vocal_routes=("audio_separator_bs_roformer_vocals",),
+    )
+
+    resident_capable_items = [
+        item
+        for candidate in recipe["candidates"]
+        for item in candidate["target_specific_commands"]
+        if str(item["route_id"]).split(":", 1)[0]
+        in {"audio_separator_bs_roformer_vocals", "becruily_instrumental_vocals", "melband_roformer_vocals"}
+    ]
+
+    assert resident_capable_items
+    assert {item["route_id"] for item in resident_capable_items} >= {
+        "audio_separator_bs_roformer_vocals",
+        "audio_separator_bs_roformer_vocals:instrumental",
+        "becruily_instrumental_vocals",
+    }
+    assert all(item.get("prefer_resident") is True for item in resident_capable_items)
+    first = recipe["candidates"][0]
     assert first["model_split_lanes"] == {
         "vocals": "vocal_lane",
         "minus": "minus_lane",
@@ -438,6 +1810,115 @@ def test_model_split_v2_recipe_materializes_support_lanes_beyond_first_candidate
         for candidate_id, roles in support_roles_by_candidate.items()
         if candidate_id != "c001"
     )
+
+
+def test_model_split_v2_recipe_can_inject_teacher_mask_checkpoint_routes(tmp_path: Path) -> None:
+    minus_checkpoint = tmp_path / "m" / "model.pt"
+    bass_checkpoint = tmp_path / "b" / "model.pt"
+    other_checkpoint = tmp_path / "o" / "model.pt"
+    recipe = build_model_split_v2_recipe(
+        demucs_available=True,
+        teacher_mask_checkpoints=[
+            {
+                "route_id": "tm001_minus",
+                "role": "minus",
+                "stem": "minus",
+                "checkpoint": str(minus_checkpoint),
+            },
+            {
+                "route_id": "tm002_bass",
+                "role": "bass_support",
+                "stem": "bass",
+                "checkpoint": str(bass_checkpoint),
+            },
+            {
+                "route_id": "tm003_other",
+                "role": "other_support",
+                "stem": "other",
+                "checkpoint": str(other_checkpoint),
+            },
+        ],
+    )
+
+    first = recipe["candidates"][0]
+    teacher_routes = [
+        route
+        for route in first["target_specific_commands"]
+        if route["lane"] == "teacher_mask_checkpoint_lane"
+    ]
+
+    assert [route["role"] for route in teacher_routes] == ["minus", "bass_support", "other_support"]
+    assert recipe["target_specific_routes"]["teacher_mask_checkpoint_lane"] == [
+        "tm001_minus",
+        "tm002_bass",
+        "tm003_other",
+    ]
+    assert first["minus_source"] == "minus_lane"
+    assert first["minus_rebuilt_from_non_vocal_stems"] is False
+    assert "teacher_mask_checkpoint" in first["route_family"]
+    assert "apply_teacher_mask_checkpoint_candidate.py" in " ".join(teacher_routes[0]["command_template"])
+    assert teacher_routes[0]["command_template"][teacher_routes[0]["command_template"].index("--checkpoint") + 1] == str(
+        minus_checkpoint
+    )
+    assert teacher_routes[1]["command_template"][teacher_routes[1]["command_template"].index("--stem") + 1] == "bass"
+    assert teacher_routes[2]["command_template"][teacher_routes[2]["command_template"].index("--stem") + 1] == "other"
+
+
+def test_teacher_mask_checkpoint_spec_preserves_windows_path() -> None:
+    spec = _parse_teacher_mask_checkpoint_spec("minus:minus:D:\\AIMusicProject\\artifacts\\model.pt", index=3)
+
+    assert spec == {
+        "route_id": "tm003_minus",
+        "role": "minus",
+        "stem": "minus",
+        "checkpoint": "D:\\AIMusicProject\\artifacts\\model.pt",
+    }
+
+
+def test_stem_region_repair_checkpoint_spec_accepts_json_fields() -> None:
+    spec = stem_search._parse_stem_region_repair_checkpoint_spec(
+        json.dumps(
+            {
+                "repair_id": "vr001",
+                "stem": "vocals",
+                "issue_type": "instrument_leak",
+                "checkpoint": "/repo/artifacts/model.pt",
+                "forensic_source_condition_stem": "drums",
+                "mix_preserve_companion_stem": "minus",
+                "region": {"start_sec": 0.2, "end_sec": 1.35},
+            }
+        ),
+        index=7,
+    )
+
+    assert spec["repair_id"] == "vr001"
+    assert spec["stem"] == "vocals"
+    assert spec["issue_type"] == "instrument_leak"
+    assert spec["checkpoint"] == "/repo/artifacts/model.pt"
+    assert spec["forensic_source_condition_stem"] == "drums"
+    assert spec["mix_preserve_companion_stem"] == "minus"
+    assert spec["region"] == {"start_sec": 0.2, "end_sec": 1.35}
+
+
+def test_stem_region_repair_checkpoint_spec_accepts_json_file(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "stem": "vocals",
+                "issue_type": "instrument_leak",
+                "checkpoint": "/repo/artifacts/model.pt",
+                "forensic_source_condition_stem": "drums",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = stem_search._parse_stem_region_repair_checkpoint_spec(f"@{spec_path}", index=2)
+
+    assert spec["repair_id"] == "sr002"
+    assert spec["stem"] == "vocals"
+    assert spec["forensic_source_condition_stem"] == "drums"
 
 
 def test_model_split_v2_recipe_can_inject_learned_region_repair_checkpoint(tmp_path: Path) -> None:
@@ -512,16 +1993,71 @@ def test_model_split_v2_recipe_can_inject_learned_region_repair_sequence(tmp_pat
     )
 
     repairs = recipe["candidates"][0]["model_split_composite_repair_options"]
+    sequence_plain = next(repair for repair in repairs if repair["repair_id"] == "srseq")
+    sequence_bass = next(repair for repair in repairs if repair["repair_id"] == "srseq_bs400")
+    sequence_vp100 = next(repair for repair in repairs if repair["repair_id"] == "srseq_vp100")
+    sequence_vp100_bass = next(repair for repair in repairs if repair["repair_id"] == "srseq_vp100_bs400")
     sequence = next(repair for repair in repairs if repair["repair_id"] == "srseq_vp100_pr16")
 
+    assert sequence_plain["type"] == "stem_region_repair"
+    assert "delivery_pair_residual" not in sequence_plain
+    assert sequence_plain["stem_region_repairs"] == [
+        {"stem": "bass", "issue_type": "vocal_leak", "checkpoint": str(checkpoints[0])},
+        {
+            "stem": "minus",
+            "issue_type": "vocal_leak",
+            "checkpoint": str(checkpoints[1]),
+            "mix_preserve_companion_stem": "vocals",
+        },
+        {"stem": "other", "issue_type": "instrument_leak", "checkpoint": str(checkpoints[2])},
+    ]
+    assert sequence_vp100["type"] == "stem_region_repair+vocal_projection_debleed"
+    assert "delivery_pair_residual" not in sequence_vp100
+    assert sequence_vp100["vocal_projection_debleed"]["target_stems"] == ["drums", "bass", "guitar", "piano", "other"]
+    assert sequence_bass["type"] == "stem_region_repair+bass_stereo_width"
+    assert sequence_bass["bass_stereo_width"]["side_gain"] == 4.0
+    assert sequence_vp100_bass["type"] == "stem_region_repair+vocal_projection_debleed+bass_stereo_width"
+    assert sequence_vp100_bass["bass_stereo_width"]["side_gain"] == 4.0
     assert sequence["type"] == "stem_region_repair+vocal_projection_debleed+delivery_pair_residual"
     assert sequence["stem_region_repairs"] == [
         {"stem": "bass", "issue_type": "vocal_leak", "checkpoint": str(checkpoints[0])},
-        {"stem": "minus", "issue_type": "vocal_leak", "checkpoint": str(checkpoints[1])},
+        {
+            "stem": "minus",
+            "issue_type": "vocal_leak",
+            "checkpoint": str(checkpoints[1]),
+            "mix_preserve_companion_stem": "vocals",
+        },
         {"stem": "other", "issue_type": "instrument_leak", "checkpoint": str(checkpoints[2])},
     ]
     assert sequence["vocal_projection_debleed"]["target_stems"] == ["drums", "bass", "guitar", "piano", "other"]
     assert sequence["delivery_pair_residual"]["target_stem"] == "minus"
+
+
+def test_model_split_v2_region_repair_preserves_forensic_source_and_pair_compensation(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "v" / "model.pt"
+    recipe = build_model_split_v2_recipe(
+        demucs_available=True,
+        stem_region_repair_checkpoints=[
+            {
+                "repair_id": "vr001",
+                "stem": "vocals",
+                "issue_type": "instrument_leak",
+                "checkpoint": str(checkpoint),
+                "forensic_source_condition_stem": "drums",
+                "mix_preserve_companion_stem": "minus",
+                "region": {"start_sec": 0.2, "end_sec": 1.35},
+            }
+        ],
+    )
+
+    repairs = recipe["candidates"][0]["model_split_composite_repair_options"]
+    repair = next(item for item in repairs if item["repair_id"] == "vr001")
+
+    assert repair["stem"] == "vocals"
+    assert repair["issue_type"] == "instrument_leak"
+    assert repair["forensic_source_condition_stem"] == "drums"
+    assert repair["mix_preserve_companion_stem"] == "minus"
+    assert repair["region"] == {"start_sec": 0.2, "end_sec": 1.35}
 
 
 def test_apply_learned_stem_region_repairs_runs_sequence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -560,6 +2096,311 @@ def test_apply_learned_stem_region_repairs_runs_sequence(monkeypatch: pytest.Mon
     assert [item["stem"] for item in result["repairs"]] == ["bass", "minus", "other"]
 
 
+def test_apply_learned_minus_vocal_leak_repair_can_preserve_vocal_minus_sum(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frames = SAMPLE_RATE // 2
+    t = np.arange(frames, dtype=np.float32) / float(SAMPLE_RATE)
+    vocals = np.stack(
+        [
+            0.08 * np.sin(2.0 * np.pi * 720.0 * t),
+            0.07 * np.sin(2.0 * np.pi * 725.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    body = np.stack(
+        [
+            0.18 * np.sin(2.0 * np.pi * 110.0 * t),
+            0.17 * np.sin(2.0 * np.pi * 114.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    leak = np.stack(
+        [
+            0.025 * np.sin(2.0 * np.pi * 840.0 * t),
+            0.025 * np.sin(2.0 * np.pi * 845.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    bad_minus = body + leak
+    mix = vocals + bad_minus
+    mix_path = write_wav(tmp_path / "mix.flac", mix)
+    vocals_path = write_wav(tmp_path / "vocals.flac", vocals)
+    minus_path = write_wav(tmp_path / "minus.flac", bad_minus)
+
+    class FakeModel:
+        pass
+
+    def fake_load_region_repair_checkpoint(_path: Path):
+        return FakeModel(), {"training_history": {"issue_type": "vocal_leak", "region": {"start_sec": 0.0, "end_sec": 0.5}}}
+
+    def fake_apply_region_repair_model(**_kwargs):
+        return body, {"schema": "fake_repair"}
+
+    monkeypatch.setattr(stem_search, "load_region_repair_checkpoint", fake_load_region_repair_checkpoint)
+    monkeypatch.setattr(stem_search, "apply_region_repair_model", fake_apply_region_repair_model)
+
+    result = stem_search.apply_learned_stem_region_repair(
+        mix_path=mix_path,
+        stem_paths={"vocals": str(vocals_path), "minus": str(minus_path)},
+        config={
+            "stem": "minus",
+            "issue_type": "vocal_leak",
+            "checkpoint": str(tmp_path / "model.pt"),
+            "mix_preserve_companion_stem": "vocals",
+        },
+    )
+
+    vocals_after, _ = stem_search._read_audio(vocals_path)
+    minus_after, _ = stem_search._read_audio(minus_path)
+
+    assert result["applied"] is True
+    assert result["mix_preserve_companion_stem"] == "vocals"
+    assert np.max(np.abs((vocals_after + minus_after) - mix)) < 2.0e-4
+    assert np.max(np.abs(minus_after - body)) < 2.0e-4
+
+
+def test_apply_learned_other_vocal_transfer_preserves_delivery_pair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frames = SAMPLE_RATE // 2
+    t = np.arange(frames, dtype=np.float32) / float(SAMPLE_RATE)
+    vocals = np.stack(
+        [
+            0.08 * np.sin(2.0 * np.pi * 720.0 * t),
+            0.07 * np.sin(2.0 * np.pi * 725.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    minus = np.stack(
+        [
+            0.18 * np.sin(2.0 * np.pi * 110.0 * t),
+            0.17 * np.sin(2.0 * np.pi * 114.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    other_clean = np.stack(
+        [
+            0.025 * np.sin(2.0 * np.pi * 2200.0 * t),
+            0.023 * np.sin(2.0 * np.pi * 2210.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    leak = np.stack(
+        [
+            0.02 * np.sin(2.0 * np.pi * 840.0 * t),
+            0.02 * np.sin(2.0 * np.pi * 845.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    bad_other = other_clean + leak
+    mix = vocals + minus
+    mix_path = write_wav(tmp_path / "mix.flac", mix)
+    vocals_path = write_wav(tmp_path / "vocals.flac", vocals)
+    minus_path = write_wav(tmp_path / "minus.flac", minus)
+    other_path = write_wav(tmp_path / "other.flac", bad_other)
+
+    class FakeModel:
+        pass
+
+    def fake_load_region_repair_checkpoint(_path: Path):
+        return FakeModel(), {
+            "training_history": {
+                "issue_type": "vocal_leak",
+                "region": {"start_sec": 0.0, "end_sec": 0.5},
+                "mix_preserve_companion_stem": "vocals",
+            }
+        }
+
+    def fake_apply_region_repair_model(**_kwargs):
+        return other_clean, {"schema": "fake_repair"}
+
+    monkeypatch.setattr(stem_search, "load_region_repair_checkpoint", fake_load_region_repair_checkpoint)
+    monkeypatch.setattr(stem_search, "apply_region_repair_model", fake_apply_region_repair_model)
+
+    result = stem_search.apply_learned_stem_region_repair(
+        mix_path=mix_path,
+        stem_paths={"vocals": str(vocals_path), "minus": str(minus_path), "other": str(other_path)},
+        config={
+            "stem": "other",
+            "issue_type": "vocal_leak",
+            "checkpoint": str(tmp_path / "model.pt"),
+        },
+    )
+
+    vocals_after, _ = stem_search._read_audio(vocals_path)
+    minus_after, _ = stem_search._read_audio(minus_path)
+    other_after, _ = stem_search._read_audio(other_path)
+
+    assert result["applied"] is True
+    assert result["mix_preserve_companion_stem"] == "vocals"
+    assert result["delivery_pair_compensation_stem"] == "minus"
+    assert np.max(np.abs((vocals_after + minus_after) - mix)) < 2.0e-4
+    assert np.max(np.abs(other_after - other_clean)) < 2.0e-4
+
+
+def test_vocal_instrument_leak_repair_does_not_inject_delta_into_minus(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frames = SAMPLE_RATE // 2
+    t = np.arange(frames, dtype=np.float32) / float(SAMPLE_RATE)
+    clean_vocals = np.stack(
+        [
+            0.07 * np.sin(2.0 * np.pi * 620.0 * t),
+            0.065 * np.sin(2.0 * np.pi * 625.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    drum_imprint = np.stack(
+        [
+            0.025 * np.sin(2.0 * np.pi * 2600.0 * t),
+            0.025 * np.sin(2.0 * np.pi * 2630.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    bad_vocals = clean_vocals + drum_imprint
+    drums = np.zeros_like(clean_vocals)
+    minus = np.stack(
+        [
+            0.12 * np.sin(2.0 * np.pi * 120.0 * t),
+            0.115 * np.sin(2.0 * np.pi * 124.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    mix = clean_vocals + minus
+    mix_path = write_wav(tmp_path / "mix.flac", mix)
+    vocals_path = write_wav(tmp_path / "vocals.flac", bad_vocals)
+    drums_path = write_wav(tmp_path / "drums.flac", drums)
+    minus_path = write_wav(tmp_path / "minus.flac", minus)
+
+    class FakeModel:
+        pass
+
+    def fake_load_region_repair_checkpoint(_path: Path):
+        return FakeModel(), {
+            "training_history": {
+                "issue_type": "instrument_leak",
+                "region": {"start_sec": 0.0, "end_sec": 0.5},
+                "mix_preserve_companion_stem": "drums",
+            }
+        }
+
+    def fake_apply_region_repair_model(**_kwargs):
+        return clean_vocals, {"schema": "fake_repair"}
+
+    monkeypatch.setattr(stem_search, "load_region_repair_checkpoint", fake_load_region_repair_checkpoint)
+    monkeypatch.setattr(stem_search, "apply_region_repair_model", fake_apply_region_repair_model)
+
+    result = stem_search.apply_learned_stem_region_repair(
+        mix_path=mix_path,
+        stem_paths={"vocals": str(vocals_path), "drums": str(drums_path), "minus": str(minus_path)},
+        config={
+            "stem": "vocals",
+            "issue_type": "instrument_leak",
+            "checkpoint": str(tmp_path / "model.pt"),
+        },
+    )
+
+    vocals_after, _ = stem_search._read_audio(vocals_path)
+    drums_after, _ = stem_search._read_audio(drums_path)
+    minus_after, _ = stem_search._read_audio(minus_path)
+
+    assert result["applied"] is True
+    assert result["mix_preserve_companion_stem"] == "drums"
+    assert result["delivery_pair_compensation_stem"] == ""
+    assert np.max(np.abs(vocals_after - clean_vocals)) < 2.0e-4
+    assert np.max(np.abs(drums_after - drum_imprint)) < 2.0e-4
+    assert np.max(np.abs(minus_after - minus)) < 2.0e-4
+
+
+def test_vocal_instrument_leak_repair_preserves_delivery_pair_with_minus_companion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frames = SAMPLE_RATE // 2
+    t = np.arange(frames, dtype=np.float32) / float(SAMPLE_RATE)
+    clean_vocals = np.stack(
+        [
+            0.07 * np.sin(2.0 * np.pi * 620.0 * t),
+            0.065 * np.sin(2.0 * np.pi * 625.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    drum_imprint = np.stack(
+        [
+            0.025 * np.sin(2.0 * np.pi * 2600.0 * t),
+            0.025 * np.sin(2.0 * np.pi * 2630.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    bad_vocals = clean_vocals + drum_imprint
+    drums = drum_imprint.copy()
+    minus = np.stack(
+        [
+            0.12 * np.sin(2.0 * np.pi * 120.0 * t),
+            0.115 * np.sin(2.0 * np.pi * 124.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    mix = clean_vocals + minus + drum_imprint
+    mix_path = write_wav(tmp_path / "mix.flac", mix)
+    vocals_path = write_wav(tmp_path / "vocals.flac", bad_vocals)
+    drums_path = write_wav(tmp_path / "drums.flac", drums)
+    minus_path = write_wav(tmp_path / "minus.flac", minus)
+
+    class FakeModel:
+        pass
+
+    def fake_load_region_repair_checkpoint(_path: Path):
+        return FakeModel(), {
+            "training_history": {
+                "issue_type": "instrument_leak",
+                "region": {"start_sec": 0.0, "end_sec": 0.5},
+                "mix_preserve_companion_stem": "minus",
+                "forensic_source_condition_stem": "drums",
+            }
+        }
+
+    def fake_apply_region_repair_model(**_kwargs):
+        return clean_vocals, {"schema": "fake_repair"}
+
+    monkeypatch.setattr(stem_search, "load_region_repair_checkpoint", fake_load_region_repair_checkpoint)
+    monkeypatch.setattr(stem_search, "apply_region_repair_model", fake_apply_region_repair_model)
+
+    result = stem_search.apply_learned_stem_region_repair(
+        mix_path=mix_path,
+        stem_paths={"vocals": str(vocals_path), "drums": str(drums_path), "minus": str(minus_path)},
+        config={
+            "stem": "vocals",
+            "issue_type": "instrument_leak",
+            "checkpoint": str(tmp_path / "model.pt"),
+        },
+    )
+
+    vocals_after, _ = stem_search._read_audio(vocals_path)
+    minus_after, _ = stem_search._read_audio(minus_path)
+
+    assert result["applied"] is True
+    assert result["mix_preserve_companion_stem"] == "minus"
+    assert result["delivery_pair_compensation_stem"] == ""
+    assert np.max(np.abs(vocals_after - clean_vocals)) < 2.0e-4
+    assert np.max(np.abs(minus_after - (minus + drum_imprint))) < 2.0e-4
+    assert np.max(np.abs((vocals_after + minus_after) - mix)) < 2.0e-4
+
+
+def test_delivery_pair_residual_blocks_after_vocal_instrument_leak_repair() -> None:
+    blocker = stem_search._delivery_pair_residual_blocker_after_stem_region_repair(
+        {
+            "applied": True,
+            "stem": "vocals",
+            "issue_type": "instrument_leak",
+            "forensic_source_condition_stem": "drums",
+        },
+        {"target_stem": "minus"},
+    )
+
+    assert blocker == "delivery_pair_residual_after_vocal_instrument_leak_repair_blocked"
+
+
 def test_model_split_v2_composite_prioritizes_learned_region_repair_before_dsp_repairs() -> None:
     pairs = stem_search._prioritized_model_split_support_repair_pairs(
         support_options=[
@@ -584,6 +2425,153 @@ def test_model_split_v2_composite_prioritizes_learned_region_repair_before_dsp_r
     assert ("sr001", True, False) in first_six
     assert ("sr001", True, True) in first_six
     assert ordered.index(("sr001", True, False)) < ordered.index(("pr16", True, False))
+
+
+def test_model_split_v2_composite_reaches_learned_repair_before_none_support_budget_exhaustion() -> None:
+    pairs = stem_search._prioritized_model_split_support_repair_pairs(
+        support_options=[
+            {},
+            {"bass": {"role": "bass_support"}},
+            {"other": {"role": "other_support"}},
+            {"bass": {"role": "bass_support"}, "other": {"role": "other_support"}},
+            {"drums": {"role": "non_vocal_support"}},
+            {"bass": {"role": "bass_support"}, "drums": {"role": "non_vocal_support"}},
+        ],
+        repair_options=[
+            {"repair_id": "none", "type": "none"},
+            {"repair_id": "sr001", "type": "stem_region_repair"},
+            {"repair_id": "bs400", "type": "bass_stereo_width"},
+        ],
+    )
+
+    first_five = [(repair["repair_id"], sorted(support)) for support, repair in pairs[:5]]
+
+    assert any(repair_id == "sr001" for repair_id, _support_keys in first_five)
+
+
+def test_model_split_v2_prioritizes_bass_width_repair_before_pair_residual() -> None:
+    pairs = stem_search._prioritized_model_split_support_repair_pairs(
+        support_options=[
+            {},
+            {"bass": {"role": "bass_support"}},
+        ],
+        repair_options=[
+            {"repair_id": "none", "type": "none"},
+            {"repair_id": "pr16", "type": "delivery_pair_residual"},
+            {"repair_id": "bs400", "type": "bass_stereo_width"},
+        ],
+    )
+
+    ordered = [(repair["repair_id"], "bass" in support) for support, repair in pairs]
+
+    assert ordered.index(("bs400", True)) < ordered.index(("pr16", True))
+
+
+def test_model_split_v2_prioritizes_teacher_mask_lane_routes(tmp_path: Path) -> None:
+    base_vocal = tmp_path / "base_vocal.flac"
+    learned_vocal = tmp_path / "learned_vocal.flac"
+    base_minus = tmp_path / "base_minus.flac"
+    learned_minus = tmp_path / "learned_minus.flac"
+    for path in (base_vocal, learned_vocal, base_minus, learned_minus):
+        path.write_bytes(b"audio")
+
+    window_candidates = [
+        {
+            "target_specific_composition": {
+                "routes": [
+                    {
+                        "role": "vocals",
+                        "lane": "vocal_lane",
+                        "route_id": "audio_separator_bs_roformer_vocals",
+                        "copied_outputs": [{"stem": "vocals", "source_path": str(base_vocal)}],
+                    },
+                    {
+                        "role": "minus",
+                        "lane": "minus_lane",
+                        "route_id": "audio_separator_bs_roformer_vocals:instrumental",
+                        "copied_outputs": [{"stem": "minus", "source_path": str(base_minus)}],
+                    },
+                    {
+                        "role": "vocals",
+                        "lane": "teacher_mask_checkpoint_lane",
+                        "route_id": "tm001_vocals",
+                        "copied_outputs": [{"stem": "vocals", "source_path": str(learned_vocal)}],
+                    },
+                    {
+                        "role": "minus",
+                        "lane": "teacher_mask_checkpoint_lane",
+                        "route_id": "tm002_minus",
+                        "copied_outputs": [{"stem": "minus", "source_path": str(learned_minus)}],
+                    },
+                ]
+            }
+        }
+    ]
+
+    vocal_routes = stem_search._model_split_routes_by_role(window_candidates, "vocals", ("vocals",))
+    minus_routes = stem_search._model_split_routes_by_role(window_candidates, "minus", ("minus",))
+
+    assert [route["route_id"] for route in vocal_routes] == [
+        "tm001_vocals",
+        "audio_separator_bs_roformer_vocals",
+    ]
+    assert [route["route_id"] for route in minus_routes] == [
+        "tm002_minus",
+        "audio_separator_bs_roformer_vocals:instrumental",
+    ]
+
+
+def test_model_split_v2_pair_ranking_tests_teacher_mask_pair_before_old_residual_pair(tmp_path: Path) -> None:
+    frames = SAMPLE_RATE
+    t = np.arange(frames, dtype=np.float32) / float(SAMPLE_RATE)
+    old_vocal = 0.10 * np.sin(2.0 * np.pi * 220.0 * t).astype(np.float32)
+    old_minus = 0.08 * np.sin(2.0 * np.pi * 440.0 * t).astype(np.float32)
+    mix = old_vocal + old_minus
+    learned_vocal = 0.04 * np.sin(2.0 * np.pi * 330.0 * t).astype(np.float32)
+    learned_minus = 0.03 * np.sin(2.0 * np.pi * 550.0 * t).astype(np.float32)
+
+    mix_path = write_stereo_wav(tmp_path / "mix.flac", mix, mix)
+    old_vocal_path = write_stereo_wav(tmp_path / "old_vocal.flac", old_vocal, old_vocal)
+    old_minus_path = write_stereo_wav(tmp_path / "old_minus.flac", old_minus, old_minus)
+    learned_vocal_path = write_stereo_wav(tmp_path / "learned_vocal.flac", learned_vocal, learned_vocal)
+    learned_minus_path = write_stereo_wav(tmp_path / "learned_minus.flac", learned_minus, learned_minus)
+
+    old_vocal_route = {
+        "role": "vocals",
+        "lane": "vocal_lane",
+        "route_id": "audio_separator_bs_roformer_vocals",
+        "copied_outputs": [{"stem": "vocals", "source_path": str(old_vocal_path)}],
+    }
+    old_minus_route = {
+        "role": "minus",
+        "lane": "minus_lane",
+        "route_id": "audio_separator_bs_roformer_vocals:instrumental",
+        "copied_outputs": [{"stem": "minus", "source_path": str(old_minus_path)}],
+    }
+    learned_vocal_route = {
+        "role": "vocals",
+        "lane": "teacher_mask_checkpoint_lane",
+        "route_id": "tm001_vocals",
+        "copied_outputs": [{"stem": "vocals", "source_path": str(learned_vocal_path)}],
+    }
+    learned_minus_route = {
+        "role": "minus",
+        "lane": "teacher_mask_checkpoint_lane",
+        "route_id": "tm002_minus",
+        "copied_outputs": [{"stem": "minus", "source_path": str(learned_minus_path)}],
+    }
+
+    pairs = stem_search._rank_model_split_vocal_minus_pairs(
+        mix_path=mix_path,
+        vocal_routes=[learned_vocal_route, old_vocal_route],
+        minus_routes=[learned_minus_route, old_minus_route],
+    )
+
+    first_vocal, first_minus, first_residual = pairs[0]
+
+    assert first_vocal["route_id"] == "tm001_vocals"
+    assert first_minus["route_id"] == "tm002_minus"
+    assert first_residual > pairs[-1][2]
 
 
 def test_parse_stem_region_repair_checkpoint_spec_preserves_windows_path() -> None:
@@ -642,7 +2630,8 @@ def test_model_split_v2_htdemucs_ft_minus_uses_registered_cli_contract() -> None
     assert htdemucs_ft_minus["output_map"] == {"minus": "minus"}
 
 
-def test_model_split_v2_bs_mamba2_uses_registered_vocal_minus_lanes() -> None:
+def test_model_split_v2_bs_mamba2_uses_registered_vocal_minus_lanes(monkeypatch) -> None:
+    monkeypatch.setattr(stem_search, "_registered_route_is_available", lambda route_id: True)
     recipe = build_model_split_v2_recipe(demucs_available=True)
 
     assert "bs_mamba2_vocals" in recipe["target_specific_routes"]["vocal_lane"]
@@ -670,6 +2659,27 @@ def test_model_split_v2_bs_mamba2_uses_registered_vocal_minus_lanes() -> None:
     assert vocal_command[vocal_command.index("--target-stem") + 1] == "vocals"
     assert minus_command[minus_command.index("--target-stem") + 1] == "minus"
     assert bs_mamba2_minus["output_map"] == {"minus": "instrumental"}
+
+
+def test_model_split_v2_filters_unavailable_registered_routes(monkeypatch) -> None:
+    def fake_available(route_id: str) -> bool:
+        return not str(route_id).startswith("bs_mamba2_vocals")
+
+    monkeypatch.setattr(stem_search, "_registered_route_is_available", fake_available)
+    recipe = build_model_split_v2_recipe(demucs_available=True)
+
+    assert "bs_mamba2_vocals" not in recipe["target_specific_routes"]["vocal_lane"]
+    assert "bs_mamba2_vocals:instrumental" not in recipe["target_specific_routes"]["minus_lane"]
+    assert all(
+        route["route_id"] != "bs_mamba2_vocals"
+        for candidate in recipe["candidates"]
+        for route in candidate["target_specific_commands"]
+    )
+    assert all(
+        route["route_id"] != "bs_mamba2_vocals:instrumental"
+        for candidate in recipe["candidates"]
+        for route in candidate["target_specific_commands"]
+    )
 
 
 def test_model_split_v2_minus_delivery_cannot_be_rebuilt_from_six_stems(tmp_path: Path) -> None:
@@ -715,7 +2725,10 @@ def test_model_split_v2_minus_delivery_cannot_be_rebuilt_from_six_stems(tmp_path
         encoding="utf-8",
     )
 
+    calls: list[list[str]] = []
+
     def fake_runner(command: list[str], timeout_sec: int) -> None:
+        calls.append(list(command))
         window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
         stems_dir = fake_runner.stems_dir
         if command[0] == "fixture-six":
@@ -783,6 +2796,7 @@ def test_model_split_v2_blocks_delivery_pair_mismatch(tmp_path: Path) -> None:
                         "candidate_id": "c001",
                         "profile": "model_split_v2",
                         "minus_source": "minus_lane",
+                        "delivery_pair_fail_fast": True,
                         "delivery_pair_reconstruction": {"max_delivery_pair_residual_ratio": 0.06},
                         "target_specific_commands": [
                             {"role": "six_stems", "lane": "stem_lane", "command_template": ["fixture-six", "{window_mix}"]},
@@ -802,7 +2816,10 @@ def test_model_split_v2_blocks_delivery_pair_mismatch(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    calls: list[list[str]] = []
+
     def fake_runner(command: list[str], timeout_sec: int) -> None:
+        calls.append(list(command))
         window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
         stems_dir = fake_runner.stems_dir
         if command[0] == "fixture-six":
@@ -831,6 +2848,170 @@ def test_model_split_v2_blocks_delivery_pair_mismatch(tmp_path: Path) -> None:
     assert candidate["verdict"] == "blocked_bad_reconstruction"
     assert candidate["reconstruction"]["mode"] == "model_split_v2_delivery_pair"
     assert candidate["reconstruction"]["delivery_pair"]["ok"] is False
+    assert candidate["delivery_pair_fail_fast"]["enabled"] is True
+    assert "six_stems" in candidate["delivery_pair_fail_fast"]["skipped_roles"]
+    assert [command[0] for command in calls] == ["fixture-vocal", "fixture-minus"]
+
+
+def test_model_split_v2_mdx_route_uses_runtime_budget(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, seconds=0.5, amp=0.03),
+        "drums": sine(110.0, seconds=0.5, amp=0.06),
+        "bass": sine(220.0, seconds=0.5, amp=0.05),
+        "guitar": sine(330.0, seconds=0.5, amp=0.04),
+        "piano": sine(440.0, seconds=0.5, amp=0.03),
+        "other": sine(550.0, seconds=0.5, amp=0.02),
+    }
+    minus = sum(source_audio[stem] for stem in ("drums", "bass", "guitar", "piano", "other"))
+    mix = write_wav(tmp_path / "mix.wav", source_audio["vocals"] + minus)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v2",
+                "profile": "model_split_v2",
+                "timeout_sec": 300,
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "profile": "model_split_v2",
+                        "minus_source": "minus_lane",
+                        "delivery_pair_fail_fast": True,
+                        "delivery_pair_reconstruction": {"max_delivery_pair_residual_ratio": 0.06},
+                        "target_specific_commands": [
+                            {"role": "six_stems", "lane": "stem_lane", "command_template": ["fixture-six", "{window_mix}"]},
+                            {
+                                "role": "vocals",
+                                "lane": "vocal_lane",
+                                "route_id": "mdx23c_vocals",
+                                "command_template": ["fixture-vocal", "{window_mix}"],
+                            },
+                            {
+                                "role": "minus",
+                                "lane": "minus_lane",
+                                "output_map": {"minus": "instrumental"},
+                                "command_template": ["fixture-minus", "{window_mix}"],
+                            },
+                        ],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    timeouts_by_command: dict[str, int] = {}
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        timeouts_by_command[command[0]] = timeout_sec
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        if command[0] == "fixture-vocal":
+            sf.write(stems_dir / "vocals.flac", source_audio["vocals"][: len(window_audio)], mix_rate)
+        elif command[0] == "fixture-minus":
+            sf.write(stems_dir / "instrumental.flac", (minus * np.float32(0.25))[: len(window_audio)], mix_rate)
+        else:
+            raise AssertionError(command)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+    )
+
+    candidate = result["candidates"][0]
+    mdx_route = next(route for route in candidate["target_specific_composition"]["routes"] if route["route_id"] == "mdx23c_vocals")
+    assert timeouts_by_command["fixture-vocal"] == 45
+    assert timeouts_by_command["fixture-minus"] == 300
+    assert mdx_route["timeout_sec"] == 45
+    assert mdx_route["separator_backend"]["route_timeout_sec"] == 45
+
+
+def test_model_split_v2_fast_route_budget_caps_slow_delivery_pair_routes(tmp_path: Path) -> None:
+    source_audio = {
+        "vocals": sine(880.0, seconds=0.5, amp=0.03),
+        "drums": sine(110.0, seconds=0.5, amp=0.06),
+        "bass": sine(220.0, seconds=0.5, amp=0.05),
+        "guitar": sine(330.0, seconds=0.5, amp=0.04),
+        "piano": sine(440.0, seconds=0.5, amp=0.03),
+        "other": sine(550.0, seconds=0.5, amp=0.02),
+    }
+    minus = sum(source_audio[stem] for stem in ("drums", "bass", "guitar", "piano", "other"))
+    mix = write_wav(tmp_path / "mix.wav", source_audio["vocals"] + minus)
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "schema": "stem_search_recipe.v2",
+                "profile": "model_split_v2",
+                "timeout_sec": 300,
+                "candidates": [
+                    {
+                        "candidate_id": "c001",
+                        "profile": "model_split_v2",
+                        "minus_source": "minus_lane",
+                        "delivery_pair_fail_fast": True,
+                        "delivery_pair_reconstruction": {"max_delivery_pair_residual_ratio": 0.06},
+                        "target_specific_commands": [
+                            {"role": "six_stems", "lane": "stem_lane", "command_template": ["fixture-six", "{window_mix}"]},
+                            {
+                                "role": "vocals",
+                                "lane": "vocal_lane",
+                                "route_id": "mdx23c_vocals",
+                                "command_template": ["fixture-vocal", "{window_mix}"],
+                            },
+                            {
+                                "role": "minus",
+                                "lane": "minus_lane",
+                                "route_id": "becruily_instrumental_vocals",
+                                "output_map": {"minus": "instrumental"},
+                                "command_template": ["fixture-minus", "{window_mix}"],
+                            },
+                        ],
+                        "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    timeouts_by_command: dict[str, int] = {}
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        timeouts_by_command[command[0]] = timeout_sec
+        window_audio, mix_rate = sf.read(command[1], dtype="float32", always_2d=False)
+        stems_dir = fake_runner.stems_dir
+        if command[0] == "fixture-vocal":
+            sf.write(stems_dir / "vocals.flac", source_audio["vocals"][: len(window_audio)], mix_rate)
+        elif command[0] == "fixture-minus":
+            sf.write(stems_dir / "instrumental.flac", (minus * np.float32(0.25))[: len(window_audio)], mix_rate)
+        else:
+            raise AssertionError(command)
+
+    result = run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "scratch" / "t001",
+        recipe_path=recipe,
+        window_sec=0.5,
+        max_candidates=10,
+        require_gpu=False,
+        no_artifact_rag=True,
+        command_runner=fake_runner,
+        route_budget_profile="fast",
+    )
+
+    routes = result["candidates"][0]["target_specific_composition"]["routes"]
+    route_timeouts = {route["route_id"]: route["timeout_sec"] for route in routes}
+    assert result["route_budget_profile"] == "fast"
+    assert timeouts_by_command["fixture-vocal"] == 30
+    assert timeouts_by_command["fixture-minus"] == 30
+    assert route_timeouts["mdx23c_vocals"] == 30
+    assert route_timeouts["becruily_instrumental_vocals"] == 30
 
 
 def test_model_split_v2_mandatory_gates_cannot_be_disabled(tmp_path: Path) -> None:
@@ -1759,6 +3940,117 @@ def test_model_split_v2_composite_learned_stem_region_repair_can_clear_damage_ga
     assert accepted["damage_score"]["verdict"] == "auto_accept"
 
 
+def test_learned_stem_region_repair_uses_checkpoint_region_mask(tmp_path: Path) -> None:
+    def stereo_pair(mono: np.ndarray, side: np.ndarray) -> np.ndarray:
+        return np.stack([mono + side, mono - side], axis=1).astype(np.float32)
+
+    clean = stereo_pair(sine(440.0, seconds=0.5, amp=0.04), sine(460.0, seconds=0.5, amp=0.01))
+    detail = stereo_pair(sine(880.0, seconds=0.5, amp=0.015), sine(910.0, seconds=0.5, amp=0.004))
+    sibling = stereo_pair(sine(110.0, seconds=0.5, amp=0.05), sine(130.0, seconds=0.5, amp=0.01))
+    mask = make_region_mask(frame_count=clean.shape[0], sample_rate=SAMPLE_RATE, start_sec=0.10, end_sec=0.24)
+    target = clean + detail * mask[:, None]
+    bad = clean
+    mix_audio = target + sibling
+    model, history = train_region_repair_model_from_arrays(
+        mix_audio=mix_audio,
+        bad_stem_audio=bad,
+        target_stem_audio=target,
+        sibling_stem_audio=sibling,
+        target_mix_audio=mix_audio,
+        region_mask=mask,
+        sample_rate=SAMPLE_RATE,
+        issue_type=ISSUE_BAD_RECONSTRUCTION,
+        config=StemRegionRepairTrainConfig(
+            epochs=60,
+            hidden_channels=16,
+            learning_rate=0.01,
+            mix_conservation_loss_weight=1.0,
+            device="cpu",
+        ),
+    )
+    history = {**history, "region": {"start_sec": 0.10, "end_sec": 0.24}}
+    checkpoint = save_region_repair_checkpoint(model=model, path=tmp_path / "model" / "model.pt", training_history=history)
+    mix_path = write_wav(tmp_path / "mix.flac", mix_audio)
+    piano_path = write_wav(tmp_path / "piano.flac", bad)
+
+    result = stem_search.apply_learned_stem_region_repair(
+        mix_path=mix_path,
+        stem_paths={"piano": str(piano_path)},
+        config={"stem": "piano", "issue_type": ISSUE_BAD_RECONSTRUCTION, "checkpoint": str(checkpoint)},
+    )
+
+    expected_active = int(round((0.24 - 0.10) * SAMPLE_RATE))
+    assert result["applied"] is True
+    assert result["region"] == {"start_sec": 0.10, "end_sec": 0.24}
+    assert result["diagnostics"]["active_frame_count"] == pytest.approx(expected_active, abs=1)
+
+
+def test_bad_reconstruction_vocal_repair_can_improve_delivery_pair_residual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    frames = int(SAMPLE_RATE * 0.25)
+    detail = np.stack(
+        [
+            sine(440.0, seconds=0.25, amp=0.02),
+            sine(450.0, seconds=0.25, amp=0.02),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    vocals_bad = np.zeros((frames, 2), dtype=np.float32)
+    minus_audio = np.zeros((frames, 2), dtype=np.float32)
+    mix_audio = detail.copy()
+    mix_path = write_wav(tmp_path / "mix.flac", mix_audio)
+    vocals_path = write_wav(tmp_path / "vocals.flac", vocals_bad)
+    minus_path = write_wav(tmp_path / "minus.flac", minus_audio)
+    checkpoint_path = tmp_path / "model.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+
+    class DummyModel:
+        input_channels = 6
+
+    def fake_load_region_repair_checkpoint(_path: Path):
+        return DummyModel(), {
+            "training_history": {
+                "issue_type": ISSUE_BAD_RECONSTRUCTION,
+                "region": {"start_sec": 0.0, "end_sec": frames / SAMPLE_RATE},
+            }
+        }
+
+    def fake_apply_region_repair_model(**_kwargs):
+        return detail.copy(), {
+            "schema": "fake_repair",
+            "active_frame_count": frames,
+            "changed_region_ratio": 0.02,
+            "changed_outside_ratio": 0.0,
+        }
+
+    monkeypatch.setattr(stem_search, "load_region_repair_checkpoint", fake_load_region_repair_checkpoint)
+    monkeypatch.setattr(stem_search, "apply_region_repair_model", fake_apply_region_repair_model)
+
+    before_residual = float(np.sqrt(np.mean(np.square(mix_audio - (vocals_bad + minus_audio)))))
+    result = stem_search.apply_learned_stem_region_repair(
+        mix_path=mix_path,
+        stem_paths={"vocals": str(vocals_path), "minus": str(minus_path)},
+        config={
+            "stem": "vocals",
+            "issue_type": ISSUE_BAD_RECONSTRUCTION,
+            "checkpoint": str(checkpoint_path),
+        },
+    )
+    repaired_vocals, _ = sf.read(vocals_path, dtype="float32", always_2d=True)
+    repaired_minus, _ = sf.read(minus_path, dtype="float32", always_2d=True)
+    after_residual = float(np.sqrt(np.mean(np.square(mix_audio - (repaired_vocals + repaired_minus)))))
+
+    assert result["applied"] is True
+    assert result["delivery_pair_compensation_stem"] == ""
+    assert result["delivery_pair_compensation_delta_rms"] == 0.0
+    assert result["diagnostics"]["delivery_pair_residual_before"] == pytest.approx(before_residual, abs=1.0e-4)
+    assert result["diagnostics"]["delivery_pair_residual_after"] == pytest.approx(after_residual, abs=1.0e-4)
+    assert result["diagnostics"]["target_issue_improved"] is True
+    assert after_residual < before_residual * 0.25
+
+
 def test_model_split_v2_composite_pair_gain_repair_can_clear_reconstruction_gate(tmp_path: Path) -> None:
     source_audio = {
         "vocals": sine(880.0, seconds=0.5, amp=0.03),
@@ -2082,12 +4374,14 @@ def test_model_split_v2_composite_reaches_support_routes_before_repair_exhaustio
     vocal_dir = tmp_path / "routes" / "vocal"
     minus_dir = tmp_path / "routes" / "minus"
     bass_support_dir = tmp_path / "routes" / "bass_support"
+    other_support_dir = tmp_path / "routes" / "other_support"
     non_vocal_support_dir = tmp_path / "routes" / "non_vocal_support"
     for stem, audio in damaged_stem_audio.items():
         write_wav(stem_dir / f"{stem}.flac", audio)
     write_wav(vocal_dir / "vocals.flac", source_audio["vocals"])
     write_wav(minus_dir / "minus.flac", minus)
     write_wav(bass_support_dir / "bass.flac", source_audio["bass"])
+    write_wav(other_support_dir / "other.flac", source_audio["other"])
     for stem in ("drums", "bass", "other"):
         write_wav(non_vocal_support_dir / f"{stem}.flac", source_audio[stem])
     window_candidates = [
@@ -2120,6 +4414,12 @@ def test_model_split_v2_composite_reaches_support_routes_before_repair_exhaustio
                         "lane": "bass_support_lane",
                         "route_id": "bass_support_fixture",
                         "copied_outputs": [{"stem": "bass", "source_path": str(bass_support_dir / "bass.flac")}],
+                    },
+                    {
+                        "role": "other_support",
+                        "lane": "teacher_mask_checkpoint_lane",
+                        "route_id": "other_support_fixture",
+                        "copied_outputs": [{"stem": "other", "source_path": str(other_support_dir / "other.flac")}],
                     },
                     {
                         "role": "non_vocal_support",
@@ -2159,16 +4459,142 @@ def test_model_split_v2_composite_reaches_support_routes_before_repair_exhaustio
             "foreign_references": write_full_foreign_references(tmp_path, source_audio),
             "model_split_composite_repair_options": repair_options,
         },
-        max_composites=3,
+        max_composites=4,
         progress_callback=events.append,
     )
 
-    assert [candidate["model_split_repair_id"] for candidate in result] == ["none", "none", "none"]
-    assert [candidate["stem_support_applied"] for candidate in result] == [False, True, True]
+    assert [candidate["model_split_repair_id"] for candidate in result] == ["none", "none", "none", "none"]
+    assert [candidate["stem_support_applied"] for candidate in result] == [False, True, True, True]
     assert result[1]["bass_support_applied"] is True
-    assert result[2]["non_vocal_support_applied"] is True
+    assert result[2]["target_specific_composition"]["routes"][-1]["role"] == "other_support"
+    assert result[3]["non_vocal_support_applied"] is True
     starts = [event for event in events if event["event"] == "composite_candidate_start"]
-    assert [event["repair_id"] for event in starts] == ["none", "none", "none"]
+    assert [event["repair_id"] for event in starts] == ["none", "none", "none", "none"]
+
+
+def test_model_split_v2_composite_can_combine_learned_single_stem_support_routes(tmp_path: Path) -> None:
+    def wide(mono: np.ndarray) -> np.ndarray:
+        return np.stack([mono, mono * np.float32(0.2)], axis=1).astype(np.float32)
+
+    source_audio = {
+        "vocals": wide(sine(880.0, seconds=0.5, amp=0.03)),
+        "drums": wide(sine(110.0, seconds=0.5, amp=0.07)),
+        "bass": wide(sine(220.0, seconds=0.5, amp=0.05)),
+        "guitar": wide(sine(330.0, seconds=0.5, amp=0.04)),
+        "piano": wide(sine(440.0, seconds=0.5, amp=0.03)),
+        "other": wide(sine(550.0, seconds=0.5, amp=0.02)),
+    }
+    damaged_stem_audio = dict(source_audio)
+    damaged_stem_audio["guitar"] = np.zeros_like(source_audio["guitar"])
+    damaged_stem_audio["other"] = np.zeros_like(source_audio["other"])
+    minus = sum(source_audio[stem] for stem in ("drums", "bass", "guitar", "piano", "other"))
+    window_mix = write_wav(tmp_path / "w000.wav", source_audio["vocals"] + minus)
+    stem_dir = tmp_path / "routes" / "stems"
+    vocal_dir = tmp_path / "routes" / "vocal"
+    minus_dir = tmp_path / "routes" / "minus"
+    guitar_support_dir = tmp_path / "routes" / "guitar_support"
+    other_support_dir = tmp_path / "routes" / "other_support"
+    for stem, audio in damaged_stem_audio.items():
+        write_wav(stem_dir / f"{stem}.flac", audio)
+    write_wav(vocal_dir / "vocals.flac", source_audio["vocals"])
+    write_wav(minus_dir / "minus.flac", minus)
+    write_wav(guitar_support_dir / "guitar.flac", source_audio["guitar"])
+    write_wav(other_support_dir / "other.flac", source_audio["other"])
+    window_candidates = [
+        {
+            "target_specific_composition": {
+                "routes": [
+                    {
+                        "role": "six_stems",
+                        "lane": "stem_lane",
+                        "route_id": "stem_fixture",
+                        "copied_outputs": [
+                            {"stem": stem, "source_path": str(stem_dir / f"{stem}.flac")}
+                            for stem in ("drums", "bass", "guitar", "piano", "other")
+                        ],
+                    },
+                    {
+                        "role": "vocals",
+                        "lane": "vocal_lane",
+                        "route_id": "vocal_fixture",
+                        "copied_outputs": [{"stem": "vocals", "source_path": str(vocal_dir / "vocals.flac")}],
+                    },
+                    {
+                        "role": "minus",
+                        "lane": "minus_lane",
+                        "route_id": "minus_fixture",
+                        "copied_outputs": [{"stem": "minus", "source_path": str(minus_dir / "minus.flac")}],
+                    },
+                    {
+                        "role": "guitar_support",
+                        "lane": "teacher_mask_checkpoint_lane",
+                        "route_id": "tm_guitar_support",
+                        "copied_outputs": [{"stem": "guitar", "source_path": str(guitar_support_dir / "guitar.flac")}],
+                    },
+                    {
+                        "role": "other_support",
+                        "lane": "teacher_mask_checkpoint_lane",
+                        "route_id": "tm_other_support",
+                        "copied_outputs": [{"stem": "other", "source_path": str(other_support_dir / "other.flac")}],
+                    },
+                ]
+            }
+        }
+    ]
+
+    result = stem_search.build_model_split_v2_composite_candidates(
+        window={
+            "window_id": "w000",
+            "mix_path": str(window_mix),
+            "sample_rate": SAMPLE_RATE,
+            "sample_count": len(source_audio["vocals"]),
+            "channel_count": 2,
+        },
+        window_dir=tmp_path / "run" / "w000",
+        window_candidates=window_candidates,
+        candidate_template={
+            "profile": "model_split_v2",
+            "foreign_references": write_full_foreign_references(tmp_path, source_audio),
+            "model_split_composite_repair_options": [{"repair_id": "none", "type": "none"}],
+        },
+        max_composites=5,
+    )
+
+    combined = next(
+        (
+            candidate
+            for candidate in result
+            if {"guitar_support", "other_support"}.issubset(
+                {route["role"] for route in candidate["target_specific_composition"]["routes"]}
+            )
+        ),
+        None,
+    )
+
+    assert combined is not None
+    support_routes = {
+        route["role"]: route
+        for route in combined["target_specific_composition"]["routes"]
+        if route["role"] in {"guitar_support", "other_support"}
+    }
+    assert support_routes["guitar_support"]["lane"] == "teacher_mask_checkpoint_lane"
+    assert support_routes["other_support"]["lane"] == "teacher_mask_checkpoint_lane"
+    assert support_routes["guitar_support"]["copied_outputs"] == [
+        {
+            "stem": "guitar",
+            "source_stem": "guitar",
+            "source_path": str(guitar_support_dir / "guitar.flac"),
+            "output_path": str(Path(combined["stems_dir"]) / "guitar.flac"),
+        }
+    ]
+    assert support_routes["other_support"]["copied_outputs"] == [
+        {
+            "stem": "other",
+            "source_stem": "other",
+            "source_path": str(other_support_dir / "other.flac"),
+            "output_path": str(Path(combined["stems_dir"]) / "other.flac"),
+        }
+    ]
 
 
 def test_model_split_v2_composite_reaches_support_key_repairs_before_budget_exhaustion(tmp_path: Path) -> None:

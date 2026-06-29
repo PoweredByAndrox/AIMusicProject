@@ -44,6 +44,9 @@ Copy-Item .env.example .env
 | `REDIS_PASSWORD` | `null` (как строка) | В compose у `app` пробрасывается как `${REDIS_PASSWORD:-null}` |
 | `REDIS_PREFIX` | (не в `.env.example`, но `node`-контейнер ставит `ai_music_recommendations_database_`) | Используется и `MLQueueService`, и Python-воркером |
 | `OLLAMA_PORT` | `11434` | Внешний порт `ollama` |
+| `LLM_PROVIDER` | `ollama` | Выбор backend: `ollama` или `vllm` |
+| `VLLM_PORT` | `8001` | Внешний порт опционального vLLM backend |
+| `VLLM_MODEL` | (пусто) | Явно выбранная HF text-LLM модель для vLLM OpenAI-compatible server |
 | `VITE_PORT` | `5173` | Внешний порт `node` |
 
 > `REDIS_PREFIX` критичен: Laravel и Python должны видеть одинаковый префикс, иначе `BLPOP` в Python не подхватит ничего из Laravel. Проверить, что в Laravel `config/database.php` префикс совпадает (по умолчанию выводится из `REDIS_PREFIX`/`Cache::store()`).
@@ -122,6 +125,33 @@ docker compose exec ollama ollama list
 ```
 
 Конкретное имя модели в коде не зашито — `ChatController` обращается по умолчанию к Ollama HTTP API; если переменная окружения `OLLAMA_MODEL`/аналог не выставлена, модель должна совпадать с дефолтом контроллера (см. реализацию `ChatController::aiChat`). Проверка готовности — `GET /api/chat/ai/health` (требует Bearer).
+
+### 5.1 Опционально: vLLM вместо Ollama
+
+vLLM запускается отдельным profile-gated сервисом и по умолчанию не занимает GPU:
+
+```powershell
+docker compose --profile llm-vllm up -d vllm
+```
+
+Минимальные env-настройки для приложения:
+
+```dotenv
+LLM_PROVIDER=vllm
+VLLM_URL=http://vllm:8000/v1
+VLLM_MODEL=<hf-text-llm-model>
+VLLM_QUANTIZATION=awq_marlin
+VLLM_KV_CACHE_DTYPE=auto
+VLLM_GPU_MEMORY_UTILIZATION=0.82
+VLLM_TENSOR_PARALLEL_SIZE=1
+VLLM_PIPELINE_PARALLEL_SIZE=1
+VLLM_MAX_NUM_SEQS=8
+VLLM_MAX_NUM_BATCHED_TOKENS=4096
+```
+
+Сервис уже включает базовые оптимизации инференса: AWQ/Marlin-квантизацию для 12GB GPU, PagedAttention через vLLM runtime, prefix caching, chunked prefill, continuous batching knobs (`VLLM_MAX_NUM_SEQS`, `VLLM_MAX_NUM_BATCHED_TOKENS`) и явный single-GPU parallelism (`TP=1`, `PP=1`). Speculative decoding не включен по умолчанию: для одного 12GB GPU он может конкурировать с основной моделью за VRAM/throughput и требует отдельного benchmark.
+
+vLLM обслуживает OpenAI-compatible `/v1/chat/completions` и `/v1/models`; это backend для LLM/chat/controller inference. Demucs/MDX23C/BS-RoFormer/MelBand/SCNet остаются рабочими audio-separation моделями в `ml-worker` routes и не переносятся в vLLM.
 
 ## 6. Сборка фронта на проде
 

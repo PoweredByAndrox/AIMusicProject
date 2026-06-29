@@ -401,13 +401,19 @@ def _complex_mask_prior(
     n_fft: int,
     hop_length: int,
     device: torch.device,
+    ceiling: float,
 ) -> np.ndarray:
     channel_masks: list[np.ndarray] = []
+    limit = float(ceiling)
     for channel_index in range(source_audio.shape[1]):
         source_stft = _stft_mono(source_audio[:, channel_index], n_fft=n_fft, hop_length=hop_length, device=device)
         target_stft = _stft_mono(target_audio[:, channel_index], n_fft=n_fft, hop_length=hop_length, device=device)
         safe_source = torch.where(source_stft.abs() > EPSILON, source_stft, torch.ones_like(source_stft))
         complex_mask = torch.where(source_stft.abs() > EPSILON, target_stft / safe_source, torch.zeros_like(source_stft))
+        if limit > 0.0:
+            scale = (limit / complex_mask.abs().clamp_min(EPSILON)).clamp(max=1.0)
+            complex_mask = complex_mask * scale
+        complex_mask = torch.nan_to_num(complex_mask, nan=0.0, posinf=0.0, neginf=0.0)
         channel_masks.append(complex_mask.detach().cpu().numpy().astype(np.complex64, copy=False))
     return np.stack(channel_masks, axis=0)
 
@@ -699,6 +705,40 @@ def _features_are_exact_memory_match(query_features: torch.Tensor, memory_featur
         return False
     max_abs_delta = torch.max(torch.abs(query_features.to(dtype=torch.float32) - memory_features.to(dtype=torch.float32)))
     return bool(float(max_abs_delta.detach().cpu()) <= 5.0e-2)
+
+
+def _find_exact_memory_subsequence(
+    query_features: torch.Tensor,
+    memory_features: torch.Tensor,
+    *,
+    tolerance: float = 5.0e-2,
+) -> int | None:
+    if query_features.ndim != 2 or memory_features.ndim != 2:
+        return None
+    query_frame_count, feature_width = query_features.shape
+    memory_frame_count, memory_feature_width = memory_features.shape
+    if (
+        int(query_frame_count) <= 0
+        or int(memory_frame_count) <= 0
+        or int(feature_width) != int(memory_feature_width)
+        or int(query_frame_count) > int(memory_frame_count)
+    ):
+        return None
+    if int(query_frame_count) == int(memory_frame_count):
+        return 0 if _features_are_exact_memory_match(query_features, memory_features) else None
+
+    query = query_features.to(dtype=torch.float32)
+    memory = memory_features.to(dtype=torch.float32)
+    candidate_count = int(memory_frame_count) - int(query_frame_count) + 1
+    first_frame_delta = torch.max(torch.abs(memory[:candidate_count] - query[0].unsqueeze(0)), dim=1).values
+    candidate_starts = torch.nonzero(first_frame_delta <= float(tolerance), as_tuple=False).flatten()
+    for raw_start in candidate_starts.detach().cpu().tolist():
+        start = int(raw_start)
+        candidate = memory[start : start + int(query_frame_count)]
+        max_abs_delta = torch.max(torch.abs(candidate - query))
+        if bool(float(max_abs_delta.detach().cpu()) <= float(tolerance)):
+            return start
+    return None
 
 
 def train_teacher_mask(
@@ -1099,6 +1139,7 @@ def train_teacher_mask(
             n_fft=config.n_fft,
             hop_length=config.hop_length,
             device=device,
+            ceiling=float(config.complex_mask_ceiling),
         )
         metadata["temporal_complex_mask_prior_real"] = complex_mask_prior.real.astype(np.float16, copy=False)
         metadata["temporal_complex_mask_prior_imag"] = complex_mask_prior.imag.astype(np.float16, copy=False)
@@ -1165,6 +1206,7 @@ def train_teacher_mask(
                 n_fft=config.n_fft,
                 hop_length=config.hop_length,
                 device=device,
+                ceiling=float(config.complex_mask_ceiling),
             )
             metadata["source_feature_memory_complex_mask_real"] = source_feature_complex_mask.real.astype(np.float16, copy=False)
             metadata["source_feature_memory_complex_mask_imag"] = source_feature_complex_mask.imag.astype(np.float16, copy=False)
@@ -2194,9 +2236,16 @@ def apply_teacher_mask(
             source_feature_memory_available = True
             source_feature_memory_frame_count = int(memory_features.shape[0])
             source_feature_memory_exact_source_match = _features_are_exact_memory_match(memory_query_features, memory_features)
-            if source_feature_memory_exact_source_match:
-                if memory_complex_frame_masks is not None and memory_complex_frame_masks.shape[0] == memory_query_features.shape[0]:
-                    source_feature_memory_complex_frame_mask = memory_complex_frame_masks.transpose(0, 1)
+            exact_subsequence_start = _find_exact_memory_subsequence(memory_query_features, memory_features)
+            if source_feature_memory_exact_source_match or exact_subsequence_start is not None:
+                exact_match_is_full = bool(source_feature_memory_exact_source_match)
+                if exact_subsequence_start is None:
+                    exact_subsequence_start = 0
+                exact_subsequence_end = int(exact_subsequence_start) + int(memory_query_features.shape[0])
+                if memory_complex_frame_masks is not None and memory_complex_frame_masks.shape[0] >= exact_subsequence_end:
+                    source_feature_memory_complex_frame_mask = memory_complex_frame_masks[
+                        exact_subsequence_start:exact_subsequence_end
+                    ].transpose(0, 1)
                     mask = source_feature_memory_complex_frame_mask.abs().clamp(
                         0.0,
                         max(float(config.mask_ceiling), float(config.complex_mask_ceiling)),
@@ -2204,14 +2253,18 @@ def apply_teacher_mask(
                     source_feature_memory_complex_frame_mask_used = True
                     source_feature_memory_used = True
                 else:
-                    memory_mask = memory_masks
+                    memory_mask = memory_masks[exact_subsequence_start:exact_subsequence_end]
                     mask = memory_mask.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
                     source_feature_memory_used = True
                 emit_progress(
                     progress_callback,
-                    "source_feature_memory_exact_match",
+                    "source_feature_memory_exact_match"
+                    if exact_match_is_full
+                    else "source_feature_memory_exact_subsequence_match",
                     query_frame_count=int(memory_query_features.shape[0]),
                     memory_frame_count=int(memory_features.shape[0]),
+                    memory_start_frame=int(exact_subsequence_start),
+                    memory_end_frame=int(exact_subsequence_end),
                     feature_width=int(memory_query_features.shape[1]),
                     projection_dim=int(source_feature_memory_projection_dim),
                 )

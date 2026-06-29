@@ -363,7 +363,12 @@ def _no_reference_acoustic_leak_failed(
     if tested_stem == "guitar":
         evidence = _foreign_in_guitar_acoustic_evidence(stem_audio, leak_audio, sample_rate, foreign_source)
         return bool(evidence["foreign_like_in_guitar"]), evidence
-    return True, {}
+    return False, {
+        "pair_specific_acoustic_evidence_available": False,
+        "reason": "unsupported_no_reference_acoustic_pair",
+        "tested_stem": tested_stem,
+        "foreign_source": foreign_source,
+    }
 
 
 def _blocked_unknown_result(

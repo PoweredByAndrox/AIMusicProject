@@ -8,9 +8,10 @@ import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 try:
+    from tools.analyze_model_split_reconstruction_residual import localize_candidate_reconstruction_residual
     from tools.stem_contamination_common import normalize_stem_name
     from tools.stem_region_repair_common import (
         ISSUE_BAD_RECONSTRUCTION,
@@ -32,6 +33,7 @@ try:
         write_jsonl,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from analyze_model_split_reconstruction_residual import localize_candidate_reconstruction_residual
     from stem_contamination_common import normalize_stem_name
     from stem_region_repair_common import (
         ISSUE_BAD_RECONSTRUCTION,
@@ -56,6 +58,8 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution fallba
 
 FOREIGN_RECOVERED_RE = re.compile(r"foreign_source_recovered:([^:,]+):([^,]+)")
 STEREO_COLLAPSE_RE = re.compile(r"stereo_width_collapse:([^,]+)")
+MODEL_ID_RE = re.compile(r"[\"']--model-id[\"']\s*,\s*[\"']([^\"']+)[\"']")
+TARGET_STEM_RE = re.compile(r"[\"']--target-stem[\"']\s*,\s*[\"']([^\"']+)[\"']")
 
 
 def _candidate_reason(candidate: Mapping[str, Any]) -> str:
@@ -76,10 +80,10 @@ def _candidate_reason(candidate: Mapping[str, Any]) -> str:
 def _route_signature(candidate: Mapping[str, Any]) -> str:
     composition = candidate.get("target_specific_composition")
     if not isinstance(composition, Mapping):
-        return ""
+        return _failed_route_signature(candidate)
     routes = composition.get("routes")
     if not isinstance(routes, list):
-        return ""
+        return _failed_route_signature(candidate)
     parts = []
     for route in routes:
         if not isinstance(route, Mapping):
@@ -88,7 +92,27 @@ def _route_signature(candidate: Mapping[str, Any]) -> str:
         route_id = str(route.get("route_id") or route.get("route_alias") or "").strip()
         if lane or route_id:
             parts.append(f"{lane}:{route_id}")
-    return "|".join(parts)
+    return "|".join(parts) or _failed_route_signature(candidate)
+
+
+def _failed_route_signature(candidate: Mapping[str, Any]) -> str:
+    error = candidate.get("error") if isinstance(candidate.get("error"), Mapping) else {}
+    message = str(error.get("message") or "")
+    model_match = MODEL_ID_RE.search(message)
+    if not model_match:
+        return ""
+    model_id = model_match.group(1).strip()
+    target_match = TARGET_STEM_RE.search(message)
+    target_stem = normalize_stem_name(target_match.group(1)) if target_match else ""
+    if target_stem == "vocals":
+        lane = "vocal_lane"
+    elif target_stem in {"minus", "instrumental"}:
+        lane = "minus_lane"
+    elif target_stem:
+        lane = "stem_lane"
+    else:
+        lane = "unknown_lane"
+    return f"{lane}:{model_id}"
 
 
 def classify_blocker(candidate: Mapping[str, Any]) -> dict[str, Any]:
@@ -159,11 +183,72 @@ def classify_blocker(candidate: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _candidate_repair_items(candidate: Mapping[str, Any]) -> tuple[str, list[Mapping[str, Any]]]:
+    composition = candidate.get("target_specific_composition")
+    if not isinstance(composition, Mapping):
+        return "", []
+    repair = composition.get("repair")
+    if not isinstance(repair, Mapping):
+        return "", []
+    repair_id = str(repair.get("repair_id") or "").strip()
+    stem_region_repair = repair.get("stem_region_repair")
+    if not isinstance(stem_region_repair, Mapping):
+        return repair_id, []
+    repairs = stem_region_repair.get("repairs")
+    if isinstance(repairs, list):
+        return repair_id, [item for item in repairs if isinstance(item, Mapping)]
+    return repair_id, [stem_region_repair]
+
+
+def _failed_repair_classifications(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
+    repair_id, repair_items = _candidate_repair_items(candidate)
+    classifications: list[dict[str, Any]] = []
+    for item in repair_items:
+        if not item.get("applied"):
+            continue
+        diagnostics = item.get("diagnostics") if isinstance(item.get("diagnostics"), Mapping) else {}
+        if diagnostics.get("target_issue_improved") is not False:
+            continue
+        stem = normalize_stem_name(item.get("stem"))
+        issue_type = str(item.get("issue_type") or ISSUE_UNKNOWN).strip().lower() or ISSUE_UNKNOWN
+        checkpoint = str(item.get("checkpoint") or "").strip()
+        blocker_reason = f"stem_region_repair_not_improved:{repair_id}:{stem}:{issue_type}"
+        classifications.append(
+            {
+                "root_cause": ROOT_CAUSE_REPAIR_GAP,
+                "issue_type": issue_type,
+                "affected_stem": stem,
+                "foreign_source": "",
+                "training_action": "retrain_failed_repair_checkpoint",
+                "blocker_reason": blocker_reason,
+                "failed_repair_id": repair_id,
+                "failed_repair_checkpoint": checkpoint,
+                "failed_repair_diagnostics": {
+                    key: diagnostics[key]
+                    for key in (
+                        "target_issue_improved",
+                        "delivery_pair_residual_before",
+                        "delivery_pair_residual_after",
+                        "stereo_width_before",
+                        "stereo_width_after",
+                        "changed_region_ratio",
+                    )
+                    if key in diagnostics
+                },
+                "force_queue": True,
+            }
+        )
+    return classifications
+
+
 def classify_candidate_blockers(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
     reason = _candidate_reason(candidate)
     error = candidate.get("error") if isinstance(candidate.get("error"), Mapping) else {}
     if candidate.get("execution_status") == "failed_runtime_error" or error:
         return [classify_blocker(candidate)]
+    failed_repairs = _failed_repair_classifications(candidate)
+    if failed_repairs:
+        return failed_repairs
 
     classifications: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -222,16 +307,53 @@ def _queue_signature(candidate: Mapping[str, Any], classification: Mapping[str, 
     )
 
 
+def _candidate_from_probe_manifest(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    if str(payload.get("schema") or "") != "stem_region_repair_probe.v1":
+        raise ValueError(f"unsupported probe manifest schema: {path}")
+    repair = payload.get("repair")
+    if not isinstance(repair, Mapping):
+        raise ValueError(f"probe manifest missing repair object: {path}")
+    source_candidate = str(payload.get("source_candidate") or "").strip()
+    return {
+        "candidate_id": "probe_manifest",
+        "window_id": "probe",
+        "verdict": "blocked_bad_reconstruction",
+        "next_action": {"reason": "stem_region_repair_probe_not_improved"},
+        "target_specific_composition": {
+            "routes": [],
+            "repair": {
+                "repair_id": str(repair.get("repair_id") or "probe_repair"),
+                "stem_region_repair": dict(repair),
+            },
+        },
+        "source_probe_manifest": str(path),
+        "source_candidate": source_candidate,
+    }
+
+
+def _load_probe_manifest_candidates(paths: Sequence[Path] | None) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for path in paths or []:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"probe manifest must be a JSON object: {path}")
+        candidates.append(_candidate_from_probe_manifest(Path(path), payload))
+    return candidates
+
+
 def build_root_cause_queue(
     *,
     run_json_path: Path,
     output_dir: Path,
     min_repeats: int = 2,
+    probe_manifest_paths: Sequence[Path] | None = None,
 ) -> dict[str, Any]:
     payload = json.loads(Path(run_json_path).read_text(encoding="utf-8"))
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         raise ValueError("run_json must contain candidates list")
+    probe_candidates = _load_probe_manifest_candidates(probe_manifest_paths)
+    candidates = [candidate for candidate in candidates if isinstance(candidate, Mapping)] + probe_candidates
 
     grouped: dict[tuple[str, str, str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
     classifications: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
@@ -252,30 +374,55 @@ def build_root_cause_queue(
         classification = classifications[signature]
         root_cause = str(classification["root_cause"])
         repeat_count = len(group)
-        if root_cause != ROOT_CAUSE_INFRA_GAP and repeat_count < int(min_repeats):
+        if (
+            root_cause != ROOT_CAUSE_INFRA_GAP
+            and repeat_count < int(min_repeats)
+            and not bool(classification.get("force_queue"))
+        ):
             continue
         first = group[0]
+        localization: dict[str, Any] = {}
+        affected_stem = str(classification["affected_stem"])
+        training_action = str(classification["training_action"])
+        if classification["issue_type"] == ISSUE_BAD_RECONSTRUCTION:
+            localization = localize_candidate_reconstruction_residual(first)
+            if (
+                localization.get("verdict") == "localized"
+                and localization.get("affected_stem")
+                and not classification.get("failed_repair_checkpoint")
+            ):
+                affected_stem = str(localization["affected_stem"])
+                training_action = "mine_reconstruction_repair_example"
         row = {
             "schema": "training_first_root_cause_sample.v1",
             "row_id": f"rc{index:06d}",
             "root_cause": root_cause,
             "training_state": "data_gap" if root_cause == ROOT_CAUSE_REPAIR_GAP else root_cause,
             "issue_type": classification["issue_type"],
-            "affected_stem": classification["affected_stem"],
+            "affected_stem": affected_stem,
             "foreign_source": classification["foreign_source"],
-            "training_action": classification["training_action"],
+            "training_action": training_action,
             "blocker_reason": classification["blocker_reason"],
             "repeat_count": repeat_count,
             "candidate_ids": [str(candidate.get("candidate_id") or "") for candidate in group],
             "window_ids": sorted({str(candidate.get("window_id") or "") for candidate in group}),
             "route_signature": signature[1],
+            "route_family": localization.get("route_family") or signature[1],
             "source_run_json": str(run_json_path),
+            "source_probe_manifest": str(first.get("source_probe_manifest") or ""),
+            "source_candidate": str(first.get("source_candidate") or ""),
             "score_path": str(first.get("score_path") or ""),
-            "bad_stem_path": _bad_stem_path(first, str(classification["affected_stem"])),
+            "bad_stem_path": _bad_stem_path(first, affected_stem),
+            "residual_region": localization.get("residual_region") or {"start_sec": 0.0, "end_sec": 0.0},
+            "residual_localization": localization,
+            "quarantined_for_next_run": root_cause == ROOT_CAUSE_INFRA_GAP,
             "label_type": "blocked_candidate_mining",
             "is_ground_truth": False,
             "usable_for_promotion": False,
         }
+        for key in ("failed_repair_id", "failed_repair_checkpoint", "failed_repair_diagnostics"):
+            if key in classification:
+                row[key] = classification[key]
         rows.append(row)
 
     root_counts = Counter(str(row["root_cause"]) for row in rows)
@@ -285,6 +432,7 @@ def build_root_cause_queue(
         "source_run_json": str(run_json_path),
         "candidate_count": len(candidates),
         "blocked_candidate_count": blocked_candidate_count,
+        "probe_manifest_count": len(probe_candidates),
         "queue_row_count": len(rows),
         "min_repeats": int(min_repeats),
         "root_cause_counts": dict(sorted(root_counts.items())),
@@ -316,6 +464,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--min-repeats", type=int, default=2)
+    parser.add_argument("--probe-manifest", type=Path, action="append", default=[])
     return parser
 
 
@@ -325,6 +474,7 @@ def main() -> int:
         run_json_path=args.run_json,
         output_dir=args.output_dir,
         min_repeats=args.min_repeats,
+        probe_manifest_paths=args.probe_manifest,
     )
     # Validate only rows that can become repair rows later; root-cause rows are mining rows.
     for row_line in Path(manifest["queue_jsonl"]).read_text(encoding="utf-8").splitlines():

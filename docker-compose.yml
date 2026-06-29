@@ -198,6 +198,77 @@ services:
     networks:
       - music-network
 
+  # Persistent audio separator serving route.
+  # This is vLLM-style runtime optimization for Demucs/MDX/MelBand/SCNet routes,
+  # not a text-LLM/vLLM replacement for audio separation models.
+  separator-server:
+    profiles:
+      - audio-persistent-separator
+    image: aimusicproject-ml-worker:latest
+    build:
+      context: .
+      dockerfile: docker/ml-worker/Dockerfile
+    container_name: music-separator-server
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    working_dir: /app
+    volumes:
+      - ./ml_worker_improved:/app
+      - ./:/repo
+      - ./lab_artifacts:/app/lab_artifacts
+      - ./artifact_rag:/app/artifact_rag
+      - ./testing_stuff_music:/host_testing_stuff_music:ro
+      - ./testing_flstudio_music:/app/testing_flstudio_music:ro
+      - ./docker_data/storage:/app/storage
+      - ./docker_data/faiss_index:/app/faiss_index
+      - ./docker_data/models:/app/models
+      - ./docker_data/demix:/app/demix
+      - ./docker_data/container_logs/separator:/var/log/separator
+    tmpfs:
+      - /app/storage/tmp:size=4G,mode=1777
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REQUIRE_CUDA=1
+      - ML_TORCH_DEVICE=cuda
+      - ALLOW_CPU_STRUCTURE_FALLBACK=0
+      - STORAGE_PATH=/app/storage
+      - MODELS_PATH=/app/models
+      - XDG_CACHE_HOME=/app/storage/cache/xdg
+      - HF_HOME=/app/storage/cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/app/storage/cache/huggingface/hub
+      - HF_HUB_OFFLINE=1
+      - TORCH_HOME=/app/storage/cache/torch
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - NUMBA_NUM_THREADS=1
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcudnn.so.9
+    command:
+      - python
+      - /app/tools/serve_persistent_separator.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8791"
+    ports:
+      - "${SEPARATOR_SERVER_PORT:-8791}:8791"
+    deploy:
+      resources:
+        limits:
+          memory: 12g
+        reservations:
+          memory: 4g
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - music-network
+
   ml-worker-3:
     image: aimusicproject-ml-worker:latest
     container_name: music-ml-worker-3
@@ -388,6 +459,65 @@ services:
     networks:
       - music-network
 
+  # vLLM OpenAI-compatible LLM server.
+  # Profile-gated so it does not reserve GPU memory unless explicitly requested.
+  # vLLM is only for text LLM/controller inference; audio separators run in ml-worker.
+  vllm:
+    profiles:
+      - llm-vllm
+    image: vllm/vllm-openai:latest
+    container_name: music-vllm
+    restart: unless-stopped
+    ipc: host
+    shm_size: 4g
+    ports:
+      - "${VLLM_PORT:-8001}:8000"
+    volumes:
+      - vllm_hf_cache:/root/.cache/huggingface
+      - ./docker_data/container_logs/vllm:/var/log/vllm
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command:
+      - ${VLLM_MODEL:-__set_vllm_model__}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --quantization
+      - ${VLLM_QUANTIZATION:-awq_marlin}
+      - --dtype
+      - ${VLLM_DTYPE:-auto}
+      - --kv-cache-dtype
+      - ${VLLM_KV_CACHE_DTYPE:-auto}
+      - --safetensors-load-strategy
+      - ${VLLM_SAFETENSORS_LOAD_STRATEGY:-prefetch}
+      - --gpu-memory-utilization
+      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.82}
+      - --max-model-len
+      - ${VLLM_MAX_MODEL_LEN:-8192}
+      - --tensor-parallel-size
+      - ${VLLM_TENSOR_PARALLEL_SIZE:-1}
+      - --pipeline-parallel-size
+      - ${VLLM_PIPELINE_PARALLEL_SIZE:-1}
+      - --max-num-seqs
+      - ${VLLM_MAX_NUM_SEQS:-8}
+      - --max-num-batched-tokens
+      - ${VLLM_MAX_NUM_BATCHED_TOKENS:-4096}
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - music-network
+
   # Node.js for Vue.js Frontend Build
   node:
     image: node:20-alpine
@@ -438,3 +568,6 @@ volumes:
   # Node modules cache
   node_modules:
     name: music-node-modules
+
+  vllm_hf_cache:
+    name: music-vllm-hf-cache

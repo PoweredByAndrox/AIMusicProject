@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 
@@ -133,3 +135,114 @@ def test_mdx23c_cuda_preflight_fails_closed_when_cuda_is_unavailable(monkeypatch
         assert "torch.cuda.is_available() is false" in str(exc)
     else:  # pragma: no cover - asserts fail if exception is not raised
         raise AssertionError("MDX23C CUDA preflight must fail closed when CUDA is unavailable")
+
+
+def test_mdx23c_subprocess_uses_bounded_timeout(tmp_path: Path, monkeypatch) -> None:
+    module = _load_mdx23c_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    repo_path = tmp_path / "repo"
+    config_path = tmp_path / "config.yaml"
+    model_path = tmp_path / "model.ckpt"
+    repo_path.mkdir()
+    config_path.write_text("audio:\n  chunk_size: 1\n", encoding="utf-8")
+    model_path.write_bytes(b"stub")
+    _write_tiny_flac(source_audio_path, sample_rate=48000)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(module, "require_docker_runtime", lambda **_: None)
+    monkeypatch.setattr(
+        module,
+        "verify_cuda_inference_device",
+        lambda device_id: {"device_id": device_id, "device_count": 1, "device_name": "test-gpu"},
+    )
+    monkeypatch.setattr(
+        module,
+        "save_audio_window_as_wav",
+        lambda source, target, start_sec, end_sec: (_write_tiny_flac(target, sample_rate=48000), (48000, 64))[1],
+    )
+
+    def fake_run(command, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        store_dir = Path(command[command.index("--store_dir") + 1])
+        model_stem_dir = store_dir / module.MODEL_INPUT_STEM
+        model_stem_dir.mkdir(parents=True)
+        _write_tiny_flac(model_stem_dir / "vocals.wav", sample_rate=48000)
+        _write_tiny_flac(model_stem_dir / "instrumental.wav", sample_rate=48000)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_mdx23c_vocal_full.py",
+            str(source_audio_path),
+            str(output_dir),
+            "--repo-path",
+            str(repo_path),
+            "--config-path",
+            str(config_path),
+            "--model-path",
+            str(model_path),
+            "--timeout-sec",
+            "9",
+        ],
+    )
+
+    module.main()
+
+    assert captured["timeout"] == 9
+    assert (output_dir / "stem_manifest.json").exists()
+
+
+def test_mdx23c_subprocess_timeout_reports_explicit_blocker(tmp_path: Path, monkeypatch) -> None:
+    module = _load_mdx23c_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    repo_path = tmp_path / "repo"
+    config_path = tmp_path / "config.yaml"
+    model_path = tmp_path / "model.ckpt"
+    repo_path.mkdir()
+    config_path.write_text("audio:\n  chunk_size: 1\n", encoding="utf-8")
+    model_path.write_bytes(b"stub")
+    _write_tiny_flac(source_audio_path, sample_rate=48000)
+
+    monkeypatch.setattr(module, "require_docker_runtime", lambda **_: None)
+    monkeypatch.setattr(
+        module,
+        "verify_cuda_inference_device",
+        lambda device_id: {"device_id": device_id, "device_count": 1, "device_name": "test-gpu"},
+    )
+    monkeypatch.setattr(
+        module,
+        "save_audio_window_as_wav",
+        lambda source, target, start_sec, end_sec: (_write_tiny_flac(target, sample_rate=48000), (48000, 64))[1],
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(command, timeout=4, output="partial stdout", stderr="partial stderr")
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_mdx23c_vocal_full.py",
+            str(source_audio_path),
+            str(output_dir),
+            "--repo-path",
+            str(repo_path),
+            "--config-path",
+            str(config_path),
+            "--model-path",
+            str(model_path),
+            "--timeout-sec",
+            "4",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="mdx23c_subprocess_timeout"):
+        module.main()

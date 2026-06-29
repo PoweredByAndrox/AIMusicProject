@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 try:
     from tools.stem_region_repair_common import make_region_mask, read_audio_stereo, validate_issue_type, write_audio, write_json
     from tools.stem_region_repair_model import apply_region_repair_model, load_region_repair_checkpoint
@@ -26,6 +28,7 @@ def apply_stem_region_repair(
     issue_type: str,
     start_sec: float,
     end_sec: float,
+    forensic_source_path: Path | None = None,
 ) -> dict[str, Any]:
     issue_type = validate_issue_type(issue_type)
     model, checkpoint = load_region_repair_checkpoint(checkpoint_path)
@@ -36,6 +39,21 @@ def apply_stem_region_repair(
     frames = min(mix.shape[0], bad.shape[0])
     mix = mix[:frames]
     bad = bad[:frames]
+    forensic_source = None
+    if forensic_source_path is not None:
+        forensic_source, forensic_rate = read_audio_stereo(forensic_source_path)
+        if forensic_rate != sample_rate:
+            raise ValueError(f"sample rate mismatch: mix={sample_rate} forensic_source={forensic_rate}")
+        if forensic_source.shape[0] > frames:
+            forensic_source = forensic_source[:frames]
+        elif forensic_source.shape[0] < frames:
+            forensic_source = np.concatenate(
+                [
+                    forensic_source,
+                    np.zeros((frames - forensic_source.shape[0], forensic_source.shape[1]), dtype=np.float32),
+                ],
+                axis=0,
+            )
     mask = make_region_mask(
         frame_count=frames,
         sample_rate=sample_rate,
@@ -49,6 +67,7 @@ def apply_stem_region_repair(
         region_mask=mask,
         sample_rate=sample_rate,
         issue_type=issue_type,
+        source_condition_audio=forensic_source,
     )
     repaired_path = write_audio(output_dir / "audio" / "repaired.flac", repaired, sample_rate)
     manifest = {
@@ -59,6 +78,7 @@ def apply_stem_region_repair(
         "checkpoint_schema": checkpoint.get("schema"),
         "mix_path": str(mix_path),
         "bad_stem_path": str(bad_stem_path),
+        "forensic_source_path": str(forensic_source_path) if forensic_source_path is not None else "",
         "repaired_stem_path": str(repaired_path),
         "region": {"start_sec": float(start_sec), "end_sec": float(end_sec)},
         "diagnostics": diagnostics,
@@ -85,6 +105,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--issue-type", required=True)
     parser.add_argument("--start-sec", type=float, required=True)
     parser.add_argument("--end-sec", type=float, required=True)
+    parser.add_argument("--forensic-source", type=Path, default=None)
     return parser
 
 
@@ -99,6 +120,7 @@ def main() -> int:
         issue_type=args.issue_type,
         start_sec=args.start_sec,
         end_sec=args.end_sec,
+        forensic_source_path=args.forensic_source,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0

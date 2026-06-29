@@ -10,6 +10,7 @@ import soundfile as sf
 
 from tools.build_procedural_stem_clean_pairs import build_procedural_stem_clean_pairs
 from tools.build_stem_contamination_dataset import build_dataset_from_manifest, validate_stem_contamination_row
+from tools.build_vocal_depercussive_teacher_target import build_vocal_depercussive_teacher_target
 import tools.score_stem_contamination as scorer
 from tools.score_stem_contamination import score_stem_contamination
 from tools.stem_contamination_common import build_minus_from_non_vocal_stems
@@ -253,6 +254,7 @@ def test_clean_minus_does_not_emit_vocal_leak(tmp_path: Path) -> None:
     )
 
     assert result["verdict"] == "pass"
+    assert result["blocker_reasons"] == []
     assert result["leak_audio"] == ""
     assert json.loads((tmp_path / "score" / "minus_vocals.json").read_text(encoding="utf-8"))["verdict"] == "pass"
 
@@ -370,6 +372,77 @@ def test_no_reference_model_probability_without_leak_audio_stays_pass(tmp_path: 
     assert result["detector_mode"] == "no_reference_neural_v1"
     assert result["contamination_probability"] == 0.99
     assert result["leak_dbfs"] <= result["detection_floor_db"]
+    assert result["leak_audio"] == ""
+
+
+def test_no_reference_other_probability_requires_pair_specific_acoustic_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    def high_probability(**_kwargs: object) -> dict[str, object]:
+        return {
+            "probability": 0.99,
+            "threshold": 0.5,
+            "model_id": "fixture",
+            "model_manifest": str(manifest_path),
+            "features": [],
+            "feature_names": [],
+        }
+
+    monkeypatch.setattr(scorer, "predict_no_reference_probability", high_probability)
+    clean_other = sustained_mid_tone(700.0, amp=0.12) + sustained_mid_tone(1550.0, amp=0.05)
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "other.flac", clean_other),
+        tested_stem="other",
+        foreign_source="vocals",
+        output_dir=tmp_path / "score",
+        foreign_reference_path=None,
+        model_manifest_path=manifest_path,
+        detection_floor_db=-60.0,
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["probability_failed"] is True
+    assert result["acoustic_leak_failed"] is False
+    assert result["acoustic_evidence"]["pair_specific_acoustic_evidence_available"] is False
+    assert result["leak_audio"] == ""
+
+
+def test_no_reference_bass_vocal_probability_requires_pair_specific_acoustic_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    def high_probability(**_kwargs: object) -> dict[str, object]:
+        return {
+            "probability": 0.99,
+            "threshold": 0.5,
+            "model_id": "fixture",
+            "model_manifest": str(manifest_path),
+            "features": [],
+            "feature_names": [],
+        }
+
+    monkeypatch.setattr(scorer, "predict_no_reference_probability", high_probability)
+
+    result = score_stem_contamination(
+        tested_stem_path=write_wav(tmp_path / "bass.flac", harmonic_bass_like()),
+        tested_stem="bass",
+        foreign_source="vocals",
+        output_dir=tmp_path / "score",
+        foreign_reference_path=None,
+        model_manifest_path=manifest_path,
+        detection_floor_db=-60.0,
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["probability_failed"] is True
+    assert result["acoustic_leak_failed"] is False
+    assert result["acoustic_evidence"]["pair_specific_acoustic_evidence_available"] is False
     assert result["leak_audio"] == ""
 
 
@@ -531,6 +604,22 @@ def test_forensic_quiet_drum_imprint_fails_after_stress_probe(tmp_path: Path) ->
     assert "vocal_contains_drum_transient_imprint" in result["blocker_reasons"]
 
 
+def test_forensic_near_floor_drum_aligned_residual_does_not_fail_on_normalized_flux(tmp_path: Path) -> None:
+    drums = cymbal_like_drums(seconds=0.75)
+    near_floor_residual = 0.00005 * drums
+
+    result = score_pair_forensic(
+        tested_stem="vocals",
+        source_stem="drums",
+        tested_path=write_wav(tmp_path / "vocals.flac", near_floor_residual),
+        source_path=write_wav(tmp_path / "drums.flac", drums),
+        output_dir=tmp_path / "forensic",
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["blocker_reasons"] == []
+
+
 def test_forensic_vocal_consonant_transients_without_drum_coherence_pass(tmp_path: Path) -> None:
     clean_vocal = bright_voice_like_vocal(seconds=0.75) + sparse_click_transients(seconds=0.75, starts=(0.08, 0.27, 0.61))
     drums = cymbal_like_drums(seconds=0.75)
@@ -544,7 +633,69 @@ def test_forensic_vocal_consonant_transients_without_drum_coherence_pass(tmp_pat
     )
 
     assert result["verdict"] == "pass"
-    assert result["blocker_reasons"] == []
+
+
+def test_vocal_depercussive_teacher_target_reduces_aligned_drum_imprint(tmp_path: Path) -> None:
+    clean_vocal = bright_voice_like_vocal(seconds=0.75)
+    drums = cymbal_like_drums(seconds=0.75)
+    dirty_vocal = clean_vocal + 0.35 * drums
+    dirty_path = write_wav(tmp_path / "dirty_vocal.flac", dirty_vocal)
+    drums_path = write_wav(tmp_path / "drums.flac", drums)
+
+    before = score_pair_forensic(
+        tested_stem="vocals",
+        source_stem="drums",
+        tested_path=dirty_path,
+        source_path=drums_path,
+        output_dir=tmp_path / "before",
+    )
+    assert before["verdict"] == "fail"
+
+    manifest = build_vocal_depercussive_teacher_target(
+        vocals_path=dirty_path,
+        drums_path=drums_path,
+        output_dir=tmp_path / "target",
+        strength=1.0,
+    )
+
+    assert manifest["contract"]["usable_as_ground_truth"] is False
+    assert manifest["contract"]["delivery_allowed"] is False
+    assert manifest["contract"]["label_type"] == "weak_forensic_teacher"
+    assert manifest["forensic"]["after"]["imprint_score"] < before["imprint_score"]
+    assert Path(manifest["outputs"]["target_vocals_path"]).exists()
+
+
+def test_vocal_depercussive_teacher_target_hard_region_suppression_is_weak_non_gt(tmp_path: Path) -> None:
+    clean_vocal = bright_voice_like_vocal(seconds=0.75)
+    drums = cymbal_like_drums(seconds=0.75)
+    dirty_vocal = clean_vocal + 0.35 * drums
+    dirty_path = write_wav(tmp_path / "dirty_vocal.flac", dirty_vocal)
+    drums_path = write_wav(tmp_path / "drums.flac", drums)
+
+    before = score_pair_forensic(
+        tested_stem="vocals",
+        source_stem="drums",
+        tested_path=dirty_path,
+        source_path=drums_path,
+        output_dir=tmp_path / "before",
+    )
+    manifest = build_vocal_depercussive_teacher_target(
+        vocals_path=dirty_path,
+        drums_path=drums_path,
+        output_dir=tmp_path / "target",
+        strength=0.0,
+        self_hf_attenuation=0.0,
+        region_hf_attenuation=0.0,
+        hard_region_hf_suppression=True,
+    )
+
+    after = manifest["forensic"]["after"]
+    assert manifest["parameters"]["hard_region_hf_suppression"] is True
+    assert manifest["contract"]["label_type"] == "weak_forensic_teacher"
+    assert manifest["contract"]["is_ground_truth"] is False
+    assert manifest["contract"]["usable_as_ground_truth"] is False
+    assert manifest["contract"]["delivery_allowed"] is False
+    assert after["tested_hf_dbfs"] < before["tested_hf_dbfs"]
 
 
 def test_no_reference_unsupported_pair_blocks_unknown(tmp_path: Path) -> None:

@@ -81,6 +81,242 @@ Contract:
   existing debleed/residual repair steps, but it is still a gated repair candidate;
 - if the sequence shifts failure from leakage into reconstruction or damage, the candidate remains
   blocked and the run must write a root-cause queue. It must not create a listen pack.
+- if an applied `stem_region_repair` reports `diagnostics.target_issue_improved=false`, that repair
+  is direct training evidence. The root-cause queue records `root_cause=repair_gap`,
+  `training_action=retrain_failed_repair_checkpoint`, `failed_repair_id`, and
+  `failed_repair_checkpoint` even when the blocker appears only once;
+- residual localization may still be recorded for failed-repair rows, but it must not overwrite the
+  failed repair stem/action. A failed `other:bad_reconstruction` checkpoint must remain an `other`
+  training item even if the delivery-pair residual localizer points elsewhere;
+- root-cause route policy can remove future repair options that reuse a failed repair id or failed
+  checkpoint. This only prevents repeated harmful repair attempts; it cannot accept a candidate.
+- `inspect_root_cause_route_policy.py` can run the same policy filtering as a GPU-free diagnostic.
+  It writes `manifest.json`, `recipe_after_policy.json`, and `progress.jsonl` with
+  `gpu_inference_skipped=true`; the artifact must stay `delivery_allowed=false` and
+  `presentation_status=diagnostic_policy_only`. The manifest records
+  `active_blocked_repair_option_count` so a launch-ready filtered recipe can prove no active repair
+  option still references a blocked repair id/checkpoint;
+- `build_stem_search_launch_manifest.py` converts a filtered recipe into a reproducible launch
+  packet without running separation. It records the recipe sha256, exact in-container command,
+  host Docker command, GPU preflight, target run root, `progress.jsonl`, top-level
+  `gpu_preflight_summary`, `resource_blocker_summary`, `status_summary`, and `summary.md`. The
+  packet is diagnostic-only (`delivery_allowed=false`, `presentation_status=diagnostic_launch_only`) and may say
+  `launch_status=blocked_gpu_preflight` when VRAM is not ready;
+- `run_stem_search_launch_manifest.py` executes a launch packet fail-closed. It verifies the
+  filtered recipe sha256 before doing anything, rechecks GPU preflight, writes execution
+  `progress.jsonl`, honors the packet `wait_for_gpu_free_sec` / `gpu_preflight_poll_sec` with
+  `gpu_preflight_wait` heartbeats, and starts the saved in-container command only when preflight
+  passes. A sha mismatch or still-busy GPU writes a diagnostic execution manifest and `summary.md`
+  with `run_command_started=false`, `result_status=not_started`, the final free/used VRAM snapshot,
+  and best-effort resource blocker evidence;
+- `build_audio_iteration_analysis.py` records the strict source-of-truth pass and idea funnel for
+  the current audio task. It links policy, launch, and launch-execution manifests, writes
+  `ideas.jsonl` and `summary.md`, rejects forbidden ideas (`threshold_relaxation`, `human_review`,
+  blocked-output delivery), and remains diagnostic-only. Once a launch-execution manifest already
+  proves `blocked_gpu_preflight` with `run_command_started=false`, the next selected action becomes
+  `gpu_resource_arbitration` instead of repeating the same wait-capable launch step;
+- `build_gpu_resource_arbitration_plan.py` turns that selected action into a non-destructive
+  arbitration artifact. It may report host/container evidence when available, but it must not stop
+  containers, kill processes, run audio replay, use CPU fallback, or set `delivery_allowed=true`.
+  Its output remains `presentation_status=diagnostic_gpu_resource_arbitration_only`. When an
+  execution manifest already contains `resource_blocker_snapshot`, arbitration must carry that
+  snapshot forward instead of collecting an empty replacement;
+- standalone diagnostic `stem_region_repair_probe.v1` manifests can be ingested into the same
+  root-cause queue with `--probe-manifest`. Probe-derived rows remain `blocked_candidate_mining`
+  evidence with `delivery_allowed=false`; they exist to prevent harmful checkpoint reuse and to feed
+  retraining, not to create listen output.
+
+### Reconstruction-aware repair v2
+
+`ml_worker_improved/tools/analyze_model_split_reconstruction_residual.py`,
+`ml_worker_improved/tools/build_stem_repair_hardcase_benchmark.py`, and
+`ml_worker_improved/tools/validate_stem_repair_checkpoint.py` move repeated blockers from
+"more rejected candidates" into training-ready evidence.
+
+Contract:
+
+- `bad_reconstruction` rows must be localized against the actual audio residual when possible.
+  The queue row records `affected_stem`, `residual_region`, `route_family`, and
+  `residual_localization` instead of leaving the defect anonymous;
+- infra-failed route families are marked `quarantined_for_next_run=true` so the next replay can
+  avoid spending candidates on known unavailable routes;
+- reconstruction-aware repair rows can carry `sibling_stem_paths`, `reconstruction_surface`,
+  `target_surface`, and `root_cause_row_id`;
+- repair training can use `mix_conservation_loss_weight`, `sibling_preserve_loss_weight`, and
+  `stem_sum_loss_weight`, but these losses are training signals only. They do not relax delivery
+  gates and do not authorize listen output;
+- hardcase benchmark rows built from blocked candidates are mining/holdout evidence only:
+  `is_ground_truth=false`, `usable_for_promotion=false`, `delivery_allowed=false`;
+- checkpoint validation writes explicit before/after rows. Improvement on a target defect is not a
+  release claim unless the normal delivery contract still passes afterward;
+- generated separator output and blocked candidates cannot become exact ground truth.
+
+## Learned route policy v1
+
+`ml_worker_improved/tools/stem_route_policy_common.py`,
+`ml_worker_improved/tools/build_stem_route_policy_dataset.py`,
+`ml_worker_improved/tools/train_stem_route_policy_model.py`, and
+`ml_worker_improved/tools/validate_stem_route_policy_checkpoint.py` define the first learned
+route/action controller for stem separation.
+
+Contract:
+
+- the policy model never writes repaired waveform audio;
+- the policy can only recommend bounded route actions such as `prioritize_route`,
+  `quarantine_route`, lane switches, repair-option enablement, or template retuning;
+- no policy action can set `delivery_allowed=true`;
+- unknown or invalid policy actions resolve fail-closed to `block_unknown`;
+- generated separator outputs and blocked candidates cannot become exact ground truth;
+- route-changing oracle labels require counterfactual before/after evidence. Without that evidence,
+  repeated defects such as `bad_reconstruction` remain `block_unknown` training rows;
+- observed-run counterfactual evidence may be used only when an already executed alternative
+  candidate in the same window reaches a later gate stage and has extractable route provenance.
+  Missing route provenance does not create a route-switch label;
+- runner mode `shadow` only records `route_policy_*` fields in candidate manifests;
+- runner mode `rank` may reorder candidate attempts, but it cannot bypass reconstruction, damage,
+  voice-presence, contamination, cross-stem forensic, or listen-pack revalidation gates;
+- `rank` success is measured first as safer candidate ordering / reduced wasted attempts. It is not
+  an audio acceptance claim unless the normal delivery contract accepts the final listen pack;
+- `stem_region_repair` remains experimental/diagnostic unless separately promoted by its own
+  validation contract.
+
+## Persistent separator backend
+
+`ml_worker_improved/tools/persistent_separator_backend.py` and
+`ml_worker_improved/tools/serve_persistent_separator.py` define the vLLM-style runtime optimization
+layer for audio separation routes.
+
+Contract:
+
+- text LLMs and literal vLLM serving are not the audio separator. Demucs, MDX23C, MelBand,
+  BS-RoFormer, SCNet, and registered audio routes still produce stems;
+- `run_fully_automatic_stem_search.py --separator-backend subprocess` remains the default path;
+- `--separator-backend persistent-server` may send target-specific lane commands to
+  `POST /separate` on the `separator-server` Docker profile;
+- the persistent backend can cache route outputs and keep a long-lived serving process, but it
+  cannot set `delivery_allowed=true` and cannot bypass reconstruction, damage, voice-presence,
+  contamination, cross-stem forensic, or listen-pack revalidation gates;
+- resident in-process execution is available only for explicitly registered route IDs. The current
+  `resident_fixture_copy` route is a POC contract test: it proves warm executor metadata,
+  fail-closed manifests, and non-subprocess execution, not production separation quality. Because it
+  is a CPU-copy fixture, it blocks when `require_gpu=true` and records `gpu_inference_skipped=true`;
+- real audio-separator resident execution is opt-in via `prefer_resident=true` for registered
+  `audio_separator_*` vocal routes. The adapter keeps one long-lived JSONL worker process per
+  model/parameter key, loads the Audio Separator model once inside that worker, and reuses it across
+  requests. It still records `external_runtime_subprocess_used=true` because the Audio Separator
+  package lives in its own Python runtime, but successful resident responses must report
+  `persistent_worker_process_used=true` and `per_request_external_runtime_subprocess_used=false`;
+- MelBand/Becruily resident execution is opt-in via `prefer_resident=true` for
+  `melband_roformer_vocals` and `becruily_instrumental_vocals` route families. It keeps a
+  long-lived MelBand worker process with the loaded torch model/config and reuses it across
+  requests. It does not accept delivery and must still report `delivery_allowed=false`;
+- `model_split_v2` default recipes set `prefer_resident=true` automatically for
+  `audio_separator_bs_roformer_vocals`, `melband_roformer_vocals`, and
+  `becruily_instrumental_vocals` vocal/instrumental lane routes;
+- `model_split_v2` may explicitly opt in to fail fast after vocal/minus lane execution when
+  `vocals + minus` already fails delivery-pair reconstruction and no repair/debleed/merge mutation
+  or composite search path could change that pair.
+  This is an execution shortcut only: it blocks the candidate with `delivery_allowed=false` and skips
+  six-stem/support routes; it never accepts audio or relaxes later gates;
+- per-route runtime budgets are part of the separator backend provenance. `mdx23c_vocals` and
+  `mdx23c_vocals:instrumental` use a bounded 6-second-window budget so a slow subprocess becomes an
+  explicit timeout/infra blocker instead of stalling the whole candidate loop;
+- `--route-budget-profile full` is the default. `--route-budget-profile fast` is an explicit
+  diagnostic/benchmark profile that caps known slow route families such as MDX23C, MelBand/Becruily,
+  and SCNet more aggressively. It cannot accept a candidate, skip delivery gates, or mark timed-out
+  audio as a result;
+- unsupported route IDs remain explicit subprocess routes and must report
+  `resident_backend_used=false`. Cache hits preserve the original backend provenance;
+- `/health` exposes resident executor readiness and `model_load_count` so model warmup/cache state is
+  observable before long candidate loops;
+- cache keys are short hash aliases and must not contain raw track titles, raw paths, or long route
+  identifiers in artifact path segments;
+- when `require_gpu=true`, CPU fallback is forbidden. A missing or failing persistent server is
+  recorded as `infra_gap` / `blocked_unknown`, not accepted fallback audio;
+- the optional Docker service is profile-gated as `audio-persistent-separator` and is independent
+  from the optional `llm-vllm` text-controller service.
+
+## Runtime observability and GPU preflight
+
+`run_fully_automatic_stem_search.py` must not run long audio routes as a black box.
+
+Contract:
+
+- CLI runs mirror `progress.jsonl` events to stderr by default. `--no-echo-progress` is allowed only
+  for controlled cases where another monitor tails `progress.jsonl`;
+- every run still writes `progress.jsonl` with `start`, `gpu_preflight`, candidate/window events, and
+  final `end`;
+- CLI runs use `--min-gpu-free-mib` with a conservative default before starting candidate
+  generation. If `require_gpu=true` and free VRAM is below that value, the run blocks before the
+  candidate loop with `root_cause=infra_gap`, `failed_checks=["gpu_preflight_failed"]`,
+  `delivery_allowed=false`, and no listen pack;
+- CLI runs may use `--wait-for-gpu-free-sec` with `--gpu-preflight-poll-sec` to wait for VRAM before
+  candidate generation. Each wait poll writes `gpu_preflight_wait` to `progress.jsonl`/stderr.
+  If the wait expires, the run still blocks fail-closed before candidates and records the final GPU
+  preflight evidence;
+- `run_stem_search_launch_manifest.py` may override a saved launch packet's wait with
+  `--wait-for-gpu-free-sec` / `--gpu-preflight-poll-sec`. This is an auto-resume convenience only:
+  it cannot relax `min_gpu_free_mib`, cannot start on CPU, and cannot mark blocked output as a
+  result;
+- launch and launch-execution artifacts must expose the current resource blocker without requiring
+  manual JSONL parsing: `gpu_preflight_summary`, `resource_blocker_snapshot`,
+  `resource_blocker_summary`, `status_summary`, and `summary.md` must say whether the command
+  started, whether a result was produced, the final `free_mib/used_mib/total_mib` snapshot, and
+  whether container-level Docker stats were available from the current execution environment;
+- launch manifest creation must write `resource_snapshot_start` and `resource_snapshot_end` progress
+  events, and launch execution must write `resource_snapshot_start` before collecting blockers, so
+  slow container attribution cannot make the process look silent;
+- when `ml-worker` cannot access host Docker CLI/socket, it must record
+  `docker_container_stats_available=false` with a reason such as `docker_cli_unavailable`; this is
+  evidence coverage, not a successful offender attribution;
+- when Docker CLI is unavailable but `/var/run/docker.sock` is mounted, the resource snapshot may use
+  Docker Engine API as `docker_container_stats_source=docker_engine_socket` to populate container
+  memory names inside the Docker-only launch path;
+- saved `docker_compose_command_host` entries in launch manifests must include the Docker socket
+  mount so rerunning a saved launch keeps the same container attribution path;
+- `build_host_resource_snapshot.py` is the diagnostic-only fallback for that case. It reads
+  host-visible `nvidia-smi`, `docker stats`, and `docker ps`, writes `manifest.json`,
+  `resource.json`, `progress.jsonl`, and `summary.md`, and stays
+  `presentation_status=diagnostic_host_resource_snapshot_only`. It must not start audio replay,
+  stop containers, kill processes, or set `delivery_allowed=true`;
+- GPU preflight is runtime provenance only. It does not relax delivery gates and cannot turn a bad
+  audio candidate into an accepted result.
+
+## Trainable stem refiner cycle
+
+`ml_worker_improved/tools/run_trainable_stem_refiner_cycle.py` is the minimal weight-changing
+audio path. It creates a focused synthetic stem defect, trains `stem_region_repair_model` with a
+real torch `state_dict`, applies the checkpoint, and writes explicit before/after evidence.
+
+Contract:
+
+- this stage changes model weights, not route ordering only;
+- the cycle must write `model/model.pt`, `history.json`, `before_after.json`, and short audio aliases
+  under `audio/`;
+- success requires target-region error to decrease after applying the checkpoint while outside-region
+  change stays near zero;
+- generated repaired audio remains diagnostic only:
+  `delivery_allowed=false`, `presentation_status=blocked_from_listen_pack`;
+- this is the first training proof for the audio refiner, not a final production listen result.
+
+## Teacher-mask checkpoint candidate routes
+
+`ml_worker_improved/tools/apply_teacher_mask_checkpoint_candidate.py` lets a learned
+teacher-mask separator checkpoint enter `model_split_v2` as a normal target-specific candidate route.
+
+Contract:
+
+- the checkpoint route applies `train_teacher_mask_separator.py` checkpoint weights to the current
+  window without a teacher target;
+- supported v1 route roles are `vocals`, `minus`, `drums_support`, `bass_support`,
+  `guitar_support`, `piano_support`, and `other_support`;
+- `run_fully_automatic_stem_search.py --teacher-mask-checkpoint role:stem:checkpoint_path`
+  injects the route into the candidate pool;
+- the route writes only candidate/debug metadata and sets `delivery_allowed=false`;
+- the runner can accept audio from this route only after the existing reconstruction, damage,
+  voice-presence, contamination, cross-stem forensic, and listen-pack revalidation gates pass;
+- teacher-mask checkpoint application is not a fallback-as-success path and cannot bypass holdout
+  or delivery contracts.
 
 ## Scope
 

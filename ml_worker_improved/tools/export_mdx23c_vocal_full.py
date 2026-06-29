@@ -33,6 +33,7 @@ MODEL_ID = "mdx23c_vocals"
 MODEL_DISPLAY_NAME = "MDX23C vocal checkpoint"
 MODEL_INPUT_STEM = "full_track"
 MODEL_TYPE = "mdx23c"
+DEFAULT_MDX23C_TIMEOUT_SEC = 180
 
 
 def _emit(message: str) -> None:
@@ -208,6 +209,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", default=str(DEFAULT_MODEL_PATH))
     parser.add_argument("--device-id", type=int, default=0)
     parser.add_argument("--num-overlap", type=int, default=4)
+    parser.add_argument("--timeout-sec", type=int, default=DEFAULT_MDX23C_TIMEOUT_SEC)
     parser.add_argument("--listen-dir")
     parser.add_argument("--listen-label", default="01_mdx23c_vocals_full.flac")
     return parser
@@ -254,7 +256,12 @@ def main() -> None:
         full_input_path = input_dir / f"{MODEL_INPUT_STEM}.wav"
         runtime_config_path = config_dir / "config_runtime.yaml"
 
-        _emit(f"ENTER source_audio={source_audio_path} output_dir={output_dir} full_track=true")
+        if int(args.timeout_sec) <= 0:
+            raise ValueError(f"MDX23C timeout must be positive: {args.timeout_sec}")
+        _emit(
+            f"ENTER source_audio={source_audio_path} output_dir={output_dir} "
+            f"full_track=true timeout_sec={int(args.timeout_sec)}"
+        )
         sample_rate, frames = save_audio_window_as_wav(
             source_audio_path,
             full_input_path,
@@ -284,13 +291,23 @@ def main() -> None:
             "{file_name}/{instr}",
             "--extract_instrumental",
         ]
-        completed = subprocess.run(
-            command,
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=int(args.timeout_sec),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.output or ""
+            stderr = exc.stderr or ""
+            if stdout:
+                print(stdout, end="" if str(stdout).endswith("\n") else "\n", flush=True)
+            if stderr:
+                print(stderr, end="" if str(stderr).endswith("\n") else "\n", flush=True)
+            raise RuntimeError(f"mdx23c_subprocess_timeout timeout_sec={int(args.timeout_sec)}") from exc
         if completed.stdout.strip():
             print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n", flush=True)
         if completed.stderr.strip():

@@ -22,9 +22,38 @@ if __package__ in {None, ""}:
 
 from tools.score_stem_contamination import score_stem_contamination
 from tools.build_training_first_root_cause_queue import build_root_cause_queue
-from tools.stem_forensic_crosscheck import score_cross_stem_forensic_matrix, validate_listen_pack_forensic
-from tools.stem_region_repair_common import ISSUE_STEREO_COLLAPSE, make_region_mask
+from tools.stem_forensic_crosscheck import (
+    score_cross_stem_forensic_matrix,
+    score_pair_forensic,
+    validate_listen_pack_forensic,
+)
+from tools.stem_region_repair_common import (
+    ISSUE_BAD_RECONSTRUCTION,
+    ISSUE_INSTRUMENT_LEAK,
+    ISSUE_STEREO_COLLAPSE,
+    make_region_mask,
+)
 from tools.stem_region_repair_model import apply_region_repair_model, load_region_repair_checkpoint
+from tools.stem_route_policy_common import (
+    ACTION_BLOCK_UNKNOWN,
+    ACTION_PRIORITIZE_ROUTE,
+    ACTION_QUARANTINE_ROUTE,
+    ACTIONS as ROUTE_POLICY_ACTIONS,
+    extract_lane_routes,
+    extract_route_signature,
+    normalize_policy_action,
+)
+from tools.stem_route_policy_model import load_stem_route_policy_checkpoint, score_policy_row
+from tools.persistent_separator_backend import (
+    MODE_PERSISTENT_SERVER,
+    MODE_SUBPROCESS,
+    PersistentSeparatorClient,
+    PersistentSeparatorRejected,
+    PersistentSeparatorUnavailable,
+    SeparatorBackendConfig,
+    make_separator_backend_config,
+    separator_cache_key,
+)
 from tools.stem_contamination_common import (
     FORBIDDEN_SOURCES,
     NON_VOCAL_STEMS,
@@ -35,24 +64,58 @@ from tools.stem_contamination_common import (
     validate_no_artifact_rag_output,
 )
 from tools.stem_contamination_model import band_limited_audio
+from tools.build_vocal_depercussive_teacher_target import _repair_regions as _repair_vocal_depercussive_regions
+from worker.model_registry import default_model_registry
 
 
 CommandRunner = Callable[[list[str], int], None]
 DEFAULT_CONTAMINATION_MODEL_SEARCH_ROOTS = (
     Path("/project_artifacts/stem_eval"),
     Path("/host_artifacts/stem_eval"),
+    Path("/repo/artifacts/stem_eval"),
     Path("artifacts/stem_eval"),
+    Path("../artifacts/stem_eval"),
 )
 TARGET_SPECIFIC_ROLE_OUTPUTS = {
     "six_stems": tuple(STEMS),
     "vocals": ("vocals",),
     "minus": ("minus",),
+    "drums_support": ("drums",),
     "bass_support": ("bass",),
+    "guitar_support": ("guitar",),
+    "piano_support": ("piano",),
+    "other_support": ("other",),
     "non_vocal_support": ("drums", "bass", "other"),
     "four_stem_non_vocal": ("drums", "bass", "other"),
     "non_vocal_stems": tuple(NON_VOCAL_STEMS),
 }
 MODEL_SPLIT_V2_PROFILE = "model_split_v2"
+MODEL_SPLIT_V2_DELIVERY_PAIR_ROLES = {"vocals", "minus"}
+MODEL_SPLIT_V2_FAIL_FAST_MUTATION_KEYS = (
+    "minus_vocal_debleed",
+    "vocal_projection_debleed",
+    "conservation_repair_stem",
+    "stem_merges",
+    "post_minus_vocal_debleed",
+    "model_split_composite_repair_options",
+)
+ROUTE_TIMEOUT_OVERRIDES_SEC = {
+    "mdx23c_vocals": 45,
+    "mdx23c_vocals:instrumental": 45,
+}
+ROUTE_BUDGET_PROFILE_FULL = "full"
+ROUTE_BUDGET_PROFILE_FAST = "fast"
+ROUTE_BUDGET_PROFILES = (ROUTE_BUDGET_PROFILE_FULL, ROUTE_BUDGET_PROFILE_FAST)
+FAST_ROUTE_TIMEOUT_OVERRIDES_SEC = {
+    "mdx23c_vocals": 30,
+    "mdx23c_vocals:instrumental": 30,
+    "becruily_instrumental_vocals": 30,
+    "becruily_instrumental_vocals:instrumental": 30,
+    "melband_roformer_vocals": 30,
+    "melband_roformer_vocals:instrumental": 30,
+    "scnet_xl_ihf_musdb18:bass": 30,
+    "scnet_xl_ihf_musdb18:drums_bass_other": 30,
+}
 DEFAULT_VOCAL_ROUTE_ORDER = (
     "audio_separator_bs_roformer_vocals",
     "mdx23c_vocals",
@@ -72,6 +135,7 @@ MODEL_SPLIT_V2_MINUS_LANE = (
     "mdx23c_vocals:instrumental",
     "htdemucs_ft:instrumental",
 )
+DEFAULT_MIN_GPU_FREE_MIB = 4096
 MODEL_SPLIT_V2_STEM_LANE = (
     "htdemucs_6s",
     "hybrid_htdemucs_ft_bs_roformer_6s",
@@ -83,6 +147,22 @@ MODEL_SPLIT_V2_BASS_SUPPORT_LANE = (
 MODEL_SPLIT_V2_NON_VOCAL_SUPPORT_LANE = (
     "scnet_xl_ihf_musdb18:drums_bass_other",
 )
+TEACHER_MASK_CHECKPOINT_ROLES = (
+    "vocals",
+    "minus",
+    "drums_support",
+    "bass_support",
+    "guitar_support",
+    "piano_support",
+    "other_support",
+)
+MODEL_SPLIT_V2_REGISTERED_ROUTE_BASES = {
+    "bs_mamba2_vocals",
+    "htdemucs_ft",
+    "hybrid_htdemucs_ft_bs_roformer_6s",
+    "hybrid_htdemucs_ft_bs_roformer_6s_aggressive_melody_first",
+    "scnet_xl_ihf_musdb18",
+}
 DEFAULT_VOCAL_ROUTE_REQUIRED_PATHS = {
     "audio_separator_bs_roformer_vocals": (
         "/app/tools/export_audio_separator_vocal_full.py",
@@ -122,8 +202,73 @@ def _remove_listen_pack(output_dir: Path) -> None:
 
 def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(payload, sort_keys=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        handle.write(line + "\n")
+    if _parse_bool(os.environ.get("STEM_SEARCH_ECHO_PROGRESS", "0")):
+        print(line, file=sys.stderr, flush=True)
+
+
+def _collect_cuda_preflight(*, require_gpu: bool, min_free_mib: int) -> dict[str, Any]:
+    checked_min_free_mib = int(max(0, min_free_mib))
+    preflight: dict[str, Any] = {
+        "schema": "stem_search_cuda_preflight.v1",
+        "require_gpu": bool(require_gpu),
+        "min_free_mib": checked_min_free_mib,
+        "status": "not_required",
+        "reason": "",
+    }
+    if not require_gpu:
+        return preflight
+    if checked_min_free_mib <= 0:
+        preflight.update({"status": "not_checked", "reason": "min_free_mib_not_set"})
+        return preflight
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free,memory.total,utilization.gpu,name",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        preflight.update({"status": "blocked", "reason": "nvidia_smi_unavailable", "error": str(exc)})
+        return preflight
+    if completed.returncode != 0:
+        preflight.update(
+            {
+                "status": "blocked",
+                "reason": "nvidia_smi_failed",
+                "stderr": completed.stderr.strip()[:500],
+            }
+        )
+        return preflight
+    first_row = next((line.strip() for line in completed.stdout.splitlines() if line.strip()), "")
+    fields = [field.strip() for field in first_row.split(",", 3)]
+    if len(fields) < 4:
+        preflight.update({"status": "blocked", "reason": "nvidia_smi_unparseable", "stdout": first_row[:500]})
+        return preflight
+    free_mib = int(float(fields[0]))
+    total_mib = int(float(fields[1]))
+    utilization_pct = int(float(fields[2]))
+    preflight.update(
+        {
+            "free_mib": free_mib,
+            "total_mib": total_mib,
+            "used_mib": max(0, total_mib - free_mib),
+            "utilization_pct": utilization_pct,
+            "device_name": fields[3],
+        }
+    )
+    if free_mib < checked_min_free_mib:
+        preflight.update({"status": "blocked", "reason": "gpu_free_memory_too_low"})
+    else:
+        preflight.update({"status": "passed", "reason": ""})
+    return preflight
 
 
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:
@@ -394,6 +539,45 @@ def _registered_model_command_template(model_id: str, *, target_stem: str | None
     return command
 
 
+def _teacher_mask_checkpoint_command_template(*, checkpoint: str, stem: str) -> list[str]:
+    return [
+        "python",
+        "tools/apply_teacher_mask_checkpoint_candidate.py",
+        "{input_audio}",
+        "{stems_dir}",
+        "--checkpoint",
+        checkpoint,
+        "--stem",
+        stem,
+        "--device",
+        "cuda",
+    ]
+
+
+def _registered_route_is_available(route_id: str) -> bool:
+    base_route = str(route_id or "").split(":", 1)[0]
+    if base_route not in MODEL_SPLIT_V2_REGISTERED_ROUTE_BASES:
+        return True
+    try:
+        registry = default_model_registry()
+        entry = registry.get(base_route)
+        return registry.availability(entry).status == "available"
+    except Exception:
+        return False
+
+
+def _filter_available_model_split_routes(routes: Sequence[str]) -> tuple[str, ...]:
+    return tuple(route for route in routes if _registered_route_is_available(route))
+
+
+def _prefers_resident_separator(route_id: str) -> bool:
+    return str(route_id or "").split(":", 1)[0] in {
+        "audio_separator_bs_roformer_vocals",
+        "becruily_instrumental_vocals",
+        "melband_roformer_vocals",
+    }
+
+
 def _minus_lane_command_template(route_id: str) -> list[str]:
     base_route = route_id.split(":", 1)[0]
     if base_route == "bs_mamba2_vocals":
@@ -443,6 +627,28 @@ def _model_split_stem_region_repair_options(
     options: list[dict[str, Any]] = []
     if not stem_region_repair_checkpoints:
         return options
+
+    def repair_config(*, raw_checkpoint: Mapping[str, Any], stem: str, issue_type: str, checkpoint: str) -> dict[str, Any]:
+        config: dict[str, Any] = {"stem": stem, "issue_type": issue_type, "checkpoint": checkpoint}
+        if stem == "minus" and issue_type == "vocal_leak":
+            config["mix_preserve_companion_stem"] = "vocals"
+        for key in (
+            "forensic_source_condition_stem",
+            "mix_preserve_companion_stem",
+            "delivery_pair_compensation_strength",
+            "forensic_high_band_hz",
+        ):
+            value = raw_checkpoint.get(key)
+            if value not in (None, ""):
+                config[key] = value
+        region = raw_checkpoint.get("region")
+        if isinstance(region, Mapping):
+            config["region"] = {
+                "start_sec": float(region.get("start_sec", 0.0)),
+                "end_sec": float(region.get("end_sec", 0.0)),
+            }
+        return config
+
     sequence_configs: list[dict[str, str]] = []
     for index, raw_checkpoint in enumerate(stem_region_repair_checkpoints, start=1):
         if not isinstance(raw_checkpoint, Mapping):
@@ -456,25 +662,20 @@ def _model_split_stem_region_repair_options(
             str(raw_checkpoint.get("repair_id") or f"sr{index:03d}"),
             fallback=f"sr{index:03d}",
         )
-        sequence_configs.append({"stem": stem, "issue_type": issue_type, "checkpoint": checkpoint})
+        config = repair_config(raw_checkpoint=raw_checkpoint, stem=stem, issue_type=issue_type, checkpoint=checkpoint)
+        sequence_configs.append(dict(config))
         options.append(
             {
                 "repair_id": repair_id,
                 "type": "stem_region_repair",
-                "stem": stem,
-                "issue_type": issue_type,
-                "checkpoint": checkpoint,
+                **config,
             }
         )
         options.append(
             {
                 "repair_id": f"{repair_id}_vp100",
                 "type": "stem_region_repair+vocal_projection_debleed",
-                "stem_region_repair": {
-                    "stem": stem,
-                    "issue_type": issue_type,
-                    "checkpoint": checkpoint,
-                },
+                "stem_region_repair": dict(config),
                 "vocal_projection_debleed": {
                     "strength": 1.0,
                     "target_stems": list(NON_VOCAL_STEMS),
@@ -486,11 +687,7 @@ def _model_split_stem_region_repair_options(
             {
                 "repair_id": f"{repair_id}_vp100_pr16",
                 "type": "stem_region_repair+vocal_projection_debleed+delivery_pair_residual",
-                "stem_region_repair": {
-                    "stem": stem,
-                    "issue_type": issue_type,
-                    "checkpoint": checkpoint,
-                },
+                "stem_region_repair": dict(config),
                 "vocal_projection_debleed": {
                     "strength": 1.0,
                     "target_stems": list(NON_VOCAL_STEMS),
@@ -504,6 +701,52 @@ def _model_split_stem_region_repair_options(
     if len(sequence_configs) > 1:
         options.insert(
             0,
+            {
+                "repair_id": "srseq",
+                "type": "stem_region_repair",
+                "stem_region_repairs": sequence_configs,
+            },
+        )
+        options.insert(
+            1,
+            {
+                "repair_id": "srseq_bs400",
+                "type": "stem_region_repair+bass_stereo_width",
+                "stem_region_repairs": sequence_configs,
+                "bass_stereo_width": {
+                    "side_gain": 4.0,
+                },
+            },
+        )
+        options.insert(
+            2,
+            {
+                "repair_id": "srseq_vp100",
+                "type": "stem_region_repair+vocal_projection_debleed",
+                "stem_region_repairs": sequence_configs,
+                "vocal_projection_debleed": {
+                    "strength": 1.0,
+                    "target_stems": list(NON_VOCAL_STEMS),
+                },
+            },
+        )
+        options.insert(
+            3,
+            {
+                "repair_id": "srseq_vp100_bs400",
+                "type": "stem_region_repair+vocal_projection_debleed+bass_stereo_width",
+                "stem_region_repairs": sequence_configs,
+                "vocal_projection_debleed": {
+                    "strength": 1.0,
+                    "target_stems": list(NON_VOCAL_STEMS),
+                },
+                "bass_stereo_width": {
+                    "side_gain": 4.0,
+                },
+            },
+        )
+        options.insert(
+            4,
             {
                 "repair_id": "srseq_vp100_pr16",
                 "type": "stem_region_repair+vocal_projection_debleed+delivery_pair_residual",
@@ -521,12 +764,47 @@ def _model_split_stem_region_repair_options(
     return options
 
 
+def _model_split_teacher_mask_checkpoint_routes(
+    checkpoints: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    routes: list[dict[str, Any]] = []
+    for index, checkpoint in enumerate(checkpoints or [], start=1):
+        role = str(checkpoint.get("role") or "").strip()
+        stem = str(checkpoint.get("stem") or "").strip()
+        checkpoint_path = str(checkpoint.get("checkpoint") or "").strip()
+        if role not in TEACHER_MASK_CHECKPOINT_ROLES:
+            raise ValueError(f"unsupported teacher-mask checkpoint role: {role}")
+        if not stem or not checkpoint_path:
+            raise ValueError("teacher-mask checkpoint route requires stem and checkpoint")
+        expected_outputs = TARGET_SPECIFIC_ROLE_OUTPUTS.get(role, ())
+        if stem not in expected_outputs:
+            raise ValueError(f"teacher-mask checkpoint stem {stem} does not match role {role}")
+        route_id = _safe_artifact_segment(
+            str(checkpoint.get("route_id") or f"teacher_mask_{role}_{index:03d}"),
+            fallback=f"tm{index:03d}",
+        )
+        routes.append(
+            {
+                "role": role,
+                "lane": "teacher_mask_checkpoint_lane",
+                "route_id": route_id,
+                "teacher_mask_checkpoint_path": checkpoint_path,
+                "command_template": _teacher_mask_checkpoint_command_template(
+                    checkpoint=checkpoint_path,
+                    stem=stem,
+                ),
+            }
+        )
+    return routes
+
+
 def build_model_split_v2_recipe(
     *,
     demucs_available: bool | None = None,
     available_vocal_routes: tuple[str, ...] | None = None,
     contamination_model_manifest: Path | str | None = None,
     stem_region_repair_checkpoints: Sequence[Mapping[str, Any]] | None = None,
+    teacher_mask_checkpoints: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if demucs_available is None:
         demucs_available = shutil.which("demucs") is not None
@@ -540,22 +818,46 @@ def build_model_split_v2_recipe(
             "candidates": [],
         }
 
+    model_split_vocal_lane = _filter_available_model_split_routes(MODEL_SPLIT_V2_VOCAL_LANE)
+    model_split_minus_lane = _filter_available_model_split_routes(MODEL_SPLIT_V2_MINUS_LANE)
+    model_split_stem_lane = _filter_available_model_split_routes(MODEL_SPLIT_V2_STEM_LANE)
+    model_split_bass_support_lane = _filter_available_model_split_routes(MODEL_SPLIT_V2_BASS_SUPPORT_LANE)
+    model_split_non_vocal_support_lane = _filter_available_model_split_routes(MODEL_SPLIT_V2_NON_VOCAL_SUPPORT_LANE)
+    if not model_split_vocal_lane or not model_split_minus_lane or not model_split_stem_lane:
+        return {
+            "schema": "stem_search_recipe.v2",
+            "profile": MODEL_SPLIT_V2_PROFILE,
+            "recipe_source": "model_split_v2",
+            "available": False,
+            "unavailable_reason": "missing_available_model_split_lane",
+            "candidates": [],
+            "target_specific_routes": {
+                "vocal_lane": list(model_split_vocal_lane),
+                "minus_lane": list(model_split_minus_lane),
+                "stem_lane": list(model_split_stem_lane),
+                "bass_support_lane": list(model_split_bass_support_lane),
+                "non_vocal_support_lane": list(model_split_non_vocal_support_lane),
+            },
+        }
+
     vocal_lane = tuple(
         route for route in MODEL_SPLIT_V2_VOCAL_LANE if available_vocal_routes is None or route in set(available_vocal_routes)
     )
+    vocal_lane = tuple(route for route in vocal_lane if route in set(model_split_vocal_lane))
     if available_vocal_routes is not None:
         # Keep the contract-visible lane list stable even when callers restrict
         # the first executable routes in tests or diagnostics.
-        vocal_lane_manifest = tuple(MODEL_SPLIT_V2_VOCAL_LANE)
+        vocal_lane_manifest = tuple(model_split_vocal_lane)
     else:
-        vocal_lane_manifest = tuple(MODEL_SPLIT_V2_VOCAL_LANE)
-    executable_vocal_lane = vocal_lane or tuple(MODEL_SPLIT_V2_VOCAL_LANE)
+        vocal_lane_manifest = tuple(model_split_vocal_lane)
+    executable_vocal_lane = vocal_lane or tuple(model_split_vocal_lane)
     learned_repair_options = _model_split_stem_region_repair_options(stem_region_repair_checkpoints)
+    teacher_mask_routes = _model_split_teacher_mask_checkpoint_routes(teacher_mask_checkpoints)
     candidates: list[dict[str, Any]] = []
     for index in range(10):
-        stem_route = MODEL_SPLIT_V2_STEM_LANE[index % len(MODEL_SPLIT_V2_STEM_LANE)]
+        stem_route = model_split_stem_lane[index % len(model_split_stem_lane)]
         vocal_route = executable_vocal_lane[index % len(executable_vocal_lane)]
-        minus_route = MODEL_SPLIT_V2_MINUS_LANE[index % len(MODEL_SPLIT_V2_MINUS_LANE)]
+        minus_route = model_split_minus_lane[index % len(model_split_minus_lane)]
         minus_output_map = {"minus": "minus" if minus_route.startswith("htdemucs_ft") else "instrumental"}
         candidate_id = f"c{index + 1:03d}"
         target_specific_commands = [
@@ -569,6 +871,7 @@ def build_model_split_v2_recipe(
                 "role": "vocals",
                 "lane": "vocal_lane",
                 "route_id": vocal_route,
+                "prefer_resident": _prefers_resident_separator(vocal_route),
                 "command_template": _vocal_route_command_template(vocal_route),
             },
             {
@@ -576,34 +879,42 @@ def build_model_split_v2_recipe(
                 "lane": "minus_lane",
                 "route_id": minus_route,
                 "output_map": minus_output_map,
+                "prefer_resident": _prefers_resident_separator(minus_route),
                 "command_template": _minus_lane_command_template(minus_route),
             },
         ]
         if index == 1:
-            bass_support_route = MODEL_SPLIT_V2_BASS_SUPPORT_LANE[0]
-            target_specific_commands.append(
-                {
-                    "role": "bass_support",
-                    "lane": "bass_support_lane",
-                    "route_id": bass_support_route,
-                    "command_template": _bass_support_lane_command_template(bass_support_route),
-                }
-            )
+            if model_split_bass_support_lane:
+                bass_support_route = model_split_bass_support_lane[0]
+                target_specific_commands.append(
+                    {
+                        "role": "bass_support",
+                        "lane": "bass_support_lane",
+                        "route_id": bass_support_route,
+                        "command_template": _bass_support_lane_command_template(bass_support_route),
+                    }
+                )
         if index in {0, 2}:
-            support_route = MODEL_SPLIT_V2_NON_VOCAL_SUPPORT_LANE[0]
-            target_specific_commands.append(
-                {
-                    "role": "non_vocal_support",
-                    "lane": "non_vocal_support_lane",
-                    "route_id": support_route,
-                    "command_template": _non_vocal_support_lane_command_template(support_route),
-                }
-            )
+            if model_split_non_vocal_support_lane:
+                support_route = model_split_non_vocal_support_lane[0]
+                target_specific_commands.append(
+                    {
+                        "role": "non_vocal_support",
+                        "lane": "non_vocal_support_lane",
+                        "route_id": support_route,
+                        "command_template": _non_vocal_support_lane_command_template(support_route),
+                    }
+                )
+        if teacher_mask_routes:
+            target_specific_commands.extend(teacher_mask_routes)
         candidates.append(
             {
                 "candidate_id": candidate_id,
                 "profile": MODEL_SPLIT_V2_PROFILE,
-                "route_family": f"model_split_v2_{stem_route}_{vocal_route}_{minus_route.replace(':', '_')}",
+                "route_family": (
+                    f"model_split_v2_{stem_route}_{vocal_route}_{minus_route.replace(':', '_')}"
+                    + ("_teacher_mask_checkpoint" if teacher_mask_routes else "")
+                ),
                 "required_stems": list(STEMS),
                 "minus_source": "minus_lane",
                 "minus_rebuilt_from_non_vocal_stems": False,
@@ -733,10 +1044,13 @@ def build_model_split_v2_recipe(
         "available": True,
         "target_specific_routes": {
             "vocal_lane": list(vocal_lane_manifest),
-            "minus_lane": list(MODEL_SPLIT_V2_MINUS_LANE),
-            "stem_lane": list(MODEL_SPLIT_V2_STEM_LANE),
-            "bass_support_lane": list(MODEL_SPLIT_V2_BASS_SUPPORT_LANE),
-            "non_vocal_support_lane": list(MODEL_SPLIT_V2_NON_VOCAL_SUPPORT_LANE),
+            "minus_lane": list(model_split_minus_lane),
+            "stem_lane": list(model_split_stem_lane),
+            "bass_support_lane": list(model_split_bass_support_lane),
+            "non_vocal_support_lane": list(model_split_non_vocal_support_lane),
+            "teacher_mask_checkpoint_lane": [
+                str(route.get("route_id") or "") for route in teacher_mask_routes
+            ],
             "auxiliary_non_vocal_evidence": ["scnet_xl_ihf_musdb18"],
         },
         "model_split_composite_max_candidates": 864,
@@ -1101,9 +1415,408 @@ def _candidate_items(recipe: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [item for item in (items or []) if isinstance(item, dict)]
 
 
+def _target_specific_route_signature(candidate: Mapping[str, Any]) -> str:
+    commands = candidate.get("target_specific_commands")
+    if not isinstance(commands, list):
+        return str(candidate.get("route_signature") or "").strip()
+    parts: list[str] = []
+    for command in commands:
+        if not isinstance(command, Mapping):
+            continue
+        lane = str(command.get("lane") or command.get("role") or "").strip()
+        route_id = str(command.get("route_id") or command.get("route_alias") or "").strip()
+        if lane or route_id:
+            parts.append(f"{lane}:{route_id}")
+    return "|".join(parts)
+
+
+def _signature_matches(candidate_signature: str, policy_signature: str) -> bool:
+    candidate_parts = {part for part in str(candidate_signature or "").split("|") if part}
+    policy_parts = {part for part in str(policy_signature or "").split("|") if part}
+    if not candidate_parts or not policy_parts:
+        return False
+
+    def _part_matches(candidate_part: str, policy_part: str) -> bool:
+        return candidate_part == policy_part or candidate_part.startswith(f"{policy_part}:")
+
+    return all(any(_part_matches(candidate_part, policy_part) for candidate_part in candidate_parts) for policy_part in policy_parts)
+
+
+def _load_root_cause_route_policy(root_cause_queue_jsonl: Path | None) -> dict[str, Any]:
+    if root_cause_queue_jsonl is None:
+        return {
+            "schema": "model_split_root_cause_route_policy.v1",
+            "source_queue_jsonl": "",
+            "quarantined_route_signatures": [],
+            "repairable_route_signatures": [],
+            "blocked_repair_ids": [],
+            "blocked_repair_checkpoints": [],
+        }
+    rows = [
+        json.loads(line)
+        for line in Path(root_cause_queue_jsonl).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    quarantined: set[str] = set()
+    repairable: set[str] = set()
+    blocked_repair_ids: set[str] = set()
+    blocked_repair_checkpoints: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        failed_repair_id = str(row.get("failed_repair_id") or "").strip()
+        if failed_repair_id:
+            blocked_repair_ids.add(failed_repair_id)
+        failed_repair_checkpoint = str(row.get("failed_repair_checkpoint") or "").strip()
+        if failed_repair_checkpoint:
+            blocked_repair_checkpoints.add(failed_repair_checkpoint)
+        signature = str(row.get("route_signature") or row.get("route_family") or "").strip()
+        if not signature:
+            continue
+        if bool(row.get("quarantined_for_next_run")):
+            quarantined.add(signature)
+        if str(row.get("issue_type") or "") == ISSUE_BAD_RECONSTRUCTION and str(row.get("affected_stem") or ""):
+            repairable.add(signature)
+    return {
+        "schema": "model_split_root_cause_route_policy.v1",
+        "source_queue_jsonl": str(root_cause_queue_jsonl),
+        "quarantined_route_signatures": sorted(quarantined),
+        "repairable_route_signatures": sorted(repairable),
+        "blocked_repair_ids": sorted(blocked_repair_ids),
+        "blocked_repair_checkpoints": sorted(blocked_repair_checkpoints),
+    }
+
+
+def _repair_option_checkpoints(option: Mapping[str, Any]) -> set[str]:
+    checkpoints: set[str] = set()
+
+    def add_checkpoint(value: Any) -> None:
+        checkpoint = str(value or "").strip()
+        if checkpoint:
+            checkpoints.add(checkpoint)
+
+    add_checkpoint(option.get("checkpoint"))
+    config = option.get("config")
+    if isinstance(config, Mapping):
+        add_checkpoint(config.get("checkpoint") or config.get("checkpoint_path"))
+    stem_region_repair = option.get("stem_region_repair")
+    if isinstance(stem_region_repair, Mapping):
+        add_checkpoint(stem_region_repair.get("checkpoint") or stem_region_repair.get("checkpoint_path"))
+    sequence = option.get("stem_region_repairs")
+    if isinstance(sequence, Sequence) and not isinstance(sequence, (str, bytes)):
+        for item in sequence:
+            if isinstance(item, Mapping):
+                add_checkpoint(item.get("checkpoint") or item.get("checkpoint_path"))
+    return checkpoints
+
+
+def _filter_blocked_repair_options(
+    item: Mapping[str, Any],
+    *,
+    blocked_repair_ids: set[str],
+    blocked_repair_checkpoints: set[str],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    updated = dict(item)
+    repair_options = item.get("model_split_composite_repair_options")
+    if not isinstance(repair_options, list) or not repair_options:
+        return updated, []
+    kept: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for option in repair_options:
+        if not isinstance(option, Mapping):
+            continue
+        repair_id = str(option.get("repair_id") or "").strip()
+        checkpoints = _repair_option_checkpoints(option)
+        matched_checkpoint = next((checkpoint for checkpoint in sorted(checkpoints) if checkpoint in blocked_repair_checkpoints), "")
+        if (repair_id and repair_id in blocked_repair_ids) or matched_checkpoint:
+            skipped.append(
+                {
+                    "candidate_id": str(item.get("candidate_id") or ""),
+                    "repair_id": repair_id,
+                    "matched_checkpoint": matched_checkpoint,
+                }
+            )
+            continue
+        kept.append(dict(option))
+    updated["model_split_composite_repair_options"] = kept
+    return updated, skipped
+
+
+def _apply_root_cause_route_policy(
+    recipe: Mapping[str, Any],
+    *,
+    root_cause_queue_jsonl: Path | None,
+) -> dict[str, Any]:
+    policy = _load_root_cause_route_policy(root_cause_queue_jsonl)
+    items = _candidate_items(recipe)
+    quarantined = list(policy.get("quarantined_route_signatures") or [])
+    repairable = list(policy.get("repairable_route_signatures") or [])
+    blocked_repair_ids = {str(value) for value in policy.get("blocked_repair_ids") or []}
+    blocked_repair_checkpoints = {str(value) for value in policy.get("blocked_repair_checkpoints") or []}
+
+    kept: list[Mapping[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    skipped_repair_options: list[dict[str, str]] = []
+    for item in items:
+        signature = _target_specific_route_signature(item)
+        matched_quarantine = next((blocked for blocked in quarantined if _signature_matches(signature, blocked)), "")
+        if matched_quarantine:
+            skipped.append(
+                {
+                    "candidate_id": str(item.get("candidate_id") or ""),
+                    "route_signature": signature,
+                    "matched_quarantine": matched_quarantine,
+                }
+            )
+            continue
+        filtered_item, repair_skips = _filter_blocked_repair_options(
+            item,
+            blocked_repair_ids=blocked_repair_ids,
+            blocked_repair_checkpoints=blocked_repair_checkpoints,
+        )
+        skipped_repair_options.extend(repair_skips)
+        kept.append(filtered_item)
+
+    def _priority(item: Mapping[str, Any]) -> tuple[int, str]:
+        signature = _target_specific_route_signature(item)
+        is_repairable = any(_signature_matches(signature, value) for value in repairable)
+        return (0 if is_repairable else 1, str(item.get("candidate_id") or ""))
+
+    ordered = sorted(kept, key=_priority)
+    updated = dict(recipe)
+    updated["candidates"] = [dict(item) for item in ordered]
+    policy = dict(policy)
+    policy["skipped_candidate_count"] = len(skipped)
+    policy["skipped_candidates"] = skipped
+    policy["skipped_repair_option_count"] = len(skipped_repair_options)
+    policy["skipped_repair_options"] = skipped_repair_options
+    policy["prioritized_candidate_count"] = sum(1 for item in ordered if _priority(item)[0] == 0)
+    updated["root_cause_route_policy"] = policy
+    return updated
+
+
+def _load_learned_route_policy_checkpoint(route_policy_checkpoint: Path | None) -> dict[str, Any] | None:
+    if route_policy_checkpoint is None:
+        return None
+    return load_stem_route_policy_checkpoint(Path(route_policy_checkpoint))
+
+
+def _route_policy_row_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    verdict = str(payload.get("verdict") or "")
+    issue_type = verdict[8:] if verdict.startswith("blocked_") else verdict
+    return {
+        "schema": "stem_route_policy_row.v1",
+        "row_id": str(payload.get("row_id") or payload.get("candidate_id") or "candidate"),
+        "source_run": str(payload.get("source_run") or payload.get("run_json") or ""),
+        "window_id": str(payload.get("window_id") or ""),
+        "candidate_id": str(payload.get("candidate_id") or ""),
+        "route_signature": extract_route_signature(payload),
+        "lane_routes": extract_lane_routes(payload),
+        "issue_type": str(payload.get("issue_type") or issue_type or "unknown"),
+        "root_cause": str(payload.get("root_cause") or ""),
+        "affected_stem": str(payload.get("affected_stem") or ""),
+        "gate_verdicts": {
+            "candidate_verdict": verdict,
+            "candidate_delivery_allowed": bool(payload.get("delivery_allowed", False)),
+            "candidate_presentation_status": str(payload.get("presentation_status") or ""),
+        },
+        "forensic_features": payload.get("cross_stem_forensic_score") if isinstance(payload.get("cross_stem_forensic_score"), Mapping) else {},
+        "damage_features": payload.get("damage_score") if isinstance(payload.get("damage_score"), Mapping) else {},
+        "reconstruction_features": payload.get("reconstruction") if isinstance(payload.get("reconstruction"), Mapping) else {},
+        "current_action": ACTION_BLOCK_UNKNOWN,
+        "oracle_action": ACTION_BLOCK_UNKNOWN,
+        "oracle_label_source": "runtime_scoring_only",
+        "usable_for_training": False,
+        "usable_for_promotion": False,
+        "is_ground_truth": False,
+        "label_type": "runtime_candidate",
+    }
+
+
+def _score_learned_route_policy_payload(
+    payload: Mapping[str, Any],
+    *,
+    route_policy_model: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if route_policy_model is None:
+        return {
+            "schema": "stem_route_policy_score.v1",
+            "action": ACTION_BLOCK_UNKNOWN,
+            "action_probs": {action: 1.0 if action == ACTION_BLOCK_UNKNOWN else 0.0 for action in ROUTE_POLICY_ACTIONS},
+            "score": 0.0,
+            "match_level": "disabled",
+            "shadow_only": True,
+            "delivery_allowed": False,
+            "blockers": ["route_policy_disabled"],
+        }
+    score = dict(score_policy_row(route_policy_model, _route_policy_row_from_payload(payload)))
+    action = normalize_policy_action(str(score.get("action") or ""))
+    score["action"] = action
+    score["delivery_allowed"] = False
+    score["shadow_only"] = True
+    return score
+
+
+def _apply_learned_route_policy_to_recipe(
+    recipe: Mapping[str, Any],
+    *,
+    route_policy_model: Mapping[str, Any] | None,
+    route_policy_mode: str,
+) -> dict[str, Any]:
+    mode = str(route_policy_mode or "shadow").strip().lower()
+    if mode not in {"shadow", "rank"}:
+        mode = "shadow"
+    scored_items: list[dict[str, Any]] = []
+    for item in _candidate_items(recipe):
+        candidate_item = dict(item)
+        score = _score_learned_route_policy_payload(candidate_item, route_policy_model=route_policy_model)
+        candidate_item["route_policy_preview"] = {
+            "action": score["action"],
+            "score": score["score"],
+            "match_level": score["match_level"],
+            "shadow_only": True,
+            "blockers": score.get("blockers") or [],
+        }
+        scored_items.append(candidate_item)
+
+    if mode == "rank":
+        def _rank_key(item: Mapping[str, Any]) -> tuple[int, float, str]:
+            preview = item.get("route_policy_preview") if isinstance(item.get("route_policy_preview"), Mapping) else {}
+            action = normalize_policy_action(str(preview.get("action") or ""))
+            score = float(preview.get("score") or 0.0)
+            if action == ACTION_PRIORITIZE_ROUTE:
+                priority = 0
+            elif action == ACTION_QUARANTINE_ROUTE:
+                priority = 8
+            elif action == ACTION_BLOCK_UNKNOWN:
+                priority = 9
+            else:
+                priority = 1
+            return (priority, -score, str(item.get("candidate_id") or ""))
+
+        scored_items = sorted(scored_items, key=_rank_key)
+
+    updated = dict(recipe)
+    updated["candidates"] = scored_items
+    updated["learned_route_policy"] = {
+        "schema": "stem_route_policy_runtime.v1",
+        "mode": mode,
+        "shadow_only": mode == "shadow",
+        "can_accept_delivery": False,
+        "candidate_count": len(scored_items),
+    }
+    return updated
+
+
+def _annotate_candidate_with_learned_route_policy(
+    candidate_manifest: Mapping[str, Any],
+    *,
+    route_policy_model: Mapping[str, Any] | None,
+    route_policy_mode: str,
+) -> dict[str, Any]:
+    annotated = dict(candidate_manifest)
+    score = _score_learned_route_policy_payload(annotated, route_policy_model=route_policy_model)
+    action = normalize_policy_action(str(score.get("action") or ""))
+    blockers = list(score.get("blockers") or [])
+    annotated.update(
+        {
+            "route_policy_score": float(score.get("score") or 0.0),
+            "route_policy_action": action,
+            "route_policy_action_probs": score.get("action_probs") or {},
+            "route_policy_match_level": score.get("match_level") or "",
+            "route_policy_shadow_only": True,
+            "route_policy_mode": str(route_policy_mode or "shadow"),
+            "route_policy_blockers": blockers,
+        }
+    )
+    if action not in ROUTE_POLICY_ACTIONS:
+        annotated["verdict"] = "blocked_unknown"
+        annotated["delivery_allowed"] = False
+        annotated["presentation_status"] = "blocked_from_listen_pack"
+        annotated["route_policy_blockers"] = [*blockers, "invalid_policy_action"]
+    if annotated.get("verdict") != "auto_accept":
+        annotated["delivery_allowed"] = False
+        annotated["presentation_status"] = "blocked_from_listen_pack"
+    return annotated
+
+
+def _persist_candidate_manifest(candidate_manifest: Mapping[str, Any]) -> None:
+    output_dir = str(candidate_manifest.get("output_dir") or "").strip()
+    if output_dir:
+        _write_json(Path(output_dir) / "manifest.json", dict(candidate_manifest))
+
+
 def _target_specific_items(candidate: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     items = candidate.get("target_specific_commands")
     return [item for item in (items or []) if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _split_model_split_v2_delivery_pair_items(
+    candidate: Mapping[str, Any],
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    delivery_items: list[Mapping[str, Any]] = []
+    remaining_items: list[Mapping[str, Any]] = []
+    for item in _target_specific_items(candidate):
+        role = str(item.get("role") or "").strip()
+        if role in MODEL_SPLIT_V2_DELIVERY_PAIR_ROLES:
+            delivery_items.append(item)
+        else:
+            remaining_items.append(item)
+    return delivery_items, remaining_items
+
+
+def _can_model_split_v2_delivery_pair_fail_fast(candidate: Mapping[str, Any]) -> bool:
+    if not _is_model_split_v2(candidate):
+        return False
+    if candidate.get("delivery_pair_fail_fast") is not True:
+        return False
+    delivery_items, remaining_items = _split_model_split_v2_delivery_pair_items(candidate)
+    if not delivery_items or not remaining_items:
+        return False
+    roles = {str(item.get("role") or "").strip() for item in delivery_items}
+    if not MODEL_SPLIT_V2_DELIVERY_PAIR_ROLES.issubset(roles):
+        return False
+    return not any(candidate.get(key) for key in MODEL_SPLIT_V2_FAIL_FAST_MUTATION_KEYS)
+
+
+def _with_target_specific_items(candidate: Mapping[str, Any], items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    patched = dict(candidate)
+    patched["target_specific_commands"] = [dict(item) for item in items]
+    return patched
+
+
+def _merge_target_specific_compositions(*compositions: Mapping[str, Any]) -> dict[str, Any]:
+    routes: list[dict[str, Any]] = []
+    blocker_reasons: list[str] = []
+    for composition in compositions:
+        routes.extend(dict(route) for route in (composition.get("routes") or []) if isinstance(route, Mapping))
+        blocker_reasons.extend(str(reason) for reason in (composition.get("blocker_reasons") or []))
+    return {
+        "applied": any(bool(composition.get("applied")) for composition in compositions),
+        "routes": routes,
+        "blocker_reasons": blocker_reasons,
+    }
+
+
+def _route_timeout_sec(
+    item: Mapping[str, Any],
+    route_id: str,
+    default_timeout_sec: int,
+    *,
+    route_budget_profile: str = ROUTE_BUDGET_PROFILE_FULL,
+) -> int:
+    raw = item.get("route_timeout_sec", item.get("timeout_sec"))
+    if raw is not None:
+        try:
+            return max(1, int(float(raw)))
+        except (TypeError, ValueError):
+            return max(1, int(default_timeout_sec))
+    normalized_profile = str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL).strip().lower()
+    if normalized_profile == ROUTE_BUDGET_PROFILE_FAST:
+        timeout_overrides = {**ROUTE_TIMEOUT_OVERRIDES_SEC, **FAST_ROUTE_TIMEOUT_OVERRIDES_SEC}
+    else:
+        timeout_overrides = ROUTE_TIMEOUT_OVERRIDES_SEC
+    return max(1, int(timeout_overrides.get(str(route_id or ""), int(default_timeout_sec))))
 
 
 def _collect_stem_paths(stems_dir: Path) -> dict[str, str]:
@@ -1169,7 +1882,12 @@ def _run_target_specific_commands(
     command_runner: CommandRunner,
     timeout_sec: int,
     route_cache: dict[str, dict[str, Any]] | None = None,
+    separator_backend_config: SeparatorBackendConfig | None = None,
+    separator_client: PersistentSeparatorClient | None = None,
+    route_budget_profile: str = ROUTE_BUDGET_PROFILE_FULL,
 ) -> dict[str, Any]:
+    backend_config = (separator_backend_config or SeparatorBackendConfig()).validated()
+    persistent_client = separator_client
     routes: list[dict[str, Any]] = []
     blocker_reasons: list[str] = []
     for idx, item in enumerate(_target_specific_items(candidate), start=1):
@@ -1178,6 +1896,8 @@ def _run_target_specific_commands(
         route_id = str(item.get("route_id") or role or f"r{idx:03d}")
         route_alias = _safe_artifact_segment(route_id, fallback=f"r{idx:03d}")
         lane = str(item.get("lane") or role or route_id).strip()
+        prefer_resident = bool(item.get("prefer_resident")) or _prefers_resident_separator(route_id)
+        route_timeout_sec = _route_timeout_sec(item, route_id, timeout_sec, route_budget_profile=route_budget_profile)
         output_map = item.get("output_map") if isinstance(item.get("output_map"), dict) else {}
         route_dir = candidate_dir / "routes" / route_alias
         route_stems_dir = route_dir / "stems"
@@ -1194,6 +1914,15 @@ def _run_target_specific_commands(
             "copied_outputs": [],
             "missing_outputs": [],
             "blocker_reasons": [],
+            "timeout_sec": route_timeout_sec,
+            "separator_backend": {
+                **backend_config.manifest(),
+                "cache_hit": False,
+                "route_cache_key": "",
+                "prefer_resident": prefer_resident,
+                "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+                "route_timeout_sec": route_timeout_sec,
+            },
         }
         if not isinstance(command_template, list) or not command_template:
             route_manifest["blocker_reasons"] = [f"missing_target_specific_command:{role or route_id}"]
@@ -1212,16 +1941,25 @@ def _run_target_specific_commands(
         }
         command = render_recipe_command(command_template, replacements)
         route_manifest["command"] = command
-        cache_key = json.dumps(
-            {
+        required_outputs = list(TARGET_SPECIFIC_ROLE_OUTPUTS.get(role, ()))
+        server_required_outputs = list(dict.fromkeys(str(output_map.get(stem, stem)) for stem in required_outputs))
+        cache_key = separator_cache_key(
+            route_id=route_id,
+            source_audio_path=str(window["mix_path"]),
+            command=[str(part) for part in command_template],
+            stems=server_required_outputs,
+            params={
                 "role": role,
                 "lane": lane,
-                "route_id": route_id,
-                "command_template": command_template,
                 "output_map": dict(output_map),
+                "backend": backend_config.mode,
+                "prefer_resident": prefer_resident,
+                "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+                "route_timeout_sec": route_timeout_sec,
             },
-            sort_keys=True,
         )
+        route_manifest["route_cache_key"] = cache_key
+        route_manifest["separator_backend"]["route_cache_key"] = cache_key
         cached_route = (route_cache or {}).get(cache_key)
         if cached_route:
             cached_stems_dir = Path(str(cached_route.get("stems_dir") or ""))
@@ -1247,18 +1985,66 @@ def _run_target_specific_commands(
                         reason.split(":")[-1] for reason in route_blockers if reason.startswith("missing_target_specific_output:")
                     ],
                     "blocker_reasons": route_blockers,
+                    "separator_backend": {
+                        **route_manifest["separator_backend"],
+                        "cache_hit": True,
+                        "reused_route": True,
+                        "resident_backend_used": bool(cached_route.get("resident_backend_used", False)),
+                        "resident_executor": cached_route.get("resident_executor"),
+                        "resident_benchmark": cached_route.get("resident_benchmark"),
+                    },
                 }
             )
             blocker_reasons.extend(route_blockers)
             routes.append(route_manifest)
             continue
         route_stems_dir.mkdir(parents=True, exist_ok=True)
-        setattr(command_runner, "stems_dir", route_stems_dir)
-        command_runner(command, timeout_sec)
+        produced_stems_dir = route_stems_dir
+        if backend_config.enabled:
+            if persistent_client is None:
+                request_timeout_sec = (
+                    backend_config.request_timeout_sec
+                    if backend_config.request_timeout_sec > 0
+                    else float(timeout_sec) + 30.0
+                )
+                persistent_client = PersistentSeparatorClient(
+                    backend_config.server_url,
+                    request_timeout_sec=request_timeout_sec,
+                )
+            response = persistent_client.separate(
+                route_id=route_id,
+                source_audio_path=str(window["mix_path"]),
+                output_dir=str(route_dir),
+                device=backend_config.device,
+                stems=server_required_outputs,
+                batch_id=f"{window['window_id']}:{candidate.get('candidate_id') or 'c001'}:{route_alias}",
+                command=command,
+                cache_key=cache_key,
+                timeout_sec=route_timeout_sec,
+                require_gpu=backend_config.require_gpu,
+                prefer_resident=prefer_resident,
+            )
+            produced_stems_dir = Path(str(response.get("stems_dir") or route_stems_dir))
+            route_manifest["separator_backend"].update(
+                {
+                    "cache_hit": bool(response.get("cache_hit")),
+                    "server_status": str(response.get("status") or "ok"),
+                    "response_manifest_path": str(response.get("manifest_path") or ""),
+                    "produced_stems_dir": str(produced_stems_dir),
+                    "resident_backend_used": bool(response.get("resident_backend_used", False)),
+                    "resident_executor": response.get("resident_executor"),
+                    "resident_benchmark": response.get("resident_benchmark"),
+                    "gpu_inference_skipped": response.get("gpu_inference_skipped"),
+                    "accelerator_mode": response.get("accelerator_mode"),
+                }
+            )
+        else:
+            setattr(command_runner, "stems_dir", route_stems_dir)
+            command_runner(command, route_timeout_sec)
         copied_outputs: list[dict[str, str]] = []
         route_blockers = _copy_target_specific_outputs(
             role=role,
-            role_stems_dir=route_stems_dir,
+            role_stems_dir=produced_stems_dir,
             final_stems_dir=stems_dir,
             target_sample_rate=int(window["sample_rate"]) if window.get("sample_rate") is not None else None,
             target_sample_count=int(window["sample_count"]) if window.get("sample_count") is not None else None,
@@ -1277,10 +2063,13 @@ def _run_target_specific_commands(
             route_cache[cache_key] = {
                 "source_candidate_id": str(candidate.get("candidate_id") or ""),
                 "output_dir": str(route_dir),
-                "stems_dir": str(route_stems_dir),
+                "stems_dir": str(produced_stems_dir),
                 "route_id": route_id,
                 "role": role,
                 "lane": lane,
+                "resident_backend_used": bool(route_manifest["separator_backend"].get("resident_backend_used", False)),
+                "resident_executor": route_manifest["separator_backend"].get("resident_executor"),
+                "resident_benchmark": route_manifest["separator_backend"].get("resident_benchmark"),
             }
     return {
         "applied": True,
@@ -1886,6 +2675,150 @@ def apply_bass_stereo_width_repair(
     }
 
 
+def apply_vocal_depercussive_spectral_repair(
+    *,
+    stem_paths: Mapping[str, str],
+    config: Mapping[str, Any],
+    checkpoint_path: str,
+) -> dict[str, Any]:
+    stem = str(config.get("stem") or "vocals").strip().lower()
+    source_stem = str(config.get("forensic_source_condition_stem") or config.get("source_stem") or "drums").strip().lower()
+    result: dict[str, Any] = {
+        "applied": False,
+        "repair_owner": "runner_vocal_depercussive_spectral_repair_v1",
+        "stem": stem,
+        "source_stem": source_stem,
+        "checkpoint": checkpoint_path,
+        "blockers": [],
+    }
+    if stem != "vocals":
+        result["blockers"].append(f"spectral_repair_invalid_stem:{stem}")
+        return result
+    target_path = stem_paths.get(stem)
+    source_path = stem_paths.get(source_stem)
+    if not target_path:
+        result["blockers"].append(f"missing_spectral_repair_stem:{stem}")
+        return result
+    if not source_path:
+        result["blockers"].append(f"missing_spectral_repair_source:{source_stem}")
+        return result
+    try:
+        checkpoint = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
+        if str(checkpoint.get("schema") or "") != "vocal_depercussive_spectral_repair.v1":
+            result["blockers"].append("invalid_spectral_repair_checkpoint_schema")
+            return result
+        params = dict(checkpoint.get("parameters") or {})
+        for key in (
+            "strength",
+            "self_hf_attenuation",
+            "region_hf_attenuation",
+            "hard_region_hf_suppression",
+            "max_projection_gain",
+            "min_region_score",
+            "high_band_hz",
+            "delivery_pair_compensation_strength",
+            "full_region_hf_suppression",
+        ):
+            if key in config:
+                params[key] = config[key]
+        vocals, vocal_rate = _read_audio(Path(str(target_path)))
+        source, source_rate = _read_audio(Path(str(source_path)))
+        if vocal_rate != source_rate:
+            result["blockers"].append("spectral_repair_sample_rate_mismatch")
+            return result
+        frames = min(vocals.shape[0], source.shape[0])
+        vocals = vocals[:frames]
+        source = source[:frames]
+        candidate_root = Path(str(target_path)).parent.parent
+        score_dir = candidate_root / "score" / "spectral_repair"
+        before = score_pair_forensic(
+            tested_stem=stem,
+            source_stem=source_stem,
+            tested_path=Path(str(target_path)),
+            source_path=Path(str(source_path)),
+            output_dir=score_dir / "before",
+            config=None,
+        )
+        min_region_score = float(params.get("min_region_score", 0.55))
+        regions = [
+            region
+            for region in before.get("regions", [])
+            if float(region.get("score") or 0.0) >= min_region_score
+        ]
+        if not regions and before.get("regions"):
+            regions = list(before.get("regions", [])[:3])
+        if _parse_bool(params.get("full_region_hf_suppression", False)):
+            regions = [{"start": 0.0, "end": frames / float(vocal_rate), "score": 1.0}]
+        if not regions:
+            result["blockers"].append("spectral_repair_no_regions")
+            return result
+        high_band = params.get("high_band_hz") or [1200.0, 10000.0]
+        repaired, removed, applied_regions = _repair_vocal_depercussive_regions(
+            vocals=vocals,
+            drums=source,
+            sample_rate=vocal_rate,
+            regions=regions,
+            strength=float(params.get("strength", 1.0)),
+            self_hf_attenuation=float(params.get("self_hf_attenuation", 0.35)),
+            region_hf_attenuation=float(params.get("region_hf_attenuation", 0.0)),
+            hard_region_hf_suppression=_parse_bool(params.get("hard_region_hf_suppression", False)),
+            max_projection_gain=float(params.get("max_projection_gain", 2.0)),
+            high_band_hz=(float(high_band[0]), float(high_band[1])),
+        )
+        delta = (repaired.astype(np.float32) - vocals.astype(np.float32)).astype(np.float32)
+        _write_audio(Path(str(target_path)), repaired.astype(np.float32), vocal_rate)
+        compensation_stem = ""
+        compensation_delta_rms = 0.0
+        compensation_strength = max(0.0, min(1.0, float(params.get("delivery_pair_compensation_strength", 0.0))))
+        if compensation_strength > 0.0 and "minus" in stem_paths:
+            minus_path = Path(str(stem_paths["minus"]))
+            minus_audio, minus_rate = _read_audio(minus_path)
+            if minus_rate != vocal_rate or minus_audio.shape[0] < frames or minus_audio.shape[1] != repaired.shape[1]:
+                result["blockers"].append("spectral_repair_minus_compensation_shape_mismatch")
+                return result
+            compensation = (-delta * np.float32(compensation_strength)).astype(np.float32)
+            minus_repaired = np.clip(minus_audio[:frames].astype(np.float32) + compensation, -1.0, 1.0).astype(np.float32)
+            if minus_audio.shape[0] > frames:
+                merged_minus = minus_audio.astype(np.float32).copy()
+                merged_minus[:frames] = minus_repaired
+                minus_repaired = merged_minus
+            _write_audio(minus_path, minus_repaired, minus_rate)
+            compensation_stem = "minus"
+            compensation_delta_rms = _rms(compensation)
+        after = score_pair_forensic(
+            tested_stem=stem,
+            source_stem=source_stem,
+            tested_path=Path(str(target_path)),
+            source_path=Path(str(source_path)),
+            output_dir=score_dir / "after",
+            config=None,
+        )
+        result.update(
+            {
+                "applied": True,
+                "parameters": params,
+                "region_count": len(applied_regions),
+                "applied_regions": applied_regions,
+                "removed_rms": round(_rms(removed), 8),
+                "delta_rms": round(_rms(delta), 8),
+                "forensic_before_verdict": before.get("verdict"),
+                "forensic_after_verdict": after.get("verdict"),
+                "forensic_after_blockers": after.get("blocker_reasons") or [],
+                "delivery_pair_compensation_stem": compensation_stem,
+                "delivery_pair_compensation_delta_rms": round(compensation_delta_rms, 8),
+                "diagnostics": {
+                    "target_issue_improved": before.get("verdict") != "pass" and after.get("verdict") == "pass",
+                    "before_imprint_score": before.get("imprint_score"),
+                    "after_imprint_score": after.get("imprint_score"),
+                },
+            }
+        )
+    except Exception as exc:  # pragma: no cover - defensive manifest evidence
+        result["blockers"].append(f"spectral_repair_failed:{type(exc).__name__}")
+        result["error"] = str(exc)
+    return result
+
+
 def apply_learned_stem_region_repair(
     *,
     mix_path: Path,
@@ -1911,8 +2844,18 @@ def apply_learned_stem_region_repair(
         result["blockers"].append(f"missing_repair_stem:{stem}")
         return result
     try:
+        checkpoint_file = Path(checkpoint_path)
+        if checkpoint_file.suffix.lower() == ".json":
+            checkpoint_probe = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+            if str(checkpoint_probe.get("schema") or "") == "vocal_depercussive_spectral_repair.v1":
+                return apply_vocal_depercussive_spectral_repair(
+                    stem_paths=stem_paths,
+                    config=config,
+                    checkpoint_path=checkpoint_path,
+                )
         model, checkpoint = load_region_repair_checkpoint(Path(checkpoint_path))
-        checkpoint_issue = str((checkpoint.get("training_history") or {}).get("issue_type") or "").strip().lower()
+        training_history = checkpoint.get("training_history") if isinstance(checkpoint.get("training_history"), Mapping) else {}
+        checkpoint_issue = str(training_history.get("issue_type") or "").strip().lower()
         if checkpoint_issue and checkpoint_issue != issue_type:
             result["blockers"].append(f"stem_region_repair_issue_mismatch:{checkpoint_issue}:{issue_type}")
             return result
@@ -1924,7 +2867,39 @@ def apply_learned_stem_region_repair(
         frames = min(mix_audio.shape[0], bad_audio.shape[0])
         mix_audio = mix_audio[:frames]
         bad_audio = bad_audio[:frames]
-        mask = make_region_mask(frame_count=frames, sample_rate=mix_rate, start_sec=0.0, end_sec=frames / float(mix_rate))
+        source_condition_stem = str(
+            config.get("forensic_source_condition_stem")
+            or training_history.get("forensic_source_condition_stem")
+            or ""
+        ).strip().lower()
+        source_condition_audio: np.ndarray | None = None
+        source_condition_path = ""
+        if int(getattr(model, "input_channels", 6)) > 6 or source_condition_stem:
+            if not source_condition_stem:
+                result["blockers"].append("missing_forensic_source_condition_stem")
+                return result
+            source_condition_path = stem_paths.get(source_condition_stem) or ""
+            if not source_condition_path:
+                result["blockers"].append(f"missing_forensic_source_condition_audio:{source_condition_stem}")
+                return result
+            source_condition_audio, source_condition_rate = _read_audio(Path(str(source_condition_path)))
+            if source_condition_rate != stem_rate:
+                result["blockers"].append("stem_region_repair_source_condition_sample_rate_mismatch")
+                return result
+            if source_condition_audio.shape[0] < frames or source_condition_audio.shape[1] != bad_audio.shape[1]:
+                result["blockers"].append("stem_region_repair_source_condition_shape_mismatch")
+                return result
+            source_condition_audio = source_condition_audio[:frames]
+        region = config.get("region") if isinstance(config.get("region"), Mapping) else training_history.get("region")
+        if not isinstance(region, Mapping):
+            region = {"start_sec": 0.0, "end_sec": frames / float(mix_rate)}
+        start_sec = float(region.get("start_sec", 0.0))
+        end_sec = float(region.get("end_sec", frames / float(mix_rate)))
+        mask = make_region_mask(frame_count=frames, sample_rate=mix_rate, start_sec=start_sec, end_sec=end_sec)
+        if float(np.max(mask)) <= 0.0:
+            result["blockers"].append("stem_region_repair_empty_region")
+            result["region"] = {"start_sec": start_sec, "end_sec": end_sec}
+            return result
         before_width = _stereo_width(bad_audio)
         repaired, diagnostics = apply_region_repair_model(
             model=model,
@@ -1933,6 +2908,7 @@ def apply_learned_stem_region_repair(
             region_mask=mask,
             sample_rate=mix_rate,
             issue_type=issue_type,
+            source_condition_audio=source_condition_audio,
         )
         if stem == "bass" and issue_type == ISSUE_STEREO_COLLAPSE and bool(config.get("bass_band_delta_only", True)):
             low_hz = float(config.get("low_hz", 20.0))
@@ -1941,10 +2917,125 @@ def apply_learned_stem_region_repair(
             repaired = np.clip(bad_audio.astype(np.float32) + delta, -1.0, 1.0).astype(np.float32)
             diagnostics["bass_band_delta_only"] = True
             diagnostics["bass_band_delta_hz"] = [low_hz, high_hz]
+        companion_stem = str(
+            config.get("mix_preserve_companion_stem") or training_history.get("mix_preserve_companion_stem") or ""
+        ).strip().lower()
+        companion_adjusted: np.ndarray | None = None
+        companion_path: str | None = None
+        delivery_pair_compensation_stem = ""
+        delivery_pair_compensation_delta: np.ndarray | None = None
+        delivery_pair_compensation_path: str | None = None
+        delivery_pair_compensation_audio: np.ndarray | None = None
+        compensation_delta = (repaired.astype(np.float32) - bad_audio.astype(np.float32)).astype(np.float32)
+        raw_delivery_pair_compensation_enabled = config.get(
+            "delivery_pair_compensation_enabled",
+            training_history.get("delivery_pair_compensation_enabled"),
+        )
+        delivery_pair_compensation_enabled = (
+            issue_type != ISSUE_BAD_RECONSTRUCTION
+            if raw_delivery_pair_compensation_enabled is None
+            else _parse_bool(raw_delivery_pair_compensation_enabled)
+        )
+        if companion_stem:
+            if companion_stem == stem:
+                result["blockers"].append(f"stem_region_repair_invalid_companion:{companion_stem}")
+                return result
+            companion_path = stem_paths.get(companion_stem)
+            if not companion_path:
+                result["blockers"].append(f"missing_repair_companion_stem:{companion_stem}")
+                return result
+            companion_audio, companion_rate = _read_audio(Path(str(companion_path)))
+            if companion_rate != stem_rate:
+                result["blockers"].append("stem_region_repair_companion_sample_rate_mismatch")
+                return result
+            if companion_audio.shape != bad_audio.shape:
+                result["blockers"].append("stem_region_repair_companion_shape_mismatch")
+                return result
+            companion_adjusted = np.clip(
+                companion_audio.astype(np.float32) - compensation_delta,
+                -1.0,
+                1.0,
+            ).astype(np.float32)
+        vocal_pair_delta = np.zeros_like(compensation_delta, dtype=np.float32)
+        if delivery_pair_compensation_enabled and stem == "vocals" and companion_stem != "minus":
+            if issue_type == ISSUE_INSTRUMENT_LEAK and source_condition_stem:
+                forensic_band = training_history.get("forensic_high_band_hz")
+                if isinstance(forensic_band, (str, bytes)) or not isinstance(forensic_band, Sequence) or len(forensic_band) != 2:
+                    forensic_band = config.get("forensic_high_band_hz")
+                low_hz, high_hz = (
+                    [float(value) for value in forensic_band]
+                    if not isinstance(forensic_band, (str, bytes)) and isinstance(forensic_band, Sequence) and len(forensic_band) == 2
+                    else [1200.0, 10000.0]
+                )
+                band_strength = float(
+                    config.get(
+                        "delivery_pair_compensation_strength",
+                        training_history.get("delivery_pair_compensation_strength", 0.35),
+                    )
+                )
+                band_strength = max(0.0, min(1.0, band_strength))
+                vocal_pair_delta += (
+                    band_limited_audio(compensation_delta, mix_rate, low_hz, high_hz).astype(np.float32)
+                    * np.float32(band_strength)
+                )
+                diagnostics["delivery_pair_compensation_band_hz"] = [low_hz, high_hz]
+                diagnostics["delivery_pair_compensation_strength"] = band_strength
+            elif issue_type != ISSUE_INSTRUMENT_LEAK:
+                vocal_pair_delta += compensation_delta
+        if companion_stem == "vocals":
+            vocal_pair_delta -= compensation_delta
+        if stem != "minus" and _rms(vocal_pair_delta) > 1.0e-9:
+            delivery_pair_compensation_stem = "minus"
+            delivery_pair_compensation_path = stem_paths.get(delivery_pair_compensation_stem)
+            if not delivery_pair_compensation_path:
+                result["blockers"].append("missing_delivery_pair_compensation_stem:minus")
+                return result
+            minus_audio, minus_rate = _read_audio(Path(str(delivery_pair_compensation_path)))
+            if minus_rate != stem_rate:
+                result["blockers"].append("stem_region_repair_delivery_pair_sample_rate_mismatch")
+                return result
+            if minus_audio.shape != bad_audio.shape:
+                result["blockers"].append("stem_region_repair_delivery_pair_shape_mismatch")
+                return result
+            delivery_pair_compensation_delta = (-vocal_pair_delta).astype(np.float32)
+            delivery_pair_compensation_audio = np.clip(
+                minus_audio.astype(np.float32) + delivery_pair_compensation_delta,
+                -1.0,
+                1.0,
+            ).astype(np.float32)
         after_width = _stereo_width(repaired)
         before_band_width = _band_stereo_width(bad_audio, mix_rate, 20.0, 260.0) if stem == "bass" else before_width
         after_band_width = _band_stereo_width(repaired, mix_rate, 20.0, 260.0) if stem == "bass" else after_width
+        delivery_pair_residual_before: float | None = None
+        delivery_pair_residual_after: float | None = None
+        if issue_type == ISSUE_BAD_RECONSTRUCTION and stem in {"vocals", "minus"}:
+            paired_stem = "minus" if stem == "vocals" else "vocals"
+            paired_path = stem_paths.get(paired_stem)
+            if paired_path:
+                paired_audio, paired_rate = _read_audio(Path(str(paired_path)))
+                if paired_rate == stem_rate:
+                    pair_frames = min(mix_audio.shape[0], bad_audio.shape[0], repaired.shape[0], paired_audio.shape[0])
+                    if pair_frames > 0:
+                        paired_after = paired_audio[:pair_frames]
+                        if (
+                            paired_stem == delivery_pair_compensation_stem
+                            and delivery_pair_compensation_audio is not None
+                        ):
+                            paired_after = delivery_pair_compensation_audio[:pair_frames]
+                        if stem == "vocals":
+                            before_pair_sum = bad_audio[:pair_frames] + paired_audio[:pair_frames]
+                            after_pair_sum = repaired[:pair_frames] + paired_after
+                        else:
+                            before_pair_sum = paired_audio[:pair_frames] + bad_audio[:pair_frames]
+                            after_pair_sum = paired_after + repaired[:pair_frames]
+                        mix_pair = mix_audio[:pair_frames]
+                        delivery_pair_residual_before = _rms((mix_pair - before_pair_sum).astype(np.float32))
+                        delivery_pair_residual_after = _rms((mix_pair - after_pair_sum).astype(np.float32))
         _write_audio(Path(str(target_path)), repaired.astype(np.float32), stem_rate)
+        if companion_adjusted is not None and companion_path is not None:
+            _write_audio(Path(str(companion_path)), companion_adjusted, stem_rate)
+        if delivery_pair_compensation_delta is not None and delivery_pair_compensation_path is not None:
+            _write_audio(Path(str(delivery_pair_compensation_path)), delivery_pair_compensation_audio, stem_rate)
         result.update(
             {
                 "applied": True,
@@ -1952,13 +3043,40 @@ def apply_learned_stem_region_repair(
                 "after_width": round(after_width, 8),
                 "before_band_width": round(before_band_width, 8),
                 "after_band_width": round(after_band_width, 8),
+                "region": {"start_sec": start_sec, "end_sec": end_sec},
+                "mix_preserve_companion_stem": companion_stem,
+                "forensic_source_condition_stem": source_condition_stem,
+                "forensic_source_condition_path": source_condition_path,
+                "mix_preserve_delta_rms": round(_rms(compensation_delta), 8),
+                "delivery_pair_compensation_enabled": delivery_pair_compensation_enabled,
+                "delivery_pair_compensation_stem": delivery_pair_compensation_stem,
+                "delivery_pair_compensation_delta_rms": (
+                    round(_rms(delivery_pair_compensation_delta), 8)
+                    if delivery_pair_compensation_delta is not None
+                    else 0.0
+                ),
                 "diagnostics": {
                     **diagnostics,
                     "stereo_width_before": before_width,
                     "stereo_width_after": after_width,
                     "bass_band_stereo_width_before": before_band_width,
                     "bass_band_stereo_width_after": after_band_width,
+                    **(
+                        {
+                            "delivery_pair_residual_before": delivery_pair_residual_before,
+                            "delivery_pair_residual_after": delivery_pair_residual_after,
+                        }
+                        if delivery_pair_residual_before is not None and delivery_pair_residual_after is not None
+                        else {}
+                    ),
                     "target_issue_improved": (
+                        delivery_pair_residual_after < delivery_pair_residual_before
+                        if (
+                            issue_type == ISSUE_BAD_RECONSTRUCTION
+                            and delivery_pair_residual_before is not None
+                            and delivery_pair_residual_after is not None
+                        )
+                        else
                         after_band_width > before_band_width if stem == "bass" and issue_type == ISSUE_STEREO_COLLAPSE
                         else after_width > before_width if issue_type == ISSUE_STEREO_COLLAPSE
                         else False
@@ -2003,6 +3121,32 @@ def apply_learned_stem_region_repairs(
         for blocker in item.get("blockers") or []:
             result["blockers"].append(str(blocker))
     return result
+
+
+def _stem_region_repair_items(stem_region_repair: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    if not isinstance(stem_region_repair, Mapping):
+        return []
+    sequence = stem_region_repair.get("repairs")
+    if isinstance(sequence, Sequence) and not isinstance(sequence, (str, bytes)):
+        return [item for item in sequence if isinstance(item, Mapping)]
+    return [stem_region_repair]
+
+
+def _delivery_pair_residual_blocker_after_stem_region_repair(
+    stem_region_repair: Mapping[str, Any] | None,
+    residual_config: Mapping[str, Any],
+) -> str:
+    target_stem = str(residual_config.get("target_stem") or "minus").strip().lower()
+    if target_stem != "minus":
+        return ""
+    for item in _stem_region_repair_items(stem_region_repair):
+        if not item.get("applied"):
+            continue
+        stem = str(item.get("stem") or "").strip().lower()
+        issue_type = str(item.get("issue_type") or "").strip().lower()
+        if stem == "vocals" and issue_type == ISSUE_INSTRUMENT_LEAK:
+            return "delivery_pair_residual_after_vocal_instrument_leak_repair_blocked"
+    return ""
 
 
 def apply_delivery_pair_gain_repair(
@@ -2728,6 +3872,13 @@ def _route_source_identity(route: Mapping[str, Any], stems: Sequence[str]) -> st
     return "\x1f".join([route_id, *source_parts])
 
 
+def _model_split_route_priority(route: Mapping[str, Any]) -> tuple[int, str]:
+    lane = str(route.get("lane") or "")
+    route_id = str(route.get("route_id") or route.get("route_alias") or route.get("stems_dir") or "")
+    is_teacher_mask_checkpoint = lane == "teacher_mask_checkpoint_lane" or route_id.startswith("tm")
+    return (0 if is_teacher_mask_checkpoint else 1, route_id)
+
+
 def _model_split_routes_by_role(
     window_candidates: Sequence[Mapping[str, Any]],
     role: str,
@@ -2751,7 +3902,32 @@ def _model_split_routes_by_role(
                 continue
             seen.add(key)
             routes.append(route)
+    routes.sort(key=_model_split_route_priority)
     return routes
+
+
+def _model_split_support_options(
+    *,
+    bass_support_routes: Sequence[Mapping[str, Any]],
+    single_stem_support_routes: Mapping[str, Sequence[Mapping[str, Any]]],
+    non_vocal_support_routes: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Mapping[str, Any]]]:
+    support_options: list[dict[str, Mapping[str, Any]]] = [{}]
+    support_options.extend({"bass": route} for route in bass_support_routes)
+    for stem in ("drums", "guitar", "piano", "other"):
+        support_options.extend({stem: route} for route in single_stem_support_routes.get(stem, ()))
+    support_options.extend({stem: route for stem in ("drums", "bass", "other")} for route in non_vocal_support_routes)
+
+    combined_support: dict[str, Mapping[str, Any]] = {}
+    if bass_support_routes:
+        combined_support["bass"] = bass_support_routes[0]
+    for stem in ("drums", "guitar", "piano", "other"):
+        routes = single_stem_support_routes.get(stem, ())
+        if routes:
+            combined_support[stem] = routes[0]
+    if len(combined_support) >= 2:
+        support_options.append(combined_support)
+    return support_options
 
 
 def _route_id_for_pairing(route: Mapping[str, Any]) -> str:
@@ -2799,6 +3975,8 @@ def _rank_model_split_vocal_minus_pairs(
         for vocal_route, minus_route, residual_ratio, _, _ in sorted(
             pairs,
             key=lambda item: (
+                _model_split_route_priority(item[0])[0],
+                _model_split_route_priority(item[1])[0],
                 item[2],
                 _route_id_for_pairing(item[0]),
                 _route_id_for_pairing(item[1]),
@@ -2837,10 +4015,8 @@ def _prioritized_model_split_support_repair_pairs(
         pairs.append((support_routes, repair_option))
 
     add_pair(base_support, first_repair)
-    for support_routes in support_tail:
-        add_pair(support_routes, first_repair)
 
-    priority_repair_ids = ("pr16", "bs400_pr16", "vp100", "bs400")
+    priority_repair_ids = ("bs400", "pr16", "bs400_pr16", "vp100")
     learned_repairs: list[Mapping[str, Any]] = []
     priority_repairs: list[Mapping[str, Any]] = []
     remaining_repairs: list[Mapping[str, Any]] = []
@@ -2857,12 +4033,35 @@ def _prioritized_model_split_support_repair_pairs(
         key=lambda repair_option: priority_repair_ids.index(str(repair_option.get("repair_id") or ""))
     )
 
+    if learned_repairs and support_tail:
+        add_pair(support_tail[0], first_repair)
+    else:
+        for support_routes in support_tail:
+            add_pair(support_routes, first_repair)
+
     for repair_option in learned_repairs:
         for support_routes in support_tail:
             add_pair(support_routes, repair_option)
         add_pair(base_support, repair_option)
 
+    if learned_repairs:
+        for support_routes in support_tail:
+            add_pair(support_routes, first_repair)
+
     for repair_option in priority_repairs:
+        repair_id = str(repair_option.get("repair_id") or "")
+        if repair_id in {"bs400", "bs400_pr16"}:
+            bass_only_supports = [
+                support_routes
+                for support_routes in support_tail
+                if "bass" in support_routes
+                and not any(str(route.get("role") or "") == "non_vocal_support" for route in support_routes.values())
+            ]
+            for support_routes in bass_only_supports:
+                add_pair(support_routes, repair_option)
+            if not bass_only_supports:
+                add_pair(base_support, repair_option)
+            continue
         for support_routes in support_tail:
             add_pair(support_routes, repair_option)
         add_pair(base_support, repair_option)
@@ -3046,10 +4245,18 @@ def build_model_split_v2_composite_candidates(
         minus_routes=minus_routes,
     )
     bass_support_routes = _model_split_routes_by_role(window_candidates, "bass_support", ("bass",))
+    single_stem_support_routes = {
+        "drums": _model_split_routes_by_role(window_candidates, "drums_support", ("drums",)),
+        "guitar": _model_split_routes_by_role(window_candidates, "guitar_support", ("guitar",)),
+        "piano": _model_split_routes_by_role(window_candidates, "piano_support", ("piano",)),
+        "other": _model_split_routes_by_role(window_candidates, "other_support", ("other",)),
+    }
     non_vocal_support_routes = _model_split_routes_by_role(window_candidates, "non_vocal_support", ("drums", "bass", "other"))
-    support_options: list[dict[str, Mapping[str, Any]]] = [{}]
-    support_options.extend({"bass": route} for route in bass_support_routes)
-    support_options.extend({stem: route for stem in ("drums", "bass", "other")} for route in non_vocal_support_routes)
+    support_options = _model_split_support_options(
+        bass_support_routes=bass_support_routes,
+        single_stem_support_routes=single_stem_support_routes,
+        non_vocal_support_routes=non_vocal_support_routes,
+    )
     repair_options_raw = candidate_template.get("model_split_composite_repair_options")
     repair_options: list[dict[str, Any]] = []
     if isinstance(repair_options_raw, list) and repair_options_raw:
@@ -3077,8 +4284,14 @@ def build_model_split_v2_composite_candidates(
                         repair_config.pop(key, None)
                     if repair_type == "vocal_projection_debleed":
                         repair_config.setdefault("target_stems", list(NON_VOCAL_STEMS))
-                    repair_option[repair_type] = repair_config
-                    repair_option["config"] = repair_config
+                    sequence_configs = raw_option.get("stem_region_repairs")
+                    if repair_type == "stem_region_repair" and isinstance(sequence_configs, list):
+                        repair_option["stem_region_repairs"] = [
+                            dict(item) for item in sequence_configs if isinstance(item, Mapping)
+                        ]
+                    else:
+                        repair_option[repair_type] = repair_config
+                        repair_option["config"] = repair_config
                 else:
                     for repair_part in repair_parts:
                         nested_config = raw_option.get(repair_part)
@@ -3489,11 +4702,25 @@ def build_model_split_v2_composite_candidates(
                             continue
                     if "delivery_pair_residual" in repair_parts:
                         residual_config = repair_option.get("delivery_pair_residual") or repair_option.get("config")
-                        delivery_pair_residual_repair = apply_delivery_pair_residual_repair(
-                            mix_path=Path(str(window["mix_path"])),
-                            stem_paths=stem_paths,
-                            config=dict(residual_config or {}),
+                        residual_config_dict = dict(residual_config or {})
+                        residual_blocker = _delivery_pair_residual_blocker_after_stem_region_repair(
+                            stem_region_repair,
+                            residual_config_dict,
                         )
+                        if residual_blocker:
+                            delivery_pair_residual_repair = {
+                                "applied": False,
+                                "repair_owner": "runner_delivery_pair_residual_repair_v1",
+                                "reason": "delivery_pair_residual_blocked_after_stem_region_repair",
+                                "target_stem": str(residual_config_dict.get("target_stem") or "minus"),
+                                "blockers": [residual_blocker],
+                            }
+                        else:
+                            delivery_pair_residual_repair = apply_delivery_pair_residual_repair(
+                                mix_path=Path(str(window["mix_path"])),
+                                stem_paths=stem_paths,
+                                config=residual_config_dict,
+                            )
                         repair_manifest = dict(target_specific_composition.get("repair") or {})
                         repair_manifest.update(
                             {
@@ -3751,6 +4978,9 @@ def execute_recipe_candidate(
     command_runner: CommandRunner,
     timeout_sec: int,
     route_cache: dict[str, dict[str, Any]] | None = None,
+    separator_backend_config: SeparatorBackendConfig | None = None,
+    separator_client: PersistentSeparatorClient | None = None,
+    route_budget_profile: str = ROUTE_BUDGET_PROFILE_FULL,
 ) -> dict[str, Any]:
     candidate_id = str(candidate.get("candidate_id") or "c001")
     candidate_dir = window_dir / candidate_id
@@ -3784,8 +5014,86 @@ def execute_recipe_candidate(
 
     stems_dir.mkdir(parents=True, exist_ok=True)
     target_specific_composition: dict[str, Any] = {"applied": False, "routes": [], "blocker_reasons": []}
+    delivery_pair_fail_fast: dict[str, Any] | None = None
     try:
-        if target_specific_commands:
+        if target_specific_commands and _can_model_split_v2_delivery_pair_fail_fast(candidate):
+            delivery_items, remaining_items = _split_model_split_v2_delivery_pair_items(candidate)
+            target_specific_composition = _run_target_specific_commands(
+                candidate=_with_target_specific_items(candidate, delivery_items),
+                window=window,
+                candidate_dir=candidate_dir,
+                stems_dir=stems_dir,
+                command_runner=command_runner,
+                timeout_sec=timeout_sec,
+                route_cache=route_cache,
+                separator_backend_config=separator_backend_config,
+                separator_client=separator_client,
+                route_budget_profile=route_budget_profile,
+            )
+            stem_paths = _collect_stem_paths(stems_dir)
+            precheck = validate_model_split_v2_conservation(
+                mix_path=Path(str(window["mix_path"])),
+                stem_paths=stem_paths,
+                target_specific_composition=target_specific_composition,
+                config=candidate.get("delivery_pair_reconstruction")
+                if isinstance(candidate.get("delivery_pair_reconstruction"), Mapping)
+                else None,
+            )
+            delivery_pair_fail_fast = {
+                "enabled": True,
+                "checked_after_roles": sorted(MODEL_SPLIT_V2_DELIVERY_PAIR_ROLES),
+                "skipped_roles": [str(item.get("role") or "") for item in remaining_items],
+                "reconstruction": precheck,
+            }
+            if not precheck.get("ok"):
+                next_action = choose_next_action({"verdict": "blocked_bad_reconstruction", "reason": "delivery_pair_fail_fast"})
+                manifest.update(
+                    {
+                        "execution_status": "completed",
+                        "candidate_untrusted": True,
+                        "verdict": "blocked_bad_reconstruction",
+                        "stem_paths": stem_paths,
+                        "missing_stems": [],
+                        "reconstruction": precheck,
+                        "delivery_pair_fail_fast": delivery_pair_fail_fast,
+                        "target_specific_composition": target_specific_composition,
+                        "next_action": next_action,
+                        "delivery_allowed": False,
+                        "presentation_status": "blocked_from_listen_pack",
+                        "minus_source": _candidate_minus_source(candidate),
+                        "minus_rebuilt_from_non_vocal_stems": False,
+                    }
+                )
+                _write_json(
+                    candidate_dir / "score.json",
+                    {
+                        "verdict": "blocked_bad_reconstruction",
+                        "reconstruction": precheck,
+                        "delivery_pair_fail_fast": delivery_pair_fail_fast,
+                        "target_specific_composition": target_specific_composition,
+                        "next_action": next_action,
+                    },
+                )
+                _write_json(candidate_dir / "manifest.json", manifest)
+                return manifest
+            if remaining_items:
+                remaining_composition = _run_target_specific_commands(
+                    candidate=_with_target_specific_items(candidate, remaining_items),
+                    window=window,
+                    candidate_dir=candidate_dir,
+                    stems_dir=stems_dir,
+                    command_runner=command_runner,
+                    timeout_sec=timeout_sec,
+                    route_cache=route_cache,
+                    separator_backend_config=separator_backend_config,
+                    separator_client=separator_client,
+                    route_budget_profile=route_budget_profile,
+                )
+                target_specific_composition = _merge_target_specific_compositions(
+                    target_specific_composition,
+                    remaining_composition,
+                )
+        elif target_specific_commands:
             target_specific_composition = _run_target_specific_commands(
                 candidate=candidate,
                 window=window,
@@ -3794,6 +5102,9 @@ def execute_recipe_candidate(
                 command_runner=command_runner,
                 timeout_sec=timeout_sec,
                 route_cache=route_cache,
+                separator_backend_config=separator_backend_config,
+                separator_client=separator_client,
+                route_budget_profile=route_budget_profile,
             )
         else:
             replacements = {
@@ -3820,6 +5131,54 @@ def execute_recipe_candidate(
         )
         _write_json(candidate_dir / "manifest.json", manifest)
         _write_json(candidate_dir / "score.json", {"verdict": "blocked_unknown", "reason": "failed_timeout", "next_action": next_action})
+        return manifest
+    except PersistentSeparatorUnavailable as exc:
+        next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "separator_server_unavailable"})
+        manifest.update(
+            {
+                "execution_status": "failed_separator_backend_unavailable",
+                "verdict": "blocked_unknown",
+                "root_cause": "infra_gap",
+                "next_action": next_action,
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
+            }
+        )
+        _write_json(candidate_dir / "manifest.json", manifest)
+        _write_json(
+            candidate_dir / "score.json",
+            {
+                "verdict": "blocked_unknown",
+                "reason": "separator_server_unavailable",
+                "root_cause": "infra_gap",
+                "next_action": next_action,
+            },
+        )
+        return manifest
+    except PersistentSeparatorRejected as exc:
+        next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "separator_server_rejected"})
+        manifest.update(
+            {
+                "execution_status": "failed_separator_backend_rejected",
+                "verdict": "blocked_unknown",
+                "root_cause": "infra_gap",
+                "next_action": next_action,
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
+            }
+        )
+        _write_json(candidate_dir / "manifest.json", manifest)
+        _write_json(
+            candidate_dir / "score.json",
+            {
+                "verdict": "blocked_unknown",
+                "reason": "separator_server_rejected",
+                "root_cause": "infra_gap",
+                "next_action": next_action,
+            },
+        )
         return manifest
     except Exception as exc:
         next_action = choose_next_action({"verdict": "blocked_unknown", "reason": "failed_runtime_error"})
@@ -4040,6 +5399,7 @@ def execute_recipe_candidate(
                 "vocal_projection_debleed": vocal_projection_debleed,
                 "stem_merges": stem_merges,
                 "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                "delivery_pair_fail_fast": delivery_pair_fail_fast,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
                 "delivery_allowed": False,
@@ -4094,6 +5454,7 @@ def execute_recipe_candidate(
                 "vocal_projection_debleed": vocal_projection_debleed,
                 "stem_merges": stem_merges,
                 "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                "delivery_pair_fail_fast": delivery_pair_fail_fast,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
             },
@@ -4361,11 +5722,29 @@ def run_fully_automatic_stem_search(
     contamination_model_manifest: Path | None = None,
     profile: str = "",
     stem_region_repair_checkpoints: Sequence[Mapping[str, Any]] | None = None,
+    teacher_mask_checkpoints: Sequence[Mapping[str, Any]] | None = None,
+    root_cause_queue_jsonl: Path | None = None,
+    route_policy_checkpoint: Path | None = None,
+    route_policy_mode: str = "shadow",
+    separator_backend: str = MODE_SUBPROCESS,
+    separator_server_url: str = "",
+    separator_request_timeout_sec: float = 0.0,
+    min_gpu_free_mib: int = 0,
+    wait_for_gpu_free_sec: float = 0.0,
+    gpu_preflight_poll_sec: float = 5.0,
+    route_budget_profile: str = ROUTE_BUDGET_PROFILE_FULL,
 ) -> dict[str, Any]:
     if no_artifact_rag:
         validate_no_artifact_rag_output(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / "progress.jsonl"
+    separator_backend_config = make_separator_backend_config(
+        mode=separator_backend,
+        server_url=separator_server_url,
+        require_gpu=require_gpu,
+        device="cuda" if require_gpu else "cpu",
+        request_timeout_sec=separator_request_timeout_sec,
+    )
     _append_jsonl(
         progress_path,
         {
@@ -4377,6 +5756,15 @@ def run_fully_automatic_stem_search(
             "gpu_required": require_gpu,
             "artifact_rag_write_allowed": not no_artifact_rag,
             "profile": profile or "default",
+            "root_cause_queue_jsonl": str(root_cause_queue_jsonl or ""),
+            "route_policy_checkpoint": str(route_policy_checkpoint or ""),
+            "route_policy_mode": str(route_policy_mode or "shadow"),
+            "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+            "separator_backend": separator_backend_config.manifest(),
+            "teacher_mask_checkpoint_count": len(teacher_mask_checkpoints or []),
+            "min_gpu_free_mib": int(max(0, min_gpu_free_mib)),
+            "wait_for_gpu_free_sec": float(max(0.0, wait_for_gpu_free_sec)),
+            "gpu_preflight_poll_sec": float(max(0.1, gpu_preflight_poll_sec)),
         },
     )
 
@@ -4384,6 +5772,76 @@ def run_fully_automatic_stem_search(
     candidates: list[dict[str, Any]] = []
     windows: list[dict[str, Any]] = []
     recipe: dict[str, Any] | None = None
+    preloaded_root_cause_route_policy = _load_root_cause_route_policy(root_cause_queue_jsonl)
+    cuda_preflight = _collect_cuda_preflight(require_gpu=require_gpu, min_free_mib=min_gpu_free_mib)
+    wait_deadline = time.monotonic() + float(max(0.0, wait_for_gpu_free_sec))
+    poll_sec = float(max(0.1, gpu_preflight_poll_sec))
+    while (
+        require_gpu
+        and cuda_preflight.get("status") == "blocked"
+        and float(max(0.0, wait_for_gpu_free_sec)) > 0.0
+        and time.monotonic() < wait_deadline
+    ):
+        _append_jsonl(
+            progress_path,
+            {
+                "event": "gpu_preflight_wait",
+                "elapsed_sec": round(time.monotonic() - started, 6),
+                "poll_sec": poll_sec,
+                "deadline_remaining_sec": round(max(0.0, wait_deadline - time.monotonic()), 6),
+                **cuda_preflight,
+            },
+        )
+        time.sleep(min(poll_sec, max(0.0, wait_deadline - time.monotonic())))
+        cuda_preflight = _collect_cuda_preflight(require_gpu=require_gpu, min_free_mib=min_gpu_free_mib)
+    _append_jsonl(
+        progress_path,
+        {
+            "event": "gpu_preflight",
+            "elapsed_sec": round(time.monotonic() - started, 6),
+            **cuda_preflight,
+        },
+    )
+    if require_gpu and cuda_preflight.get("status") == "blocked":
+        run_manifest = {
+            "schema": "fully_automatic_stem_search_run.v1",
+            "mix_path": str(mix_path),
+            "output_dir": str(output_dir),
+            "window_sec": window_sec,
+            "max_candidates": max_candidates,
+            "gpu_required": require_gpu,
+            "artifact_rag_write_allowed": not no_artifact_rag,
+            "profile": profile or "default",
+            "root_cause_route_policy": preloaded_root_cause_route_policy,
+            "learned_route_policy": {},
+            "route_policy_checkpoint": str(route_policy_checkpoint or ""),
+            "route_policy_mode": str(route_policy_mode or "shadow"),
+            "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+            "separator_backend": separator_backend_config.manifest(),
+            "gpu_preflight": cuda_preflight,
+            "required_stems": list(STEMS),
+            "candidate_count": 0,
+            "candidates": [],
+            "accepted_window_candidates": {},
+            "verdict": "blocked_unknown",
+            "delivery_status": "blocked",
+            "delivery_allowed": False,
+            "presentation_status": "blocked_from_listen_pack",
+            "failed_checks": ["gpu_preflight_failed"],
+            "root_cause": "infra_gap",
+        }
+        _write_json(output_dir / "run.json", run_manifest)
+        _append_jsonl(
+            progress_path,
+            {
+                "event": "end",
+                "elapsed_sec": round(time.monotonic() - started, 6),
+                "verdict": "blocked_unknown",
+                "reason": cuda_preflight.get("reason") or "gpu_preflight_failed",
+            },
+        )
+        return run_manifest
+    learned_route_policy_model = _load_learned_route_policy_checkpoint(route_policy_checkpoint)
     if recipe_path is not None:
         recipe = json.loads(recipe_path.read_text(encoding="utf-8-sig"))
     elif allow_default_recipe:
@@ -4393,6 +5851,7 @@ def run_fully_automatic_stem_search(
                 demucs_available=demucs_available,
                 contamination_model_manifest=model_manifest,
                 stem_region_repair_checkpoints=stem_region_repair_checkpoints,
+                teacher_mask_checkpoints=teacher_mask_checkpoints,
             )
         else:
             recipe = build_default_from_scratch_recipe(
@@ -4401,6 +5860,14 @@ def run_fully_automatic_stem_search(
             )
     if recipe is not None and contamination_model_manifest is not None and not recipe.get("contamination_model_manifest"):
         recipe["contamination_model_manifest"] = str(contamination_model_manifest)
+    if recipe is not None and root_cause_queue_jsonl is not None:
+        recipe = _apply_root_cause_route_policy(recipe, root_cause_queue_jsonl=root_cause_queue_jsonl)
+    if recipe is not None and learned_route_policy_model is not None:
+        recipe = _apply_learned_route_policy_to_recipe(
+            recipe,
+            route_policy_model=learned_route_policy_model,
+            route_policy_mode=route_policy_mode,
+        )
 
     if recipe is not None and recipe.get("available", True) is False:
         run_manifest = {
@@ -4412,6 +5879,13 @@ def run_fully_automatic_stem_search(
             "gpu_required": require_gpu,
             "artifact_rag_write_allowed": not no_artifact_rag,
             "profile": profile or str((recipe or {}).get("profile") or "default"),
+            "root_cause_route_policy": (recipe or {}).get("root_cause_route_policy") or {},
+            "learned_route_policy": (recipe or {}).get("learned_route_policy") or {},
+            "route_policy_checkpoint": str(route_policy_checkpoint or ""),
+            "route_policy_mode": str(route_policy_mode or "shadow"),
+            "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+            "separator_backend": separator_backend_config.manifest(),
+            "gpu_preflight": cuda_preflight,
             "required_stems": list(STEMS),
             "candidate_count": 0,
             "candidates": [],
@@ -4449,6 +5923,13 @@ def run_fully_automatic_stem_search(
                 "gpu_required": require_gpu,
                 "artifact_rag_write_allowed": not no_artifact_rag,
                 "profile": profile or str((recipe or {}).get("profile") or "default"),
+                "root_cause_route_policy": (recipe or {}).get("root_cause_route_policy") or {},
+                "learned_route_policy": (recipe or {}).get("learned_route_policy") or {},
+                "route_policy_checkpoint": str(route_policy_checkpoint or ""),
+                "route_policy_mode": str(route_policy_mode or "shadow"),
+                "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+                "separator_backend": separator_backend_config.manifest(),
+                "gpu_preflight": cuda_preflight,
                 "required_stems": list(STEMS),
                 "candidate_count": 0,
                 "candidates": [],
@@ -4501,7 +5982,16 @@ def run_fully_automatic_stem_search(
                     command_runner=runner,
                     timeout_sec=timeout_sec,
                     route_cache=target_specific_route_cache,
+                    separator_backend_config=separator_backend_config,
+                    route_budget_profile=route_budget_profile,
                 )
+                if learned_route_policy_model is not None:
+                    candidate_manifest = _annotate_candidate_with_learned_route_policy(
+                        candidate_manifest,
+                        route_policy_model=learned_route_policy_model,
+                        route_policy_mode=route_policy_mode,
+                    )
+                    _persist_candidate_manifest(candidate_manifest)
                 window_candidates.append(candidate_manifest)
                 candidates.append(candidate_manifest)
                 _append_jsonl(
@@ -4541,6 +6031,13 @@ def run_fully_automatic_stem_search(
                     progress_callback=_write_composite_progress,
                 )
                 for composite in composite_candidates:
+                    if learned_route_policy_model is not None:
+                        composite = _annotate_candidate_with_learned_route_policy(
+                            composite,
+                            route_policy_model=learned_route_policy_model,
+                            route_policy_mode=route_policy_mode,
+                        )
+                        _persist_candidate_manifest(composite)
                     window_candidates.append(composite)
                     candidates.append(composite)
             window["candidates"] = window_candidates
@@ -4618,6 +6115,13 @@ def run_fully_automatic_stem_search(
         "gpu_required": require_gpu,
         "artifact_rag_write_allowed": not no_artifact_rag,
         "profile": profile or str((recipe or {}).get("profile") or "default"),
+        "root_cause_route_policy": (recipe or {}).get("root_cause_route_policy") or {},
+        "learned_route_policy": (recipe or {}).get("learned_route_policy") or {},
+        "route_policy_checkpoint": str(route_policy_checkpoint or ""),
+        "route_policy_mode": str(route_policy_mode or "shadow"),
+        "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+        "separator_backend": separator_backend_config.manifest(),
+        "gpu_preflight": cuda_preflight,
         "required_stems": list(STEMS),
         "candidate_count": len(candidates),
         "candidates": candidates,
@@ -4658,11 +6162,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recipe")
     parser.add_argument("--profile", choices=("", MODEL_SPLIT_V2_PROFILE), default="")
     parser.add_argument("--contamination-model-manifest")
+    parser.add_argument("--root-cause-queue", type=Path)
+    parser.add_argument("--route-policy-checkpoint", type=Path)
+    parser.add_argument("--route-policy-mode", choices=("shadow", "rank"), default="shadow")
+    parser.add_argument("--route-budget-profile", choices=ROUTE_BUDGET_PROFILES, default=ROUTE_BUDGET_PROFILE_FULL)
+    parser.add_argument("--separator-backend", choices=(MODE_SUBPROCESS, MODE_PERSISTENT_SERVER), default=MODE_SUBPROCESS)
+    parser.add_argument("--separator-server-url", default="")
+    parser.add_argument("--separator-request-timeout-sec", type=float, default=0.0)
+    parser.add_argument("--min-gpu-free-mib", type=int, default=DEFAULT_MIN_GPU_FREE_MIB)
+    parser.add_argument("--wait-for-gpu-free-sec", type=float, default=0.0)
+    parser.add_argument("--gpu-preflight-poll-sec", type=float, default=5.0)
+    parser.add_argument(
+        "--echo-progress",
+        dest="echo_progress",
+        action="store_true",
+        default=True,
+        help="Mirror progress.jsonl events to stderr during CLI runs",
+    )
+    parser.add_argument(
+        "--no-echo-progress",
+        dest="echo_progress",
+        action="store_false",
+        help="Write progress only to progress.jsonl",
+    )
     parser.add_argument(
         "--stem-region-repair-checkpoint",
         action="append",
         default=[],
-        help="Learned repair checkpoint spec: stem:issue_type:checkpoint_path",
+        help="Learned repair checkpoint spec: stem:issue_type:checkpoint_path or JSON object",
+    )
+    parser.add_argument(
+        "--teacher-mask-checkpoint",
+        action="append",
+        default=[],
+        help="Teacher-mask separator checkpoint candidate spec: role:stem:checkpoint_path",
     )
     parser.add_argument("--disable-default-recipe", action="store_true")
     return parser.parse_args()
@@ -4673,6 +6206,47 @@ def _parse_bool(value: Any) -> bool:
 
 
 def _parse_stem_region_repair_checkpoint_spec(value: str, *, index: int = 1) -> dict[str, str]:
+    raw_value = str(value or "").strip()
+    if raw_value.startswith("@"):
+        spec_path = Path(raw_value[1:])
+        try:
+            raw_value = spec_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise argparse.ArgumentTypeError(f"cannot read stem region repair checkpoint spec file: {spec_path}") from exc
+    if raw_value.startswith("{"):
+        try:
+            raw = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            raise argparse.ArgumentTypeError(f"invalid stem region repair checkpoint JSON: {exc}") from exc
+        if not isinstance(raw, Mapping):
+            raise argparse.ArgumentTypeError("stem region repair checkpoint JSON must be an object")
+        checkpoint = str(raw.get("checkpoint") or raw.get("checkpoint_path") or "").strip()
+        stem = str(raw.get("stem") or "").strip().lower()
+        issue_type = str(raw.get("issue_type") or "").strip().lower()
+        if not stem or not issue_type or not checkpoint:
+            raise argparse.ArgumentTypeError("stem region repair checkpoint JSON requires stem, issue_type, checkpoint")
+        result: dict[str, Any] = {
+            "repair_id": _safe_artifact_segment(str(raw.get("repair_id") or f"sr{int(index):03d}"), fallback=f"sr{int(index):03d}"),
+            "stem": stem,
+            "issue_type": issue_type,
+            "checkpoint": checkpoint,
+        }
+        for key in (
+            "forensic_source_condition_stem",
+            "mix_preserve_companion_stem",
+            "delivery_pair_compensation_strength",
+            "forensic_high_band_hz",
+        ):
+            raw_field = raw.get(key)
+            if raw_field not in (None, ""):
+                result[key] = raw_field
+        region = raw.get("region")
+        if isinstance(region, Mapping):
+            result["region"] = {
+                "start_sec": float(region.get("start_sec", 0.0)),
+                "end_sec": float(region.get("end_sec", 0.0)),
+            }
+        return result
     parts = str(value or "").split(":", 2)
     if len(parts) != 3 or not all(part.strip() for part in parts):
         raise argparse.ArgumentTypeError(
@@ -4687,11 +6261,31 @@ def _parse_stem_region_repair_checkpoint_spec(value: str, *, index: int = 1) -> 
     }
 
 
+def _parse_teacher_mask_checkpoint_spec(value: str, *, index: int = 1) -> dict[str, str]:
+    parts = str(value or "").split(":", 2)
+    if len(parts) != 3 or not all(part.strip() for part in parts):
+        raise argparse.ArgumentTypeError(
+            "teacher-mask checkpoint must be formatted as role:stem:checkpoint_path"
+        )
+    role, stem, checkpoint = (part.strip() for part in parts)
+    return {
+        "route_id": f"tm{int(index):03d}_{role.strip().lower()}",
+        "role": role.strip().lower(),
+        "stem": stem.strip().lower(),
+        "checkpoint": checkpoint,
+    }
+
+
 def main() -> None:
     args = parse_args()
+    os.environ["STEM_SEARCH_ECHO_PROGRESS"] = "1" if args.echo_progress else "0"
     stem_region_repair_checkpoints = [
         _parse_stem_region_repair_checkpoint_spec(spec, index=index)
         for index, spec in enumerate(args.stem_region_repair_checkpoint or [], start=1)
+    ]
+    teacher_mask_checkpoints = [
+        _parse_teacher_mask_checkpoint_spec(spec, index=index)
+        for index, spec in enumerate(args.teacher_mask_checkpoint or [], start=1)
     ]
     result = run_fully_automatic_stem_search(
         mix_path=Path(args.mix),
@@ -4705,6 +6299,17 @@ def main() -> None:
         contamination_model_manifest=Path(args.contamination_model_manifest) if args.contamination_model_manifest else None,
         profile=args.profile,
         stem_region_repair_checkpoints=stem_region_repair_checkpoints,
+        teacher_mask_checkpoints=teacher_mask_checkpoints,
+        root_cause_queue_jsonl=args.root_cause_queue,
+        route_policy_checkpoint=args.route_policy_checkpoint,
+        route_policy_mode=args.route_policy_mode,
+        separator_backend=args.separator_backend,
+        separator_server_url=args.separator_server_url,
+        separator_request_timeout_sec=args.separator_request_timeout_sec,
+        min_gpu_free_mib=args.min_gpu_free_mib,
+        wait_for_gpu_free_sec=args.wait_for_gpu_free_sec,
+        gpu_preflight_poll_sec=args.gpu_preflight_poll_sec,
+        route_budget_profile=args.route_budget_profile,
     )
     print(json.dumps(result, sort_keys=True))
 

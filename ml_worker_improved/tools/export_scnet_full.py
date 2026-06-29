@@ -33,6 +33,7 @@ SCNET_STEMS = ("drums", "bass", "other", "vocals")
 DEFAULT_REPO_PATH = Path("/app/vendor/music_source_separation_training")
 DEFAULT_CONFIG_PATH = Path("/app/vendor/scnet_xl_ihf/config_musdb18_scnet_xl_more_wide_v5.yaml")
 DEFAULT_MODEL_PATH = Path("/app/vendor/scnet_xl_ihf/model_scnet_ep_36_sdr_10.0891.ckpt")
+DEFAULT_SCNET_TIMEOUT_SEC = 180
 
 
 def _emit(message: str) -> None:
@@ -212,6 +213,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--device-id", type=int, default=0)
     parser.add_argument("--num-overlap", type=int, default=4)
+    parser.add_argument("--timeout-sec", type=int, default=DEFAULT_SCNET_TIMEOUT_SEC)
     parser.add_argument("--listen-dir", type=Path)
     parser.add_argument("--listen-stem", default="drums")
     parser.add_argument("--listen-label", default="01_scnet_drums.flac")
@@ -259,7 +261,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         full_input_path = input_dir / f"{MODEL_INPUT_STEM}.wav"
         runtime_config_path = config_dir / "config_runtime.yaml"
 
-        _emit(f"ENTER source_audio={source_audio_path} output_dir={output_dir} full_track=true")
+        if int(args.timeout_sec) <= 0:
+            raise ValueError(f"SCNet timeout must be positive: {args.timeout_sec}")
+        _emit(
+            f"ENTER source_audio={source_audio_path} output_dir={output_dir} "
+            f"full_track=true timeout_sec={int(args.timeout_sec)}"
+        )
         sample_rate, frames = save_audio_window_as_wav(
             source_audio_path,
             full_input_path,
@@ -288,13 +295,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--filename_template",
             "{file_name}/{instr}",
         ]
-        completed = subprocess.run(
-            command,
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=int(args.timeout_sec),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.output or ""
+            stderr = exc.stderr or ""
+            if stdout:
+                print(stdout, end="" if str(stdout).endswith("\n") else "\n", flush=True)
+            if stderr:
+                print(stderr, end="" if str(stderr).endswith("\n") else "\n", flush=True)
+            raise RuntimeError(f"scnet_subprocess_timeout timeout_sec={int(args.timeout_sec)}") from exc
         if completed.stdout.strip():
             print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n", flush=True)
         if completed.stderr.strip():

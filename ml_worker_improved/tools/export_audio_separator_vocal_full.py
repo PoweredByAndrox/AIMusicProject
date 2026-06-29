@@ -30,6 +30,7 @@ DEFAULT_AUDIO_SEPARATOR_PYTHON = Path("/opt/audio-separator-venv/bin/python")
 DEFAULT_MODEL_ID = "audio_separator_bs_roformer_vocals"
 DEFAULT_MODEL_DISPLAY_NAME = "Audio Separator BS-RoFormer vocal checkpoint"
 ROUTE_NAME = "audio_separator_uvr_full_track_vocals"
+DEFAULT_AUDIO_SEPARATOR_TIMEOUT_SEC = 180
 
 
 def _emit(message: str) -> None:
@@ -341,9 +342,12 @@ def run_audio_separator(
     mdx_overlap: float,
     mdx_batch_size: int,
     enable_denoise: bool,
+    timeout_sec: int = DEFAULT_AUDIO_SEPARATOR_TIMEOUT_SEC,
 ) -> list[str]:
     if not audio_separator_python.exists():
         raise FileNotFoundError(f"Audio Separator Python runtime is missing: {audio_separator_python}")
+    if int(timeout_sec) <= 0:
+        raise ValueError(f"Audio Separator timeout must be positive: {timeout_sec}")
 
     payload = {
         "source_audio_path": str(source_audio_path),
@@ -389,13 +393,23 @@ print(json.dumps({"output_files": list(output_files)}, ensure_ascii=False))
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as payload_file:
         payload_file.write(json.dumps(payload, ensure_ascii=False))
         payload_path = Path(payload_file.name)
+    command = [str(audio_separator_python), "-c", runner_code, str(payload_path)]
     try:
         completed = subprocess.run(
-            [str(audio_separator_python), "-c", runner_code, str(payload_path)],
+            command,
             capture_output=True,
             text=True,
             check=False,
+            timeout=int(timeout_sec),
         )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.output or ""
+        stderr = exc.stderr or ""
+        if stdout:
+            print(stdout, end="" if str(stdout).endswith("\n") else "\n", flush=True)
+        if stderr:
+            print(stderr, end="" if str(stderr).endswith("\n") else "\n", flush=True)
+        raise RuntimeError(f"audio_separator_subprocess_timeout timeout_sec={int(timeout_sec)}") from exc
     finally:
         payload_path.unlink(missing_ok=True)
     if completed.stdout.strip():
@@ -433,6 +447,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mdx-batch-size", type=int, default=1)
     parser.add_argument("--enable-denoise", action="store_true")
     parser.add_argument("--require-cuda-provider", action="store_true")
+    parser.add_argument("--timeout-sec", type=int, default=DEFAULT_AUDIO_SEPARATOR_TIMEOUT_SEC)
     parser.add_argument("--listen-dir")
     parser.add_argument("--listen-label", default="01_audio_separator_bs_roformer_vocals.flac")
     return parser
@@ -477,7 +492,8 @@ def main() -> None:
         _emit(
             "ENTER "
             f"source_audio={source_audio_path} output_dir={output_dir} "
-            f"model_filename={args.model_filename} full_track=true"
+            f"model_filename={args.model_filename} full_track=true "
+            f"timeout_sec={int(args.timeout_sec)}"
         )
         sample_rate, frames = save_audio_window_as_wav(
             source_audio_path,
@@ -497,6 +513,7 @@ def main() -> None:
             mdx_overlap=float(args.mdx_overlap),
             mdx_batch_size=int(args.mdx_batch_size),
             enable_denoise=bool(args.enable_denoise),
+            timeout_sec=int(args.timeout_sec),
         )
         _emit(f"audio_separator_outputs={output_files}")
 

@@ -119,6 +119,31 @@ def test_magnitude_network_can_emit_masks_above_one_when_ceiling_allows() -> Non
     assert float(prediction.max()) <= 1.70001
 
 
+def test_source_feature_memory_finds_exact_subsequence_match() -> None:
+    module = _load_module()
+    query = module.torch.tensor(
+        [
+            [1.0, 2.0, 3.0],
+            [1.5, 2.5, 3.5],
+            [2.0, 3.0, 4.0],
+        ],
+        dtype=module.torch.float32,
+    )
+    memory = module.torch.tensor(
+        [
+            [9.0, 9.0, 9.0],
+            [1.0, 2.0, 3.0],
+            [1.5, 2.5, 3.5],
+            [2.0, 3.0, 4.0],
+            [8.0, 8.0, 8.0],
+        ],
+        dtype=module.torch.float32,
+    )
+
+    assert module._features_are_exact_memory_match(query, memory) is False
+    assert module._find_exact_memory_subsequence(query, memory) == 1
+
+
 def test_magnitude_residual_mask_mode_is_identity_centered_and_bounded() -> None:
     module = _load_module()
     model = module.TeacherMaskNetwork(
@@ -533,6 +558,42 @@ def test_teacher_mask_dataset_progress_logs_batch_heartbeat_inside_epoch(tmp_pat
     feature_normalize_finish = next(row for row in progress_rows if row["event"] == "dataset_feature_normalize_finish")
     assert feature_stack_finish["normalization_strategy"] == "chunked_cpu_low_peak"
     assert feature_normalize_finish["normalization_strategy"] == "chunked_cpu_low_peak"
+
+
+def test_complex_temporal_prior_metadata_is_finite_for_near_floor_source(tmp_path: Path) -> None:
+    module = _load_module()
+    sample_rate = 4_000
+    time = np.arange(sample_rate // 4, dtype=np.float64) / float(sample_rate)
+    source = _stereo(1.0e-7 * np.sin(2.0 * np.pi * 520.0 * time))
+    target = _stereo(0.20 * np.sin(2.0 * np.pi * 520.0 * time))
+
+    _model, metadata, _diagnostics = module.train_teacher_mask(
+        source,
+        target,
+        config=module.TeacherMaskTrainConfig(
+            n_fft=128,
+            hop_length=32,
+            hidden_size=16,
+            epochs=1,
+            batch_size=16,
+            learning_rate=0.01,
+            mask_output_mode=module.MASK_OUTPUT_MODE_COMPLEX,
+            complex_mask_ceiling=2.0,
+            time_feature_count=1,
+            seed=920,
+            device="cpu",
+        ),
+        progress_path=tmp_path / "progress.jsonl",
+        progress_context={"scope": "complex_prior_finite_test"},
+    )
+
+    real = np.asarray(metadata["temporal_complex_mask_prior_real"], dtype=np.float32)
+    imag = np.asarray(metadata["temporal_complex_mask_prior_imag"], dtype=np.float32)
+
+    assert np.isfinite(real).all()
+    assert np.isfinite(imag).all()
+    assert float(np.max(np.abs(real))) <= 2.0001
+    assert float(np.max(np.abs(imag))) <= 2.0001
 
 
 def test_teacher_mask_dataset_cuda_keeps_precomputed_tensors_cpu_resident(tmp_path: Path) -> None:

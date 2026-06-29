@@ -221,6 +221,10 @@ curl http://localhost:8000/api/health
 # Health Ollama (нужен Bearer admin/user)
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/chat/ai/health
 
+# Опциональный vLLM backend
+docker compose --profile llm-vllm up -d vllm
+curl http://localhost:8001/v1/models
+
 # SSE-стрим очереди (admin)
 curl -N -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8000/api/queue-status/stream
 

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from tools.export_audio_separator_vocal_full import (
     _resolve_named_output,
     build_full_track_stem_manifest,
     build_runtime_contract_status,
+    run_audio_separator,
 )
 
 
@@ -106,3 +111,64 @@ def test_audio_separator_resolves_other_output_as_instrumental(tmp_path: Path) -
     )
 
     assert resolved == other_output
+
+
+def test_audio_separator_subprocess_uses_bounded_timeout(tmp_path: Path, monkeypatch) -> None:
+    fake_python = tmp_path / "python"
+    fake_python.write_text("stub", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["timeout"] = kwargs.get("timeout")
+
+        class Completed:
+            stdout = json.dumps({"output_files": ["vocals.flac", "instrumental.flac"]}) + "\n"
+            stderr = ""
+            returncode = 0
+
+        return Completed()
+
+    monkeypatch.setattr("tools.export_audio_separator_vocal_full.subprocess.run", fake_run)
+
+    output_files = run_audio_separator(
+        source_audio_path=tmp_path / "mix.flac",
+        model_output_dir=tmp_path / "out",
+        audio_separator_python=fake_python,
+        model_filename="model.ckpt",
+        model_file_dir=tmp_path / "models",
+        output_format="FLAC",
+        normalization_threshold=0.9,
+        mdx_overlap=0.25,
+        mdx_batch_size=1,
+        enable_denoise=False,
+        timeout_sec=7,
+    )
+
+    assert output_files == ["vocals.flac", "instrumental.flac"]
+    assert captured["timeout"] == 7
+
+
+def test_audio_separator_subprocess_timeout_reports_explicit_blocker(tmp_path: Path, monkeypatch) -> None:
+    fake_python = tmp_path / "python"
+    fake_python.write_text("stub", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, timeout=3, output="partial stdout", stderr="partial stderr")
+
+    monkeypatch.setattr("tools.export_audio_separator_vocal_full.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="audio_separator_subprocess_timeout"):
+        run_audio_separator(
+            source_audio_path=tmp_path / "mix.flac",
+            model_output_dir=tmp_path / "out",
+            audio_separator_python=fake_python,
+            model_filename="model.ckpt",
+            model_file_dir=tmp_path / "models",
+            output_format="FLAC",
+            normalization_threshold=0.9,
+            mdx_overlap=0.25,
+            mdx_batch_size=1,
+            enable_denoise=False,
+            timeout_sec=3,
+        )
