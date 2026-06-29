@@ -7,6 +7,7 @@ import pytest
 from tools.run_macos_remote_api_command import (
     PRESENTATION_STATUS,
     build_remote_script,
+    parse_args,
     run_macos_remote_api_command,
     validate_artifact_subdir,
 )
@@ -113,3 +114,24 @@ def test_remote_api_runner_reports_missing_ssh_client_fail_closed() -> None:
     assert result["returncode"] == 127
     assert result["error"]["type"] == "ssh_client_unavailable"
     assert result["delivery_allowed"] is False
+
+
+def test_parse_args_accepts_command_file_instead_of_inline_command(tmp_path: Path) -> None:
+    command_file = tmp_path / "cmd.sh"
+    command_file.write_text("python3 - <<'PY'\nprint('quoted')\nPY\n", encoding="utf-8")
+
+    args = parse_args(
+        [
+            "--ssh-target",
+            "mac",
+            "--ssh-key",
+            "key",
+            "--artifact-subdir",
+            "mac_api/cmd01",
+            "--command-file",
+            str(command_file),
+        ]
+    )
+
+    assert args.command is None
+    assert args.command_file == str(command_file)

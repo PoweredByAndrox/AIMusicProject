@@ -162,6 +162,32 @@ does not prove Metal/MPS GPU access for audio models inside the Linux container.
 The first real audio accelerator path remains native PyTorch MPS unless a
 separate container GPU proof is added.
 
+## Native PyTorch MPS status
+
+Native macOS MPS is the first confirmed accelerator path for audio tensor work
+on this Mac.
+
+Verified setup:
+
+- venv: `/Users/andrejviluha/aimusic_mps_venv`
+- Python: `3.9.6`
+- PyTorch: `2.8.0`
+- `torch.backends.mps.is_built() == true`
+- `torch.backends.mps.is_available() == true`
+- tensor probe device: `mps:0`
+- audio tensor probe: stereo synthetic waveform -> MPS `conv1d` -> WAV
+
+Diagnostic artifact:
+
+```text
+D:\AIMusicProject\artifacts\mac_api\mps_audio02\mps_audio_probe.json
+D:\AIMusicProject\artifacts\mac_api\mps_audio02\audio\mps_probe.wav
+```
+
+This proves native audio tensor operations can run through MPS and write results
+back to the Windows artifact folder. It is not a stem separation result and
+remains `delivery_allowed=false`.
+
 ## Not allowed
 
 - Do not install or run Qwen/vLLM as if it were a music separator.

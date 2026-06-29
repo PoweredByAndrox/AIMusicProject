@@ -216,7 +216,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ssh-key", required=True)
     parser.add_argument("--mac-artifact-root", default="/Users/andrejviluha/win_artifacts")
     parser.add_argument("--artifact-subdir", required=True)
-    parser.add_argument("--command", required=True)
+    command_group = parser.add_mutually_exclusive_group(required=True)
+    command_group.add_argument("--command")
+    command_group.add_argument("--command-file", type=str)
     parser.add_argument("--timeout-sec", type=int, default=600)
     parser.add_argument("--connect-timeout-sec", type=int, default=8)
     return parser.parse_args(argv)
@@ -224,12 +226,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
+    command = args.command
+    if args.command_file:
+        with open(args.command_file, "r", encoding="utf-8-sig", newline="") as handle:
+            command = handle.read()
     result = run_macos_remote_api_command(
         ssh_target=args.ssh_target,
         ssh_key=args.ssh_key,
         mac_artifact_root=args.mac_artifact_root,
         artifact_subdir=args.artifact_subdir,
-        command=args.command,
+        command=str(command or ""),
         timeout_sec=args.timeout_sec,
         connect_timeout_sec=args.connect_timeout_sec,
     )
