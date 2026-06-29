@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 
 SCHEMA = "macos_8gb_audio_runtime_plan.v1"
@@ -124,7 +124,7 @@ def collect_macos_runtime_checks() -> dict[str, dict[str, Any]]:
 def evaluate_macos_runtime_plan(
     checks: Mapping[str, Mapping[str, Any]],
     *,
-    platform_overrides: Mapping[str, Any] | None = None,
+    platform_overrides: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     overrides = dict(platform_overrides or {})
     system_name = str(overrides.get("system") or platform.system())
