@@ -98,6 +98,70 @@ mounted locally on the Mac:
 Keep generated artifact path segments short. Store host-specific details in
 `manifest.json`, not in directory names.
 
+## Mac API over shared artifacts
+
+The supported control shape is:
+
+```text
+Windows Codex -> SSH -> Mac command
+Mac command -> /Users/andrejviluha/win_artifacts/<short-id>/
+/Users/andrejviluha/win_artifacts -> SMB share -> D:\AIMusicProject\artifacts
+```
+
+Current verified mount contract:
+
+- Windows path: `D:\AIMusicProject\artifacts`
+- SMB share: `\\192.168.0.101\AIMusicArtifacts`
+- Mac mount: `/Users/andrejviluha/win_artifacts`
+- SSH target: `andrejviluha@192.168.0.167`
+
+Use `ml_worker_improved/tools/run_macos_remote_api_command.py` from Windows to
+send one bounded command to the Mac and force the Mac to write:
+
+- `manifest.json`
+- `progress.jsonl`
+- `stdout.txt`
+- `stderr.txt`
+
+Example:
+
+```powershell
+py -3 ml_worker_improved/tools/run_macos_remote_api_command.py `
+  --ssh-target andrejviluha@192.168.0.167 `
+  --ssh-key "$env:USERPROFILE\.ssh\id_ed25519_phone" `
+  --mac-artifact-root /Users/andrejviluha/win_artifacts `
+  --artifact-subdir mac_api/c001 `
+  --command "/usr/local/bin/container run --rm docker.io/library/alpine:latest uname -a"
+```
+
+The runner is diagnostic-only. It never writes listen packs and always keeps
+`delivery_allowed=false`. This is a control-plane SSH launcher; it is not an
+audio/model runtime and it does not relax the Docker-only contract for project
+tests or audio inference.
+
+## Apple container status
+
+`apple/container` is the Mac-native Linux container runtime to test first, not
+text vLLM. Verified local setup on the Mac:
+
+- CLI: `/usr/local/bin/container`
+- Version: `0.12.0`
+- System service: running
+- Kernel: recommended Kata `3.28.0` arm64
+- Smoke test: `container run --rm docker.io/library/alpine:latest uname -a`
+  returned Linux `aarch64`
+
+Diagnostic artifact:
+
+```text
+D:\AIMusicProject\artifacts\mac_api\container_smoke.json
+```
+
+The Linux container smoke proves remote API/container orchestration works. It
+does not prove Metal/MPS GPU access for audio models inside the Linux container.
+The first real audio accelerator path remains native PyTorch MPS unless a
+separate container GPU proof is added.
+
 ## Not allowed
 
 - Do not install or run Qwen/vLLM as if it were a music separator.
