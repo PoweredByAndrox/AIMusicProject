@@ -202,6 +202,61 @@ class TestDockerRuntimePolicy(unittest.TestCase):
         finally:
             module.Path = original_path
 
+    def test_shared_docker_runtime_guard_accepts_explicit_native_macos_diagnostic(self):
+        module = _load_docker_runtime_module()
+
+        class MissingDockerRuntimePath:
+            def __init__(self, value):
+                self.value = value
+
+            def exists(self):
+                return False
+
+        original_path = module.Path
+        original_platform_system = module.platform.system
+        original_env = dict(module.os.environ)
+        module.Path = MissingDockerRuntimePath
+        module.platform.system = lambda: "Darwin"
+        module.os.environ["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] = "1"
+        try:
+            module.require_docker_runtime(
+                tool_name="test_tool.py",
+                entrypoint_path="/app/tools/test_tool.py",
+            )
+        finally:
+            module.Path = original_path
+            module.platform.system = original_platform_system
+            module.os.environ.clear()
+            module.os.environ.update(original_env)
+
+    def test_shared_docker_runtime_guard_rejects_native_diagnostic_on_non_macos(self):
+        module = _load_docker_runtime_module()
+
+        class MissingDockerRuntimePath:
+            def __init__(self, value):
+                self.value = value
+
+            def exists(self):
+                return False
+
+        original_path = module.Path
+        original_platform_system = module.platform.system
+        original_env = dict(module.os.environ)
+        module.Path = MissingDockerRuntimePath
+        module.platform.system = lambda: "Linux"
+        module.os.environ["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] = "1"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "Docker-only"):
+                module.require_docker_runtime(
+                    tool_name="test_tool.py",
+                    entrypoint_path="/app/tools/test_tool.py",
+                )
+        finally:
+            module.Path = original_path
+            module.platform.system = original_platform_system
+            module.os.environ.clear()
+            module.os.environ.update(original_env)
+
     def test_audio_entrypoints_start_main_with_docker_runtime_guard(self):
         for entrypoint in REQUIRED_DOCKER_ONLY_ENTRYPOINTS:
             with self.subTest(entrypoint=entrypoint.name):

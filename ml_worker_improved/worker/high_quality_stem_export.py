@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -66,10 +67,42 @@ def _emit_progress(message: str) -> None:
     print(f"[hq_stem_export] {message}", flush=True)
 
 
+def _native_macos_diagnostic_allowed() -> bool:
+    return (
+        os.environ.get("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC") == "1"
+        and platform.system() == "Darwin"
+    )
+
+
 def verify_gpu_inference_device(requested: str | None = None) -> dict[str, Any]:
     requested_device = str(requested or "cuda").strip().lower() or "cuda"
     if requested_device == "cpu":
         raise RuntimeError("CUDA inference required for high-quality stem export but CPU was requested")
+    if requested_device == "mps":
+        if not _native_macos_diagnostic_allowed():
+            raise RuntimeError(
+                "MPS diagnostic inference requires AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC=1 on macOS"
+            )
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is None or not mps_backend.is_available():
+            raise RuntimeError("MPS diagnostic inference requested but no MPS device is available")
+        resolved_device = resolve_torch_device(
+            task_name="hq_stem_export",
+            requested=requested_device,
+            allow_cpu=False,
+        )
+        if resolved_device.type != "mps":
+            raise RuntimeError(f"MPS diagnostic inference requested but resolved device is {resolved_device}")
+        return {
+            "cuda_available": bool(torch.cuda.is_available()),
+            "mps_built": bool(mps_backend.is_built()) if hasattr(mps_backend, "is_built") else True,
+            "mps_available": True,
+            "requested_device": requested_device,
+            "resolved_device": str(resolved_device),
+            "device_count": 1,
+            "device_name": "Apple Metal Performance Shaders",
+            "acceleration_mode": "native_macos_mps_diagnostic",
+        }
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA inference required for high-quality stem export but no visible GPU is available")
     resolved_device = resolve_torch_device(

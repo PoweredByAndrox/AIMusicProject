@@ -947,6 +947,25 @@ class TestHighQualityStemExport(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "CUDA inference required"):
             hq_export.verify_gpu_inference_device("cuda")
 
+    @patch("worker.high_quality_stem_export.torch.cuda.is_available", return_value=False)
+    def test_verify_gpu_inference_device_rejects_mps_without_native_macos_diagnostic(self, _cuda_available_mock):
+        with self.assertRaisesRegex(RuntimeError, "MPS diagnostic"):
+            hq_export.verify_gpu_inference_device("mps")
+
+    @patch("worker.high_quality_stem_export.torch.cuda.is_available", return_value=False)
+    def test_verify_gpu_inference_device_accepts_explicit_native_macos_mps_diagnostic(self, _cuda_available_mock):
+        with patch.dict(hq_export.os.environ, {"AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC": "1"}, clear=False):
+            with patch.object(hq_export.platform, "system", return_value="Darwin"):
+                with patch.object(hq_export.torch.backends.mps, "is_available", return_value=True):
+                    with patch.object(hq_export.torch.backends.mps, "is_built", return_value=True):
+                        preflight = hq_export.verify_gpu_inference_device("mps")
+
+        self.assertEqual(preflight["requested_device"], "mps")
+        self.assertEqual(preflight["resolved_device"], "mps")
+        self.assertEqual(preflight["acceleration_mode"], "native_macos_mps_diagnostic")
+        self.assertEqual(preflight["mps_available"], True)
+        self.assertEqual(preflight["cuda_available"], False)
+
     def test_bs_roformer_stage_fails_closed_instead_of_allowing_cpu_fallback(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

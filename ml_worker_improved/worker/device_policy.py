@@ -29,6 +29,14 @@ def resolve_torch_device(
             return torch.device('cpu')
         return torch.device('cuda')
 
+    if requested_device == 'mps':
+        mps_backend = getattr(torch.backends, 'mps', None)
+        if mps_backend is not None and mps_backend.is_available():
+            return torch.device('mps')
+        if require_cuda or not allow_cpu:
+            raise RuntimeError(f"{task_name} requested MPS but no MPS device is available")
+        return torch.device('cpu')
+
     if requested_device == 'cpu':
         if require_cuda and not allow_cpu:
             raise RuntimeError(f"{task_name} requested CPU while REQUIRE_CUDA=1")
