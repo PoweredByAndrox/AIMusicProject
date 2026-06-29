@@ -236,6 +236,15 @@ Contract:
 - the optional Docker service is profile-gated as `audio-persistent-separator` and is independent
   from the optional `llm-vllm` text-controller service.
 
+## macOS 8GB runtime contract
+
+`docs/MACOS_8GB_AUDIO_RUNTIME.md` documents the constrained Mac runtime path. Docker Desktop,
+Docker VMM, Apple container tooling, and Docker Model Runner are not treated as Demucs/MDX/MelBand/
+SCNet GPU support unless a concrete audio route proves accelerator access on that host. The first
+supported Mac probe is native PyTorch MPS, recorded by
+`ml_worker_improved/tools/build_macos_8gb_runtime_plan.py`, and remains diagnostic-only with
+`delivery_allowed=false`.
+
 ## Runtime observability and GPU preflight
 
 `run_fully_automatic_stem_search.py` must not run long audio routes as a black box.
