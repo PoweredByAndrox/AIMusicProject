@@ -131,6 +131,34 @@ def test_scnet_cuda_preflight_fails_closed_when_cuda_is_unavailable(monkeypatch)
         raise AssertionError("SCNet CUDA preflight must fail closed when CUDA is unavailable")
 
 
+def test_scnet_preflight_accepts_explicit_native_macos_mps(monkeypatch) -> None:
+    module = _load_module()
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: False,
+            device_count=lambda: 0,
+            get_device_name=lambda _device_id: "missing",
+        ),
+        backends=SimpleNamespace(
+            mps=SimpleNamespace(
+                is_available=lambda: True,
+                is_built=lambda: True,
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setenv("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC", "1")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+
+    preflight = module.verify_cuda_inference_device(0)
+
+    assert preflight["requested_device"] == "mps"
+    assert preflight["resolved_device"] == "mps"
+    assert preflight["acceleration_mode"] == "native_macos_mps_diagnostic"
+    assert preflight["cuda_available"] is False
+
+
 def test_scnet_manifest_records_cuda_preflight(tmp_path: Path) -> None:
     module = _load_module()
     source_audio_path = tmp_path / "source.flac"

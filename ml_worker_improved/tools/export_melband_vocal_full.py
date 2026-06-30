@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -44,6 +46,13 @@ def _emit(message: str) -> None:
     print(f"[melband_vocal_full] {message}", flush=True)
 
 
+def _native_macos_diagnostic_allowed() -> bool:
+    return (
+        os.environ.get("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC") == "1"
+        and platform.system() == "Darwin"
+    )
+
+
 def verify_cuda_inference_device(device_id: int) -> dict[str, Any]:
     if int(device_id) < 0:
         raise RuntimeError(f"CUDA inference required for MelBand exporter but device_id is invalid: {device_id}")
@@ -54,6 +63,23 @@ def verify_cuda_inference_device(device_id: int) -> dict[str, Any]:
 
     cuda = getattr(torch, "cuda", None)
     if cuda is None or not bool(cuda.is_available()):
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        if (
+            _native_macos_diagnostic_allowed()
+            and mps_backend is not None
+            and bool(mps_backend.is_available())
+        ):
+            return {
+                "cuda_available": False,
+                "mps_built": bool(mps_backend.is_built()) if hasattr(mps_backend, "is_built") else True,
+                "mps_available": True,
+                "requested_device": "mps",
+                "resolved_device": "mps",
+                "device_id": int(device_id),
+                "device_count": 1,
+                "device_name": "Apple Metal Performance Shaders",
+                "acceleration_mode": "native_macos_mps_diagnostic",
+            }
         raise RuntimeError("CUDA inference required for MelBand exporter but torch.cuda.is_available() is false")
     device_count = int(cuda.device_count())
     if int(device_id) >= device_count:
@@ -545,7 +571,7 @@ def main() -> None:
         output_contract = load_melband_output_contract(runtime_config_path)
 
         command = [
-            "python",
+            sys.executable,
             "inference.py",
             "--model_type",
             "mel_band_roformer",

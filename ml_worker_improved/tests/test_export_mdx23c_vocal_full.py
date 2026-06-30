@@ -137,6 +137,34 @@ def test_mdx23c_cuda_preflight_fails_closed_when_cuda_is_unavailable(monkeypatch
         raise AssertionError("MDX23C CUDA preflight must fail closed when CUDA is unavailable")
 
 
+def test_mdx23c_preflight_accepts_explicit_native_macos_mps(monkeypatch) -> None:
+    module = _load_mdx23c_full_module()
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: False,
+            device_count=lambda: 0,
+            get_device_name=lambda _device_id: "missing",
+        ),
+        backends=SimpleNamespace(
+            mps=SimpleNamespace(
+                is_available=lambda: True,
+                is_built=lambda: True,
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setenv("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC", "1")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+
+    preflight = module.verify_cuda_inference_device(0)
+
+    assert preflight["requested_device"] == "mps"
+    assert preflight["resolved_device"] == "mps"
+    assert preflight["acceleration_mode"] == "native_macos_mps_diagnostic"
+    assert preflight["cuda_available"] is False
+
+
 def test_mdx23c_subprocess_uses_bounded_timeout(tmp_path: Path, monkeypatch) -> None:
     module = _load_mdx23c_full_module()
     source_audio_path = tmp_path / "source.flac"

@@ -170,6 +170,47 @@ def test_verify_cuda_inference_device_returns_device_evidence(monkeypatch: pytes
     }
 
 
+def test_melband_preflight_accepts_explicit_native_macos_mps(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_melband_full_module()
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+        @staticmethod
+        def device_count() -> int:
+            return 0
+
+        @staticmethod
+        def get_device_name(_device_id: int) -> str:
+            return "missing"
+
+    class FakeMps:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_built() -> bool:
+            return True
+
+    class FakeTorch:
+        cuda = FakeCuda()
+        backends = type("Backends", (), {"mps": FakeMps()})()
+
+    monkeypatch.setitem(sys.modules, "torch", FakeTorch())
+    monkeypatch.setenv("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC", "1")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+
+    preflight = module.verify_cuda_inference_device(0)
+
+    assert preflight["requested_device"] == "mps"
+    assert preflight["resolved_device"] == "mps"
+    assert preflight["acceleration_mode"] == "native_macos_mps_diagnostic"
+    assert preflight["cuda_available"] is False
+
+
 def test_writes_full_track_manifest_to_expected_stem_manifest_path(tmp_path: Path) -> None:
     module = _load_melband_full_module()
     output_dir = tmp_path / "candidate"
@@ -375,6 +416,75 @@ def test_main_rejects_two_stem_config_when_model_omits_vocals(tmp_path: Path, mo
 
     with pytest.raises(FileNotFoundError, match="vocals output is missing"):
         module.main()
+
+
+def test_main_uses_current_python_for_vendor_inference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    repo_path = tmp_path / "repo"
+    model_path = tmp_path / "model.ckpt"
+    config_path = tmp_path / "config.yaml"
+    repo_path.mkdir()
+    model_path.write_text("stub checkpoint", encoding="utf-8")
+    _write_tiny_flac(source_audio_path, sample_rate=44100, frames=8)
+    config_path.write_text(
+        yaml.dump(
+            {
+                "audio": {"chunk_size": 44100},
+                "model": {"num_stems": 2},
+                "training": {"instruments": ["Vocals", "Instrumental"]},
+                "inference": {"num_overlap": 2},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    raw_audio = np.array([[0.5, -0.5], [0.2, -0.2]], dtype=np.float32)
+    vocals_audio = np.array([[0.4, -0.4], [0.1, -0.1]], dtype=np.float32)
+    instrumental_audio = raw_audio - vocals_audio
+    captured: dict[str, list[str]] = {}
+
+    def fake_save_audio_window_as_wav(_source: Path, target: Path, *_args, **_kwargs):
+        sf.write(str(target), raw_audio, 44100, subtype="FLOAT")
+        return 44100, int(raw_audio.shape[0])
+
+    def fake_run(command: list[str], *_args, **_kwargs):
+        captured["command"] = command
+        store_dir = Path(command[command.index("--store_dir") + 1])
+        store_dir.mkdir(parents=True, exist_ok=True)
+        sf.write(str(store_dir / "full_track_vocals.wav"), vocals_audio, 44100, subtype="FLOAT")
+        sf.write(str(store_dir / "full_track_instrumental.wav"), instrumental_audio, 44100, subtype="FLOAT")
+        return module.subprocess.CompletedProcess(command, 0, stdout="fake inference\n", stderr="")
+
+    monkeypatch.setattr(module, "require_docker_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(module, "verify_cuda_inference_device", lambda _device_id: {"device_id": 0, "device_count": 1, "device_name": "test"})
+    monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "apply_light_debleed_presence", _neutral_audio)
+    monkeypatch.setattr(module, "apply_peak_note_debleed", _neutral_audio)
+    monkeypatch.setattr(module, "apply_windowed_note_notch", _neutral_audio)
+    monkeypatch.setattr(module, "apply_surgical_notches", _neutral_audio)
+    monkeypatch.setattr(module, "apply_windowed_band_subtract", _neutral_audio)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_melband_vocal_full.py",
+            str(source_audio_path),
+            str(output_dir),
+            "--repo-path",
+            str(repo_path),
+            "--model-path",
+            str(model_path),
+            "--config-path",
+            str(config_path),
+        ],
+    )
+
+    module.main()
+
+    assert captured["command"][0] == sys.executable
 
 
 def test_manifest_records_residual_companion_materialization(tmp_path: Path) -> None:

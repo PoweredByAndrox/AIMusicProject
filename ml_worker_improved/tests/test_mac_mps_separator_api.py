@@ -78,6 +78,70 @@ def test_mac_api_export_command_uses_mps_native_diagnostic(tmp_path):
     assert "--no-melody-stem" in command
 
 
+def test_mac_api_mdx23c_route_uses_local_vendor_paths(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="mdx23c_vocals",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    assert env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] == "1"
+    assert "tools/export_mdx23c_vocal_full.py" in command[1].replace("\\", "/")
+    assert "--repo-path" in command
+    assert str(tmp_path / "project" / "ml_worker_improved" / "vendor" / "music_source_separation_training") in command
+    assert "--config-path" in command
+    assert str(tmp_path / "project" / "ml_worker_improved" / "vendor" / "mdx23c_vocals_official" / "config_vocals_mdx23c.yaml") in command
+    assert "--model-path" in command
+    assert str(tmp_path / "project" / "ml_worker_improved" / "vendor" / "mdx23c_vocals_official" / "model_vocals_mdx23c_sdr_10.17.ckpt") in command
+    assert "--timeout-sec" not in command
+
+
+def test_mac_api_scnet_route_uses_extended_mps_timeout(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="scnet_xl_ihf_musdb18",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    assert env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] == "1"
+    assert "tools/export_scnet_full.py" in command[1].replace("\\", "/")
+    assert "--timeout-sec" in command
+    assert command[command.index("--timeout-sec") + 1] == module.SCNET_MPS_TIMEOUT_SEC
+
+
+def test_mac_api_rejects_unknown_route(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    with pytest.raises(ValueError, match="unsupported Mac MPS route"):
+        module.build_separator_export_command(
+            config=config,
+            route_id="raw_track_title_bad_route",
+            source_audio_path=tmp_path / "mix.flac",
+            output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+        )
+
+
 def test_mac_api_job_manifest_is_diagnostic_only(tmp_path):
     module = _load_module()
 

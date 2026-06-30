@@ -20,6 +20,12 @@ from urllib.parse import urlparse
 
 
 DEFAULT_MODEL_NAME = "htdemucs_6s"
+DEMUX_ROUTE_IDS = {"htdemucs_6s", "demucs_htdemucs_6s"}
+MDX23C_ROUTE_ID = "mdx23c_vocals"
+MELBAND_ROUTE_ID = "melband_roformer_vocals"
+SCNET_ROUTE_ID = "scnet_xl_ihf_musdb18"
+SUPPORTED_ROUTE_IDS = DEMUX_ROUTE_IDS | {MDX23C_ROUTE_ID, MELBAND_ROUTE_ID, SCNET_ROUTE_ID}
+SCNET_MPS_TIMEOUT_SEC = "900"
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,97 @@ def build_demucs_export_command(
     return command, env
 
 
+def _diagnostic_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] = "1"
+    return env
+
+
+def _vendor_path(config: MacMpsApiConfig, *parts: str) -> Path:
+    return config.project_root / "ml_worker_improved" / "vendor" / Path(*parts)
+
+
+def build_separator_export_command(
+    *,
+    config: MacMpsApiConfig,
+    route_id: str,
+    source_audio_path: Path,
+    output_dir: Path,
+) -> tuple[list[str], dict[str, str]]:
+    normalized_route = str(route_id or "").strip()
+    if normalized_route not in SUPPORTED_ROUTE_IDS:
+        raise ValueError(f"unsupported Mac MPS route: {normalized_route}")
+    if normalized_route in DEMUX_ROUTE_IDS:
+        return build_demucs_export_command(
+            config=config,
+            source_audio_path=source_audio_path,
+            output_dir=output_dir,
+            model_name=DEFAULT_MODEL_NAME,
+        )
+
+    tools_dir = config.project_root / "ml_worker_improved" / "tools"
+    repo_path = _vendor_path(config, "music_source_separation_training")
+    command = [str(config.python_bin)]
+    if normalized_route == MDX23C_ROUTE_ID:
+        command.extend(
+            [
+                str(tools_dir / "export_mdx23c_vocal_full.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--repo-path",
+                str(repo_path),
+                "--config-path",
+                str(_vendor_path(config, "mdx23c_vocals_official", "config_vocals_mdx23c.yaml")),
+                "--model-path",
+                str(_vendor_path(config, "mdx23c_vocals_official", "model_vocals_mdx23c_sdr_10.17.ckpt")),
+                "--device-id",
+                "0",
+            ]
+        )
+    elif normalized_route == MELBAND_ROUTE_ID:
+        command.extend(
+            [
+                str(tools_dir / "export_melband_vocal_full.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--repo-path",
+                str(_vendor_path(config, "mel_band_roformer_vocal_model")),
+                "--config-path",
+                str(
+                    _vendor_path(
+                        config,
+                        "mel_band_roformer_vocal_model",
+                        "configs",
+                        "config_vocals_mel_band_roformer.yaml",
+                    )
+                ),
+                "--model-path",
+                str(_vendor_path(config, "mel_band_roformer_vocal_model_weights", "MelBandRoformer.ckpt")),
+                "--device-id",
+                "0",
+            ]
+        )
+    elif normalized_route == SCNET_ROUTE_ID:
+        command.extend(
+            [
+                str(tools_dir / "export_scnet_full.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--repo-path",
+                str(repo_path),
+                "--config-path",
+                str(_vendor_path(config, "scnet_xl_ihf", "config_musdb18_scnet_xl_more_wide_v5.yaml")),
+                "--model-path",
+                str(_vendor_path(config, "scnet_xl_ihf", "model_scnet_ep_36_sdr_10.0891.ckpt")),
+                "--device-id",
+                "0",
+                "--timeout-sec",
+                SCNET_MPS_TIMEOUT_SEC,
+            ]
+        )
+    return command, _diagnostic_env()
+
+
 def build_job_manifest(
     *,
     job_id: str,
@@ -103,6 +200,7 @@ def build_job_manifest(
     source_audio_path: Path,
     output_dir: Path,
     model_name: str = DEFAULT_MODEL_NAME,
+    route_id: str = DEFAULT_MODEL_NAME,
     returncode: Optional[int] = None,
     error: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -111,6 +209,7 @@ def build_job_manifest(
         "job_id": str(job_id),
         "status": str(status),
         "model_name": str(model_name),
+        "route_id": str(route_id),
         "source_audio_path": str(source_audio_path),
         "output_dir": str(output_dir),
         "run_dir": str(output_dir / "run"),
@@ -166,7 +265,8 @@ class MacMpsJobRunner:
 
     def start_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         source_audio_path = Path(str(payload["source_audio_path"])).expanduser().resolve()
-        model_name = str(payload.get("model_name") or DEFAULT_MODEL_NAME)
+        route_id = str(payload.get("route_id") or payload.get("model_name") or DEFAULT_MODEL_NAME)
+        model_name = str(payload.get("model_name") or route_id)
         job_id = make_job_id(str(source_audio_path))
         output_subdir = str(payload.get("output_subdir") or f"mac_api/{job_id}")
         output_dir = resolve_job_output_dir(self.config, output_subdir)
@@ -176,6 +276,7 @@ class MacMpsJobRunner:
             source_audio_path=source_audio_path,
             output_dir=output_dir,
             model_name=model_name,
+            route_id=route_id,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(output_dir / "manifest.json", manifest)
@@ -183,7 +284,7 @@ class MacMpsJobRunner:
             self._jobs[job_id] = manifest
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, source_audio_path, output_dir, model_name),
+            args=(job_id, source_audio_path, output_dir, model_name, route_id),
             daemon=True,
         )
         thread.start()
@@ -203,7 +304,14 @@ class MacMpsJobRunner:
                 return candidate
         return None
 
-    def _run_job(self, job_id: str, source_audio_path: Path, output_dir: Path, model_name: str) -> None:
+    def _run_job(
+        self,
+        job_id: str,
+        source_audio_path: Path,
+        output_dir: Path,
+        model_name: str,
+        route_id: str,
+    ) -> None:
         progress_path = output_dir / "progress.jsonl"
         run_dir = output_dir / "run"
         run_log_path = output_dir / "run.log"
@@ -213,6 +321,7 @@ class MacMpsJobRunner:
             source_audio_path=source_audio_path,
             output_dir=output_dir,
             model_name=model_name,
+            route_id=route_id,
         )
         _write_json(output_dir / "manifest.json", manifest)
         with self._lock:
@@ -220,15 +329,24 @@ class MacMpsJobRunner:
         _append_progress(progress_path, "preflight", "start")
         if not source_audio_path.exists():
             error = f"source audio is missing: {source_audio_path}"
-            self._finish(job_id, source_audio_path, output_dir, model_name, status="failed", returncode=20, error=error)
+            self._finish(
+                job_id,
+                source_audio_path,
+                output_dir,
+                model_name,
+                route_id,
+                status="failed",
+                returncode=20,
+                error=error,
+            )
             _append_progress(progress_path, "preflight", "missing_source", error=error)
             return
         _append_progress(progress_path, "preflight", "end")
-        command, env = build_demucs_export_command(
+        command, env = build_separator_export_command(
             config=self.config,
+            route_id=route_id,
             source_audio_path=source_audio_path,
             output_dir=run_dir,
-            model_name=model_name,
         )
         _append_progress(progress_path, "mps_export", "start", command=command)
         started_at = time.perf_counter()
@@ -255,6 +373,7 @@ class MacMpsJobRunner:
             source_audio_path,
             output_dir,
             model_name,
+            route_id,
             status=status,
             returncode=int(completed.returncode),
             error=None if completed.returncode == 0 else f"export failed rc={completed.returncode}",
@@ -267,6 +386,7 @@ class MacMpsJobRunner:
         source_audio_path: Path,
         output_dir: Path,
         model_name: str,
+        route_id: str,
         *,
         status: str,
         returncode: int,
@@ -278,6 +398,7 @@ class MacMpsJobRunner:
             source_audio_path=source_audio_path,
             output_dir=output_dir,
             model_name=model_name,
+            route_id=route_id,
             returncode=returncode,
             error=error,
         )
