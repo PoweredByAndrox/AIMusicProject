@@ -192,6 +192,22 @@ does not prove Metal/MPS GPU access for audio models inside the Linux container.
 The first real audio accelerator path remains native PyTorch MPS unless a
 separate container GPU proof is added.
 
+Project metadata tests can be verified inside Apple `container` with:
+
+```bash
+python3 ml_worker_improved/tools/run_apple_container_project_smoke.py \
+  --project-root /Users/andrejviluha/aimusic_remote_work_it024 \
+  --output-dir /Users/andrejviluha/aimusic_local_artifacts/host_artifacts/loop/it035/acsm001 \
+  --image docker.io/library/python:3.11-alpine
+```
+
+This smoke uses a read-only project mount, writes
+`apple_container_project_smoke.v1`, and remains diagnostic-only:
+`delivery_allowed=false`, `audio_generated=false`,
+`gpu_inference_skipped=true`. The `docker.io/library/...` image string is an
+OCI registry reference consumed by Apple `container`; it is not approval to use
+Docker CLI, Docker daemon, Docker Desktop, or `docker compose` on Mac.
+
 ## Native PyTorch MPS status
 
 Native macOS MPS is the first confirmed accelerator path for audio tensor work

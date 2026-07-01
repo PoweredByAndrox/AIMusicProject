@@ -15,7 +15,10 @@ SUPPORTED_CONTAINER_RUNTIME_MARKERS = ("apple_container", "docker")
 
 
 def running_inside_docker() -> bool:
-    return Path("/.dockerenv").exists() or Path("/app").exists()
+    if Path("/.dockerenv").exists():
+        return True
+    marker = explicit_container_runtime_marker()
+    return bool(marker and platform.system() != "Darwin")
 
 
 def _native_macos_diagnostic_allowed(*, explicit: bool = False) -> bool:

@@ -170,8 +170,10 @@ class TestDockerRuntimePolicy(unittest.TestCase):
 
         original_path = module.Path
         original_platform_system = module.platform.system
+        original_env = dict(module.os.environ)
         module.Path = MissingDockerRuntimePath
         module.platform.system = lambda: "Linux"
+        module.os.environ.pop("AIMUSIC_CONTAINER_RUNTIME", None)
         try:
             with self.assertRaisesRegex(
                 RuntimeError,
@@ -184,6 +186,8 @@ class TestDockerRuntimePolicy(unittest.TestCase):
         finally:
             module.Path = original_path
             module.platform.system = original_platform_system
+            module.os.environ.clear()
+            module.os.environ.update(original_env)
 
     def test_shared_docker_runtime_guard_accepts_docker_marker(self):
         module = _load_docker_runtime_module()
@@ -315,6 +319,38 @@ class TestDockerRuntimePolicy(unittest.TestCase):
             module.os.environ.clear()
             module.os.environ.update(original_env)
 
+    def test_shared_runtime_guard_rejects_macos_host_even_when_app_path_exists(self):
+        module = _load_docker_runtime_module()
+
+        class AppPathExists:
+            def __init__(self, value):
+                self.value = value
+
+            def exists(self):
+                return self.value == "/app"
+
+        original_path = module.Path
+        original_platform_system = module.platform.system
+        original_env = dict(module.os.environ)
+        module.Path = AppPathExists
+        module.platform.system = lambda: "Darwin"
+        module.os.environ.pop("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC", None)
+        module.os.environ.pop("AIMUSIC_CONTAINER_RUNTIME", None)
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Apple container.*/usr/local/bin/container.*not approved.*docker compose",
+            ):
+                module.require_docker_runtime(
+                    tool_name="test_tool.py",
+                    entrypoint_path="/app/tools/test_tool.py",
+                )
+        finally:
+            module.Path = original_path
+            module.platform.system = original_platform_system
+            module.os.environ.clear()
+            module.os.environ.update(original_env)
+
     def test_shared_docker_runtime_guard_rejects_native_diagnostic_on_non_macos(self):
         module = _load_docker_runtime_module()
 
@@ -331,6 +367,7 @@ class TestDockerRuntimePolicy(unittest.TestCase):
         module.Path = MissingDockerRuntimePath
         module.platform.system = lambda: "Linux"
         module.os.environ["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] = "1"
+        module.os.environ.pop("AIMUSIC_CONTAINER_RUNTIME", None)
         try:
             with self.assertRaisesRegex(RuntimeError, "Docker-only"):
                 module.require_docker_runtime(
