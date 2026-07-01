@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
@@ -39,6 +39,12 @@ class StemRegionRepairTrainConfig:
     forensic_source_envelope_loss_weight: float = 0.0
     forensic_source_active_energy_loss_weight: float = 0.0
     forensic_source_target_loss_weight: float = 0.0
+    forensic_source_correlation_loss_weight: float = 0.0
+    forensic_source_projection_margin_loss_weight: float = 0.0
+    forensic_source_projection_margin: float = 0.0
+    forensic_source_hard_region_loss_weight: float = 0.0
+    instrumental_region_delta_ratio_loss_weight: float = 0.0
+    instrumental_region_delta_ratio_limit: float = 0.42
     forensic_envelope_window_ms: float = 20.0
     forensic_source_conditioning: bool = False
     allow_weak_teacher_region_loss: bool = False
@@ -56,6 +62,20 @@ def issue_index(issue_type: str) -> int:
     if normalized not in ISSUE_TYPES:
         normalized = "unknown"
     return ISSUE_TYPES.index(normalized)
+
+
+def resolve_region_repair_training_device(requested_device: str | torch.device) -> torch.device:
+    normalized = str(requested_device or "cpu").strip().lower()
+    if normalized == "cpu":
+        return torch.device("cpu")
+    if normalized.startswith("cuda"):
+        return torch.device(normalized if torch.cuda.is_available() else "cpu")
+    if normalized == "mps":
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        if mps_backend is not None and bool(mps_backend.is_available()):
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(normalized)
 
 
 class StemRegionRepairNet(nn.Module):
@@ -181,6 +201,23 @@ def build_repair_features(
     return torch.from_numpy(features[None, ...]).to(device=device, dtype=torch.float32)
 
 
+def masked_region_delta_ratio_loss(
+    *,
+    pred_delta: torch.Tensor,
+    reference_stem: torch.Tensor,
+    mask_t: torch.Tensor,
+    max_delta_ratio: float,
+) -> torch.Tensor:
+    """Penalize region edits whose RMS exceeds the damage-audit delta budget."""
+
+    weights = mask_t.expand_as(pred_delta)
+    active = torch.clamp(torch.sum(weights), min=1.0)
+    delta_rms = torch.sqrt(torch.sum(torch.square(pred_delta) * weights) / active + EPSILON)
+    reference_rms = torch.sqrt(torch.sum(torch.square(reference_stem) * weights) / active + EPSILON)
+    ratio = delta_rms / torch.clamp(reference_rms, min=EPSILON)
+    return torch.square(torch.relu(ratio - max(0.0, float(max_delta_ratio))))
+
+
 def train_region_repair_model_from_arrays(
     *,
     mix_audio: np.ndarray,
@@ -191,9 +228,11 @@ def train_region_repair_model_from_arrays(
     stem_sum_before_audio: np.ndarray | None = None,
     forensic_source_audio: np.ndarray | None = None,
     region_mask: np.ndarray,
+    region_constraint_masks: Sequence[np.ndarray] | None = None,
     sample_rate: int,
     issue_type: str,
     config: StemRegionRepairTrainConfig | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[StemRegionRepairNet, dict[str, Any]]:
     config = config or StemRegionRepairTrainConfig()
     mix, bad, mask = _prepare_arrays(mix_audio=mix_audio, bad_stem_audio=bad_stem_audio, region_mask=region_mask)
@@ -228,6 +267,14 @@ def train_region_repair_model_from_arrays(
     mask = mask[:frames]
     if float(np.max(mask)) <= 0.0:
         raise ValueError("region_mask must include at least one active frame")
+    constraint_masks: list[np.ndarray] = []
+    for raw_constraint_mask in region_constraint_masks or []:
+        constraint_mask = np.asarray(raw_constraint_mask, dtype=np.float32).reshape(-1)
+        if constraint_mask.shape[0] < frames:
+            raise ValueError("region_constraint_mask shorter than repair arrays")
+        constraint_mask = np.clip(constraint_mask[:frames], 0.0, 1.0).astype(np.float32)
+        if float(np.max(constraint_mask)) > 0.0:
+            constraint_masks.append(constraint_mask)
     mix_conservation_enabled = (
         sibling is not None
         and target_mix is not None
@@ -256,7 +303,56 @@ def train_region_repair_model_from_arrays(
         forensic_source is not None
         and float(config.forensic_source_target_loss_weight) > 0.0
     )
+    forensic_source_correlation_enabled = (
+        forensic_source is not None
+        and float(config.forensic_source_correlation_loss_weight) > 0.0
+    )
+    forensic_source_projection_margin_enabled = (
+        forensic_source is not None
+        and float(config.forensic_source_projection_margin_loss_weight) > 0.0
+    )
+    forensic_source_hard_region_enabled = (
+        forensic_source is not None
+        and float(config.forensic_source_hard_region_loss_weight) > 0.0
+    )
+    instrumental_region_delta_ratio_enabled = float(config.instrumental_region_delta_ratio_loss_weight) > 0.0
     source_condition = forensic_source if bool(config.forensic_source_conditioning) and forensic_source is not None else None
+
+    def _active_mask_ranges(mask_array: np.ndarray) -> list[tuple[int, int]]:
+        active = np.flatnonzero(np.asarray(mask_array, dtype=np.float32) > 1.0e-4)
+        if active.size <= 0:
+            return []
+        ranges: list[tuple[int, int]] = []
+        start = int(active[0])
+        previous = int(active[0])
+        for frame in active[1:]:
+            frame = int(frame)
+            if frame == previous + 1:
+                previous = frame
+                continue
+            ranges.append((start, previous + 1))
+            start = frame
+            previous = frame
+        ranges.append((start, previous + 1))
+        return ranges
+
+    hard_region_ranges = _active_mask_ranges(mask) if forensic_source_hard_region_enabled else []
+    damage_region_ranges = (
+        _active_mask_ranges(mask)
+        if instrumental_region_delta_ratio_enabled and not constraint_masks
+        else []
+    )
+
+    def _weighted_normalized_corr(tested: torch.Tensor, source: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        active = torch.clamp(torch.sum(weights), min=1.0)
+        tested_mean = torch.sum(tested * weights) / active
+        source_mean = torch.sum(source * weights) / active
+        tested_centered = (tested - tested_mean) * weights
+        source_centered = (source - source_mean) * weights
+        denom = torch.sqrt(
+            torch.sum(torch.square(tested_centered)) * torch.sum(torch.square(source_centered)) + EPSILON
+        )
+        return torch.sum(tested_centered * source_centered) / denom
 
     def _masked_source_projection_loss(
         *,
@@ -276,6 +372,38 @@ def train_region_repair_model_from_arrays(
         projected_source = projection_coeff * source_hp
         active = torch.clamp(torch.sum(mask_hp), min=1.0)
         return torch.sum(torch.square(projected_source)) / active
+
+    def _masked_source_correlation_loss(
+        *,
+        repaired_stem: torch.Tensor,
+        source_stem: torch.Tensor,
+        mask_t: torch.Tensor,
+    ) -> torch.Tensor:
+        repaired_mono = torch.mean(repaired_stem, dim=1, keepdim=True)
+        source_mono = torch.mean(source_stem, dim=1, keepdim=True)
+        repaired_hp = repaired_mono[..., 1:] - repaired_mono[..., :-1]
+        source_hp = source_mono[..., 1:] - source_mono[..., :-1]
+        mask_hp = torch.minimum(mask_t[..., 1:], mask_t[..., :-1])
+        corr = _weighted_normalized_corr(repaired_hp, source_hp, mask_hp)
+        return torch.square(corr)
+
+    def _masked_source_projection_margin_loss(
+        *,
+        repaired_stem: torch.Tensor,
+        source_stem: torch.Tensor,
+        mask_t: torch.Tensor,
+    ) -> torch.Tensor:
+        repaired_mono = torch.mean(repaired_stem, dim=1, keepdim=True)
+        source_mono = torch.mean(source_stem, dim=1, keepdim=True)
+        repaired_hp = repaired_mono[..., 1:] - repaired_mono[..., :-1]
+        source_hp = source_mono[..., 1:] - source_mono[..., :-1]
+        mask_hp = torch.minimum(mask_t[..., 1:], mask_t[..., :-1])
+        repaired_hp = repaired_hp * mask_hp
+        source_hp = source_hp * mask_hp
+        source_energy = torch.sum(torch.square(source_hp)) + EPSILON
+        coeff = torch.sum(repaired_hp * source_hp) / source_energy
+        margin = max(0.0, float(config.forensic_source_projection_margin))
+        return torch.square(torch.relu(coeff - margin))
 
     def _weighted_projection_energy(tested: torch.Tensor, source: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         active = torch.clamp(torch.sum(weights), min=1.0)
@@ -365,10 +493,27 @@ def train_region_repair_model_from_arrays(
         active = torch.clamp(torch.sum(weights) * float(pred_delta.shape[1]), min=1.0)
         return torch.sum(torch.square(pred_delta - target_delta) * weights) / active
 
-    def _train_once(attempt_config: StemRegionRepairTrainConfig) -> tuple[StemRegionRepairNet, list[float], float]:
+    def _emit_progress(payload: dict[str, Any]) -> None:
+        if progress_callback is not None:
+            progress_callback(dict(payload))
+
+    def _train_once(
+        attempt_config: StemRegionRepairTrainConfig,
+        *,
+        attempt_index: int,
+    ) -> tuple[StemRegionRepairNet, list[float], float]:
         torch.manual_seed(int(attempt_config.seed))
         torch.set_num_threads(1)
-        device = torch.device(attempt_config.device if attempt_config.device == "cpu" or torch.cuda.is_available() else "cpu")
+        device = resolve_region_repair_training_device(attempt_config.device)
+        _emit_progress(
+            {
+                "event": "attempt_start",
+                "attempt_index": int(attempt_index),
+                "epochs": int(attempt_config.epochs),
+                "device": str(device),
+                "frame_count": int(frames),
+            }
+        )
         model = StemRegionRepairNet(
             hidden_channels=attempt_config.hidden_channels,
             kernel_size=attempt_config.kernel_size,
@@ -406,11 +551,32 @@ def train_region_repair_model_from_arrays(
                 or forensic_source_envelope_enabled
                 or forensic_source_active_energy_enabled
                 or forensic_source_target_enabled
+                or forensic_source_correlation_enabled
+                or forensic_source_projection_margin_enabled
+                or forensic_source_hard_region_enabled
             )
             else None
         )
         mask_t = torch.from_numpy(mask[None, None, :].astype(np.float32)).to(device)
         outside_t = 1.0 - mask_t
+        hard_region_masks_t: list[torch.Tensor] = []
+        if forensic_source_hard_region_enabled:
+            for start, end in hard_region_ranges:
+                local_mask = np.zeros_like(mask, dtype=np.float32)
+                local_mask[start:end] = mask[start:end]
+                hard_region_masks_t.append(torch.from_numpy(local_mask[None, None, :]).to(device))
+        damage_region_masks_t: list[torch.Tensor] = []
+        if instrumental_region_delta_ratio_enabled:
+            if constraint_masks:
+                damage_region_masks_t.extend(
+                    torch.from_numpy(local_mask[None, None, :]).to(device)
+                    for local_mask in constraint_masks
+                )
+            else:
+                for start, end in damage_region_ranges:
+                    local_mask = np.zeros_like(mask, dtype=np.float32)
+                    local_mask[start:end] = mask[start:end]
+                    damage_region_masks_t.append(torch.from_numpy(local_mask[None, None, :]).to(device))
         if (
             bool(attempt_config.source_skip_init_from_target)
             and model.source_skip is not None
@@ -436,6 +602,7 @@ def train_region_repair_model_from_arrays(
         curriculum_hard_loss_weight = max(1.0, float(attempt_config.curriculum_hard_loss_weight))
         hard_epochs = int(round(float(epochs) * curriculum_hard_fraction))
         hard_epochs = max(1, hard_epochs) if curriculum_target_boost > 1.0 and curriculum_hard_fraction > 0.0 else 0
+        progress_interval = max(1, min(10, epochs // 20 if epochs >= 20 else 1))
         for epoch_index in range(epochs):
             optimizer.zero_grad(set_to_none=True)
             pred_delta = model(features)
@@ -507,6 +674,49 @@ def train_region_repair_model_from_arrays(
                     source_stem=forensic_source_t,
                     mask_t=mask_t,
                 )
+            forensic_source_correlation_loss = torch.zeros((), device=device)
+            if forensic_source_t is not None and float(attempt_config.forensic_source_correlation_loss_weight) > 0.0:
+                forensic_source_correlation_loss = _masked_source_correlation_loss(
+                    repaired_stem=bad_t + pred_delta,
+                    source_stem=forensic_source_t,
+                    mask_t=mask_t,
+                )
+            forensic_source_projection_margin_loss = torch.zeros((), device=device)
+            if forensic_source_t is not None and float(attempt_config.forensic_source_projection_margin_loss_weight) > 0.0:
+                forensic_source_projection_margin_loss = _masked_source_projection_margin_loss(
+                    repaired_stem=bad_t + pred_delta,
+                    source_stem=forensic_source_t,
+                    mask_t=mask_t,
+                )
+            forensic_source_hard_region_loss = torch.zeros((), device=device)
+            if forensic_source_t is not None and hard_region_masks_t:
+                local_losses = [
+                    _masked_source_correlation_loss(
+                        repaired_stem=bad_t + pred_delta,
+                        source_stem=forensic_source_t,
+                        mask_t=local_mask_t,
+                    )
+                    + _masked_source_projection_margin_loss(
+                        repaired_stem=bad_t + pred_delta,
+                        source_stem=forensic_source_t,
+                        mask_t=local_mask_t,
+                    )
+                    for local_mask_t in hard_region_masks_t
+                ]
+                forensic_source_hard_region_loss = torch.max(torch.stack(local_losses))
+            instrumental_region_delta_ratio_loss = torch.zeros((), device=device)
+            if instrumental_region_delta_ratio_enabled:
+                local_masks = damage_region_masks_t or [mask_t]
+                local_losses = [
+                    masked_region_delta_ratio_loss(
+                        pred_delta=pred_delta,
+                        reference_stem=bad_t,
+                        mask_t=local_mask_t,
+                        max_delta_ratio=float(attempt_config.instrumental_region_delta_ratio_limit),
+                    )
+                    for local_mask_t in local_masks
+                ]
+                instrumental_region_delta_ratio_loss = torch.max(torch.stack(local_losses))
             loss = (
                 float(attempt_config.region_loss_weight) * float(region_weight_scale) * region_loss
                 + float(attempt_config.outside_loss_weight) * outside_loss
@@ -522,6 +732,12 @@ def train_region_repair_model_from_arrays(
                 + float(attempt_config.forensic_source_envelope_loss_weight) * forensic_source_envelope_loss
                 + float(attempt_config.forensic_source_active_energy_loss_weight) * forensic_source_active_energy_loss
                 + float(attempt_config.forensic_source_target_loss_weight) * forensic_source_target_loss
+                + float(attempt_config.forensic_source_correlation_loss_weight) * forensic_source_correlation_loss
+                + float(attempt_config.forensic_source_projection_margin_loss_weight)
+                * forensic_source_projection_margin_loss
+                + float(attempt_config.forensic_source_hard_region_loss_weight) * forensic_source_hard_region_loss
+                + float(attempt_config.instrumental_region_delta_ratio_loss_weight)
+                * instrumental_region_delta_ratio_loss
             )
             selection_loss_tensor = (
                 float(attempt_config.region_loss_weight) * selection_region_loss
@@ -535,6 +751,12 @@ def train_region_repair_model_from_arrays(
                 + float(attempt_config.forensic_source_envelope_loss_weight) * forensic_source_envelope_loss
                 + float(attempt_config.forensic_source_active_energy_loss_weight) * forensic_source_active_energy_loss
                 + float(attempt_config.forensic_source_target_loss_weight) * forensic_source_target_loss
+                + float(attempt_config.forensic_source_correlation_loss_weight) * forensic_source_correlation_loss
+                + float(attempt_config.forensic_source_projection_margin_loss_weight)
+                * forensic_source_projection_margin_loss
+                + float(attempt_config.forensic_source_hard_region_loss_weight) * forensic_source_hard_region_loss
+                + float(attempt_config.instrumental_region_delta_ratio_loss_weight)
+                * instrumental_region_delta_ratio_loss
             )
             selection_loss = float(selection_loss_tensor.detach().cpu().item())
             if selection_loss < best_loss:
@@ -545,10 +767,29 @@ def train_region_repair_model_from_arrays(
             optimizer.step()
             loss_value = float(loss.detach().cpu().item())
             history.append(loss_value)
+            if epoch_index == 0 or epoch_index == epochs - 1 or (epoch_index + 1) % progress_interval == 0:
+                _emit_progress(
+                    {
+                        "event": "epoch",
+                        "attempt_index": int(attempt_index),
+                        "epoch": int(epoch_index + 1),
+                        "epochs": int(epochs),
+                        "loss": float(loss_value),
+                        "best_loss": float(best_loss),
+                    }
+                )
 
         if best_state is not None:
             model.load_state_dict(best_state)
         model.eval()
+        _emit_progress(
+            {
+                "event": "attempt_end",
+                "attempt_index": int(attempt_index),
+                "epochs": int(epochs),
+                "best_loss": float(best_loss if history else 0.0),
+            }
+        )
         return model.cpu(), history, best_loss if history else 0.0
 
     attempts = [config]
@@ -561,8 +802,8 @@ def train_region_repair_model_from_arrays(
             )
         )
     attempt_results: list[tuple[StemRegionRepairTrainConfig, StemRegionRepairNet, list[float], float]] = []
-    for attempt_config in attempts:
-        attempt_model, attempt_history, attempt_best_loss = _train_once(attempt_config)
+    for attempt_index, attempt_config in enumerate(attempts):
+        attempt_model, attempt_history, attempt_best_loss = _train_once(attempt_config, attempt_index=attempt_index)
         attempt_results.append((attempt_config, attempt_model, attempt_history, attempt_best_loss))
 
     selected_config, model, history, best_loss = min(attempt_results, key=lambda item: item[3])
@@ -575,6 +816,7 @@ def train_region_repair_model_from_arrays(
         "final_loss": float(best_loss) if history else 0.0,
         "loss_history": [round(value, 8) for value in history],
         "config": asdict(selected_config),
+        "resolved_device": str(resolve_region_repair_training_device(selected_config.device)),
         "loss_terms_enabled": {
             "region": float(selected_config.region_loss_weight) > 0.0,
             "outside": float(selected_config.outside_loss_weight) > 0.0,
@@ -587,9 +829,16 @@ def train_region_repair_model_from_arrays(
             "forensic_source_envelope": forensic_source_envelope_enabled,
             "forensic_source_active_energy": forensic_source_active_energy_enabled,
             "forensic_source_target": forensic_source_target_enabled,
+            "forensic_source_correlation": forensic_source_correlation_enabled,
+            "forensic_source_projection_margin": forensic_source_projection_margin_enabled,
+            "forensic_source_hard_region": forensic_source_hard_region_enabled,
+            "instrumental_region_delta_ratio": instrumental_region_delta_ratio_enabled,
             "forensic_source_conditioning": source_condition is not None,
             "source_skip_init_from_target": bool(selected_config.source_skip_init_from_target),
         },
+        "instrumental_region_delta_ratio_constraint_region_count": (
+            len(constraint_masks) if instrumental_region_delta_ratio_enabled else 0
+        ),
         "attempts": [
             {
                 "learning_rate": float(attempt_config.learning_rate),
@@ -613,6 +862,7 @@ def apply_region_repair_model(
     sample_rate: int,
     issue_type: str,
     source_condition_audio: np.ndarray | None = None,
+    device: str | torch.device = "cpu",
 ) -> tuple[np.ndarray, dict[str, Any]]:
     mix, bad, mask = _prepare_arrays(mix_audio=mix_audio, bad_stem_audio=bad_stem_audio, region_mask=region_mask)
     source_condition = ensure_stereo(source_condition_audio) if source_condition_audio is not None else None
@@ -624,14 +874,15 @@ def apply_region_repair_model(
         source_condition = source_condition[:frames].astype(np.float32)
     if int(getattr(model, "input_channels", 6)) > 6 and source_condition is None:
         raise ValueError("source-conditioned repair checkpoint requires source_condition_audio")
-    model = model.cpu().eval()
+    resolved_device = resolve_region_repair_training_device(device)
+    model = model.to(resolved_device).eval()
     with torch.no_grad():
         features = build_repair_features(
             mix_audio=mix,
             bad_stem_audio=bad,
             region_mask=mask,
             issue_type=issue_type,
-            device="cpu",
+            device=str(resolved_device),
             source_condition_audio=source_condition,
         )
         delta = model(features).detach().cpu().numpy()[0].T.astype(np.float32)
@@ -644,6 +895,7 @@ def apply_region_repair_model(
         "schema": "stem_region_repair_apply_diagnostics.v1",
         "sample_rate": int(sample_rate),
         "issue_type": str(issue_type),
+        "resolved_device": str(resolved_device),
         "changed_region_ratio": region_energy,
         "changed_outside_ratio": outside_energy,
             "active_frame_count": int(np.sum(mask > 1.0e-4)),

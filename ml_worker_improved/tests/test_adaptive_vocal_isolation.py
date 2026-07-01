@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ import soundfile as sf
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
 MODULE_PATH = TOOLS_ROOT / "adaptive_vocal_isolation.py"
+PROFILE_MODULE_PATH = TOOLS_ROOT / "adaptive_vocal_profiles.py"
 
 
 def _load_adaptive_module():
@@ -77,6 +79,58 @@ def _band_rms(audio: np.ndarray, sample_rate: int, low_hz: float, high_hz: float
 
 
 class TestAdaptiveVocalIsolation(unittest.TestCase):
+    def test_profile_module_exposes_defaults_without_audio_runtime_imports(self):
+        script = f"""
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+module_path = Path({str(PROFILE_MODULE_PATH)!r})
+spec = importlib.util.spec_from_file_location("adaptive_vocal_profiles", module_path)
+assert spec is not None
+assert spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+profiles = module.default_candidate_profiles()
+router_profiles = module.default_segment_router_profiles()
+payload = {{
+    "profile_names": [profile.name for profile in profiles],
+    "router_names": [profile.name for profile in router_profiles],
+    "ft_requires_bs": module.profiles_require_bs_roformer_runtime([profiles[2]]),
+    "hybrid_requires_bs": module.profiles_require_bs_roformer_runtime([profiles[0]]),
+    "librosa_loaded": "librosa" in sys.modules,
+}}
+print(json.dumps(payload, sort_keys=True))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["profile_names"],
+            ["hybrid_tail_preserve", "hybrid_balanced_clean", "ft_tail_safe", "bs_artifact_clean"],
+        )
+        self.assertEqual(
+            payload["router_names"],
+            [
+                "segment_adaptive_vocal_router",
+                "busy_vocal_supported_router",
+                "ir_residual_supported_router",
+                "quality_consistent_ir_router",
+            ],
+        )
+        self.assertFalse(payload["ft_requires_bs"])
+        self.assertTrue(payload["hybrid_requires_bs"])
+        self.assertFalse(payload["librosa_loaded"])
+
     def test_default_profiles_include_tail_preservation_and_clean_candidates(self):
         module = _load_adaptive_module()
 
@@ -1304,7 +1358,7 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
         self.assertGreater(report["summary"]["issue_segments_count"], 0.0)
         self.assertGreater(report["summary_metrics"]["segment_issue_max_score"], 0.0)
 
-    def test_segment_issue_listen_clips_are_exported_for_selected_candidate(self):
+    def test_segment_issue_listen_clips_are_diagnostic_only(self):
         module = _load_adaptive_module()
         sample_rate = 8000
         source_audio = np.zeros((sample_rate * 4, 2), dtype=np.float32)
@@ -1356,6 +1410,12 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
             )
 
         self.assertIn("segment_issue_clips_manifest", artifacts)
+        self.assertEqual(clips_manifest["mode"], "vocal_segment_issue_diagnostic_clips")
+        self.assertEqual(clips_manifest["delivery_status"], "diagnostic_only")
+        self.assertFalse(clips_manifest["delivery_allowed"])
+        self.assertEqual(clips_manifest["presentation_status"], "diagnostic_segment_issue_evidence_only")
+        self.assertEqual(Path(clips_manifest["clips"][0]["raw_clip"]).name, "r001.flac")
+        self.assertEqual(Path(clips_manifest["clips"][0]["selected_vocals_clip"]).name, "v001.flac")
         self.assertEqual(len(clips_manifest["clips"]), 1)
         self.assertTrue(raw_clip_exists)
         self.assertTrue(selected_clip_exists)
@@ -5483,7 +5543,7 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
         self.assertEqual(feedback_manifest["selected_profile"], "hybrid_balanced_clean")
         self.assertLess(feedback_manifest["feedback_adjustments"]["hybrid_tail_preserve"], 0.0)
 
-    def test_cli_writes_selected_segment_issue_report_and_clip_manifest(self):
+    def test_cli_keeps_blocked_segment_issue_clips_diagnostic_only(self):
         module = _load_adaptive_module()
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5643,6 +5703,10 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
         )
         self.assertEqual(
             adaptive_manifest["selected_artifacts"]["listen_segment_issue_clips_manifest"],
+            None,
+        )
+        self.assertEqual(
+            adaptive_manifest["selected_artifacts"]["diagnostic_segment_issue_clips_manifest"],
             str(listen_dir / "segment_issues" / "segment_issue_clips.json"),
         )
         self.assertFalse(adaptive_manifest["selected_artifacts"]["delivery_allowed"])
@@ -5662,6 +5726,11 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
         self.assertFalse(selected_delivery_gate["delivery_allowed"])
         self.assertEqual(selected_delivery_gate["presentation_status"], "blocked_from_listen_pack")
         self.assertEqual(selected_delivery_gate["release_status"], "diagnostic_only")
+        self.assertEqual(
+            selected_delivery_gate["diagnostic_segment_issue_clips_manifest"],
+            str(listen_dir / "segment_issues" / "segment_issue_clips.json"),
+        )
+        self.assertIsNone(selected_delivery_gate["listen_segment_issue_clips_manifest"])
         self.assertEqual(selected_delivery_gate["defect_effectiveness_gate"]["status"], "blocked_for_listening")
         self.assertEqual(
             selected_delivery_gate["vocal_next_action_plan"]["next_action"],
@@ -5682,6 +5751,158 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
         self.assertEqual(
             adaptive_manifest["candidates"][0]["segment_issue_report"],
             issue_report,
+        )
+
+    def test_cli_keeps_release_ready_segment_issue_clips_diagnostic_only(self):
+        module = _load_adaptive_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.wav"
+            export_script = temp_path / "export_hq_vocal_preview.py"
+            output_dir = temp_path / "adaptive"
+            listen_dir = temp_path / "listen"
+            source_path.write_bytes(b"source")
+            export_script.write_text("# fake export script\n", encoding="utf-8")
+
+            def fake_run_command(command: list[str]) -> None:
+                output_arg = command[command.index("--output-dir") + 1]
+                output_path = Path(output_arg)
+                _write_fake_candidate(output_path, output_path.name)
+
+            issue_report = {
+                "schema_version": 1,
+                "mode": "vocal_segment_issue_report",
+                "summary": {
+                    "max_issue_score": 0.05,
+                    "mean_top3_issue_score": 0.05,
+                    "issue_window_ratio": 1.0,
+                    "dominant_issue_labels": [{"label": "acceptable_proxy_window", "count": 1}],
+                },
+                "summary_metrics": {
+                    "segment_issue_max_score": 0.05,
+                    "segment_issue_mean_top3_score": 0.05,
+                    "segment_issue_count": 1.0,
+                    "segment_issue_window_ratio": 1.0,
+                },
+                "segments": [
+                    {
+                        "start_sec": 2.0,
+                        "end_sec": 4.0,
+                        "relative_start_sec": 2.0,
+                        "relative_end_sec": 4.0,
+                        "severity_score": 0.05,
+                        "labels": ["acceptable_proxy_window"],
+                    }
+                ],
+                "top_segments": [
+                    {
+                        "start_sec": 2.0,
+                        "end_sec": 4.0,
+                        "relative_start_sec": 2.0,
+                        "relative_end_sec": 4.0,
+                        "severity_score": 0.05,
+                        "labels": ["acceptable_proxy_window"],
+                    }
+                ],
+            }
+
+            argv = [
+                str(source_path),
+                str(output_dir),
+                "--listen-dir",
+                str(listen_dir),
+                "--export-script",
+                str(export_script),
+                "--python-executable",
+                sys.executable,
+                "--end-sec",
+                "12.0",
+                "--segment-consistency-sec",
+                "3.0",
+                "--segment-issue-report-max-windows",
+                "2",
+                "--segment-issue-listen-clip-count",
+                "1",
+                "--disable-segment-issue-repair",
+                "--disable-anchor-suppression",
+            ]
+
+            with patch.object(module, "ensure_bs_roformer_runtime"), patch.object(
+                module,
+                "_run_command",
+                side_effect=fake_run_command,
+            ), patch.object(
+                module,
+                "calculate_vocal_proxy_metrics",
+                return_value=_metrics(
+                    dropout=0.05,
+                    tail_dropout=0.06,
+                    rms_ratio_db=-14.0,
+                    low_ratio_db=-23.0,
+                    kick_ratio_db=-16.0,
+                ),
+            ), patch.object(
+                module,
+                "calculate_vocal_proxy_consistency_metrics",
+                return_value={
+                    "segment_consistency_worst_dropout_frame_ratio": 0.12,
+                    "segment_consistency_worst_tail_dropout_ratio": 0.14,
+                    "segment_consistency_dropout_std": 0.02,
+                    "segment_consistency_tail_dropout_std": 0.02,
+                    "segment_consistency_rms_ratio_range_db": 2.0,
+                },
+            ), patch.object(
+                module,
+                "calculate_vocal_segment_issue_report",
+                return_value=issue_report,
+            ), patch.object(
+                module,
+                "calculate_anchor_support_metrics",
+                return_value={
+                    "unsupported_vs_anchor_ratio_db": -40.0,
+                    "high_unsupported_vs_anchor_ratio_db": -40.0,
+                    "high_noise_flatness_6000_16000": 0.05,
+                    "stereo_side_mid_ratio_db": -16.0,
+                },
+            ), patch.object(
+                module,
+                "write_listen_pack",
+                return_value={"selected_vocals_flac": str(listen_dir / "01_adaptive_selected_vocals.flac")},
+            ) as listen_pack_mock, patch.object(
+                module,
+                "write_segment_issue_listen_clips",
+                return_value={
+                    "segment_issue_clips_manifest": str(listen_dir / "segment_issues" / "segment_issue_clips.json"),
+                    "segment_issue_clips_dir": str(listen_dir / "segment_issues"),
+                },
+            ):
+                self.assertEqual(module.main(argv), 0)
+
+            adaptive_manifest = json.loads(
+                (output_dir / "adaptive_vocal_manifest.json").read_text(encoding="utf-8"),
+            )
+            selected_delivery_gate = json.loads(
+                Path(adaptive_manifest["selected_artifacts"]["selected_delivery_gate_manifest"]).read_text(
+                    encoding="utf-8",
+                ),
+            )
+
+        listen_pack_mock.assert_called_once()
+        self.assertTrue(adaptive_manifest["selected_artifacts"]["delivery_allowed"])
+        self.assertEqual(
+            adaptive_manifest["selected_artifacts"]["presentation_status"],
+            "accepted_for_listen_pack",
+        )
+        self.assertIsNone(adaptive_manifest["selected_artifacts"]["listen_segment_issue_clips_manifest"])
+        self.assertEqual(
+            adaptive_manifest["selected_artifacts"]["diagnostic_segment_issue_clips_manifest"],
+            str(listen_dir / "segment_issues" / "segment_issue_clips.json"),
+        )
+        self.assertIsNone(selected_delivery_gate["listen_segment_issue_clips_manifest"])
+        self.assertEqual(
+            selected_delivery_gate["diagnostic_segment_issue_clips_manifest"],
+            str(listen_dir / "segment_issues" / "segment_issue_clips.json"),
         )
 
     def test_cli_writes_real_segment_issue_report_and_clips_from_audio_candidates(self):
@@ -5753,8 +5974,9 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
             adaptive_manifest = json.loads(
                 (output_dir / "adaptive_vocal_manifest.json").read_text(encoding="utf-8"),
             )
+            self.assertIsNone(adaptive_manifest["selected_artifacts"]["listen_segment_issue_clips_manifest"])
             clips_manifest_path = Path(
-                adaptive_manifest["selected_artifacts"]["listen_segment_issue_clips_manifest"],
+                adaptive_manifest["selected_artifacts"]["diagnostic_segment_issue_clips_manifest"],
             )
             clips_manifest = json.loads(clips_manifest_path.read_text(encoding="utf-8"))
             clips_manifest_exists = clips_manifest_path.exists()
@@ -5762,6 +5984,8 @@ class TestAdaptiveVocalIsolation(unittest.TestCase):
 
         self.assertIsNotNone(adaptive_manifest["selected_segment_issue_report"])
         self.assertIn("summary_metrics", adaptive_manifest["selected_segment_issue_report"])
+        self.assertFalse(clips_manifest["delivery_allowed"])
+        self.assertEqual(clips_manifest["presentation_status"], "diagnostic_segment_issue_evidence_only")
         self.assertTrue(clips_manifest_exists)
         self.assertGreaterEqual(clip_count, 1)
 

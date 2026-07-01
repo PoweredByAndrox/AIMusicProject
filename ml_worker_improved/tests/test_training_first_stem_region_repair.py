@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 import tools.build_training_first_root_cause_queue as root_cause_queue
 from tools.build_training_first_root_cause_queue import build_root_cause_queue
@@ -25,6 +26,8 @@ from tools.stem_region_repair_common import (
 from tools.stem_region_repair_model import (
     StemRegionRepairTrainConfig,
     apply_region_repair_model,
+    masked_region_delta_ratio_loss,
+    resolve_region_repair_training_device,
     train_region_repair_model_from_arrays,
 )
 
@@ -62,6 +65,30 @@ def _mse(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.square(a[:frames] - b[:frames])))
 
 
+def test_masked_region_delta_ratio_loss_penalizes_overprocessed_damage() -> None:
+    reference = torch.ones((1, 2, 8), dtype=torch.float32)
+    mask = torch.zeros((1, 1, 8), dtype=torch.float32)
+    mask[..., 2:6] = 1.0
+    safe_delta = torch.full_like(reference, 0.20)
+    over_delta = torch.full_like(reference, 0.70)
+
+    safe_loss = masked_region_delta_ratio_loss(
+        pred_delta=safe_delta,
+        reference_stem=reference,
+        mask_t=mask,
+        max_delta_ratio=0.42,
+    )
+    over_loss = masked_region_delta_ratio_loss(
+        pred_delta=over_delta,
+        reference_stem=reference,
+        mask_t=mask,
+        max_delta_ratio=0.42,
+    )
+
+    assert safe_loss.item() == pytest.approx(0.0, abs=1.0e-7)
+    assert over_loss.item() > 0.07
+
+
 def _source_projection_energy(audio: np.ndarray, source: np.ndarray, mask: np.ndarray) -> float:
     frames = min(audio.shape[0], source.shape[0], mask.shape[0])
     tested = np.mean(audio[:frames], axis=1).astype(np.float64)
@@ -75,6 +102,63 @@ def _source_projection_energy(audio: np.ndarray, source: np.ndarray, mask: np.nd
     coeff = float(np.sum(tested_hp * src_hp) / denom)
     projected = coeff * src_hp
     return float(np.sum(np.square(projected)) / max(float(np.sum(mask_hp)), 1.0))
+
+
+def _source_normalized_corr(audio: np.ndarray, source: np.ndarray, mask: np.ndarray) -> float:
+    frames = min(audio.shape[0], source.shape[0], mask.shape[0])
+    tested = np.mean(audio[:frames], axis=1).astype(np.float64)
+    src = np.mean(source[:frames], axis=1).astype(np.float64)
+    tested_hp = np.diff(tested)
+    src_hp = np.diff(src)
+    mask_hp = np.minimum(mask[:frames][1:], mask[:frames][:-1]).astype(np.float64)
+    tested_centered = (tested_hp - float(np.sum(tested_hp * mask_hp) / max(float(np.sum(mask_hp)), 1.0))) * mask_hp
+    src_centered = (src_hp - float(np.sum(src_hp * mask_hp) / max(float(np.sum(mask_hp)), 1.0))) * mask_hp
+    denom = math.sqrt(float(np.sum(np.square(tested_centered))) * float(np.sum(np.square(src_centered))) + 1.0e-8)
+    return float(np.sum(tested_centered * src_centered) / denom)
+
+
+def _active_ranges(mask: np.ndarray) -> list[tuple[int, int]]:
+    active = np.flatnonzero(np.asarray(mask, dtype=np.float32) > 1.0e-4)
+    if active.size <= 0:
+        return []
+    ranges: list[tuple[int, int]] = []
+    start = int(active[0])
+    prev = int(active[0])
+    for frame in active[1:]:
+        frame = int(frame)
+        if frame == prev + 1:
+            prev = frame
+            continue
+        ranges.append((start, prev + 1))
+        start = frame
+        prev = frame
+    ranges.append((start, prev + 1))
+    return ranges
+
+
+def _worst_region_source_corr(audio: np.ndarray, source: np.ndarray, mask: np.ndarray) -> float:
+    worst = 0.0
+    for start, end in _active_ranges(mask):
+        local_mask = np.zeros_like(mask, dtype=np.float32)
+        local_mask[start:end] = mask[start:end]
+        worst = max(worst, abs(_source_normalized_corr(audio, source, local_mask)))
+    return worst
+
+
+def test_region_repair_training_device_resolver_supports_mps(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMpsBackend:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class FakeBackends:
+        mps = FakeMpsBackend()
+
+    monkeypatch.setattr("tools.stem_region_repair_model.torch.backends", FakeBackends())
+
+    device = resolve_region_repair_training_device("mps")
+
+    assert device.type == "mps"
 
 
 def _write_run_json(path: Path) -> Path:
@@ -653,6 +737,129 @@ def test_forensic_source_decorrelation_loss_reduces_aligned_drum_projection() ->
     assert diagnostics["source_conditioned"] is True
 
 
+def test_detector_normalized_forensic_loss_reduces_surviving_source_correlation() -> None:
+    seconds = 0.5
+    t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
+    clean_inst = _stereo_widen(_sine(180.0, seconds=seconds, amp=0.055), side_amp=0.025)
+    source = np.zeros_like(clean_inst)
+    burst = ((t >= 0.16) & (t <= 0.34)).astype(np.float32)
+    source[:, 0] = 0.06 * burst * (
+        np.sin(2.0 * math.pi * 620.0 * t) + 0.45 * np.sin(2.0 * math.pi * 1240.0 * t)
+    )
+    source[:, 1] = 0.06 * burst * (
+        np.sin(2.0 * math.pi * 624.0 * t) + 0.45 * np.sin(2.0 * math.pi * 1248.0 * t)
+    )
+    mask = make_region_mask(frame_count=clean_inst.shape[0], sample_rate=SAMPLE_RATE, start_sec=0.12, end_sec=0.38)
+    bad_inst = clean_inst + (0.32 * source * mask[:, None])
+    mix = bad_inst + 0.1 * _sine(90.0, seconds=seconds, amp=0.04)
+
+    model, history = train_region_repair_model_from_arrays(
+        mix_audio=mix,
+        bad_stem_audio=bad_inst,
+        target_stem_audio=bad_inst,
+        forensic_source_audio=source,
+        region_mask=mask,
+        sample_rate=SAMPLE_RATE,
+        issue_type=ISSUE_VOCAL_LEAK,
+        config=StemRegionRepairTrainConfig(
+            epochs=150,
+            hidden_channels=24,
+            dilated_layers=2,
+            learning_rate=0.006,
+            region_loss_weight=0.0,
+            outside_loss_weight=0.08,
+            forensic_source_correlation_loss_weight=120.0,
+            forensic_source_projection_margin_loss_weight=60.0,
+            forensic_source_projection_margin=0.015,
+            forensic_source_conditioning=True,
+            max_delta=0.10,
+            device="cpu",
+        ),
+    )
+    repaired, diagnostics = apply_region_repair_model(
+        model=model,
+        mix_audio=mix,
+        bad_stem_audio=bad_inst,
+        region_mask=mask,
+        sample_rate=SAMPLE_RATE,
+        issue_type=ISSUE_VOCAL_LEAK,
+        source_condition_audio=source,
+    )
+
+    before_corr = abs(_source_normalized_corr(bad_inst, source, mask))
+    after_corr = abs(_source_normalized_corr(repaired, source, mask))
+    before_projection = _source_projection_energy(bad_inst, source, mask)
+    after_projection = _source_projection_energy(repaired, source, mask)
+    assert history["loss_terms_enabled"]["forensic_source_correlation"] is True
+    assert history["loss_terms_enabled"]["forensic_source_projection_margin"] is True
+    assert history["final_loss"] < history["initial_loss"]
+    assert after_corr < before_corr * 0.55
+    assert after_projection < before_projection * 0.65
+    assert diagnostics["changed_outside_ratio"] == pytest.approx(0.0, abs=1.0e-7)
+
+
+def test_hard_region_forensic_loss_reduces_worst_surviving_region() -> None:
+    seconds = 0.7
+    t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
+    clean_inst = _stereo_widen(_sine(150.0, seconds=seconds, amp=0.05), side_amp=0.025)
+    source = np.zeros_like(clean_inst)
+    burst_a = ((t >= 0.14) & (t <= 0.22)).astype(np.float32)
+    burst_b = ((t >= 0.48) & (t <= 0.58)).astype(np.float32)
+    source[:, 0] = (
+        0.07 * burst_a * np.sin(2.0 * math.pi * 700.0 * t)
+        + 0.11 * burst_b * np.sin(2.0 * math.pi * 1180.0 * t)
+    )
+    source[:, 1] = (
+        0.07 * burst_a * np.sin(2.0 * math.pi * 704.0 * t)
+        + 0.11 * burst_b * np.sin(2.0 * math.pi * 1188.0 * t)
+    )
+    mask = np.zeros(clean_inst.shape[0], dtype=np.float32)
+    mask[int(0.10 * SAMPLE_RATE) : int(0.26 * SAMPLE_RATE)] = 1.0
+    mask[int(0.44 * SAMPLE_RATE) : int(0.62 * SAMPLE_RATE)] = 1.0
+    bad_inst = clean_inst + 0.30 * source * mask[:, None]
+    mix = bad_inst + 0.1 * _sine(88.0, seconds=seconds, amp=0.04)
+
+    model, history = train_region_repair_model_from_arrays(
+        mix_audio=mix,
+        bad_stem_audio=bad_inst,
+        target_stem_audio=bad_inst,
+        forensic_source_audio=source,
+        region_mask=mask,
+        sample_rate=SAMPLE_RATE,
+        issue_type=ISSUE_VOCAL_LEAK,
+        config=StemRegionRepairTrainConfig(
+            epochs=170,
+            hidden_channels=24,
+            dilated_layers=2,
+            learning_rate=0.006,
+            region_loss_weight=0.0,
+            outside_loss_weight=0.08,
+            forensic_source_hard_region_loss_weight=95.0,
+            forensic_source_correlation_loss_weight=12.0,
+            forensic_source_projection_margin_loss_weight=45.0,
+            forensic_source_projection_margin=0.015,
+            forensic_source_conditioning=True,
+            max_delta=0.12,
+            device="cpu",
+        ),
+    )
+    repaired, diagnostics = apply_region_repair_model(
+        model=model,
+        mix_audio=mix,
+        bad_stem_audio=bad_inst,
+        region_mask=mask,
+        sample_rate=SAMPLE_RATE,
+        issue_type=ISSUE_VOCAL_LEAK,
+        source_condition_audio=source,
+    )
+
+    before_worst = _worst_region_source_corr(bad_inst, source, mask)
+    after_worst = _worst_region_source_corr(repaired, source, mask)
+    assert history["loss_terms_enabled"]["forensic_source_hard_region"] is True
+    assert after_worst < before_worst * 0.60
+    assert diagnostics["changed_outside_ratio"] == pytest.approx(0.0, abs=1.0e-7)
+
+
 def test_train_stem_region_repair_model_loads_forensic_source_path(tmp_path: Path) -> None:
     seconds = 0.35
     t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
@@ -911,6 +1118,109 @@ def test_forensic_source_target_loss_focuses_repair_on_source_active_frames() ->
     assert history["loss_terms_enabled"]["target_delta_active"] is True
     assert history["loss_terms_enabled"]["forensic_source_target"] is True
     assert after_error < before_error * 0.65
+
+
+def test_instrumental_region_delta_ratio_loss_is_recorded_in_history() -> None:
+    seconds = 0.20
+    t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
+    clean = _stereo_widen(_sine(330.0, seconds=seconds, amp=0.10))
+    source = np.stack(
+        [
+            0.04 * np.sin(2.0 * math.pi * 1900.0 * t),
+            0.04 * np.sin(2.0 * math.pi * 1930.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    bad = clean + 0.25 * source
+    target = bad - 0.20 * source
+    mask = make_region_mask(
+        frame_count=bad.shape[0],
+        sample_rate=SAMPLE_RATE,
+        start_sec=0.04,
+        end_sec=0.16,
+    )
+
+    _model, history = train_region_repair_model_from_arrays(
+        mix_audio=bad,
+        bad_stem_audio=bad,
+        target_stem_audio=target,
+        forensic_source_audio=source,
+        region_mask=mask,
+        sample_rate=SAMPLE_RATE,
+        issue_type="instrument_leak",
+        config=StemRegionRepairTrainConfig(
+            epochs=2,
+            hidden_channels=8,
+            learning_rate=0.001,
+            region_loss_weight=0.0,
+            outside_loss_weight=0.0,
+            instrumental_region_delta_ratio_loss_weight=3.0,
+            instrumental_region_delta_ratio_limit=0.42,
+            forensic_source_conditioning=True,
+            device="cpu",
+        ),
+    )
+
+    assert history["loss_terms_enabled"]["instrumental_region_delta_ratio"] is True
+    assert history["config"]["instrumental_region_delta_ratio_loss_weight"] == pytest.approx(3.0)
+    assert history["config"]["instrumental_region_delta_ratio_limit"] == pytest.approx(0.42)
+
+
+def test_instrumental_region_delta_ratio_loss_records_explicit_constraint_masks() -> None:
+    seconds = 0.20
+    t = np.arange(int(SAMPLE_RATE * seconds), dtype=np.float32) / float(SAMPLE_RATE)
+    bad = _stereo_widen(_sine(330.0, seconds=seconds, amp=0.10))
+    source = np.stack(
+        [
+            0.04 * np.sin(2.0 * math.pi * 1900.0 * t),
+            0.04 * np.sin(2.0 * math.pi * 1930.0 * t),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    target = bad - 0.15 * source
+    mask = make_region_mask(
+        frame_count=bad.shape[0],
+        sample_rate=SAMPLE_RATE,
+        start_sec=0.03,
+        end_sec=0.17,
+    )
+    first_constraint = make_region_mask(
+        frame_count=bad.shape[0],
+        sample_rate=SAMPLE_RATE,
+        start_sec=0.03,
+        end_sec=0.10,
+    )
+    second_constraint = make_region_mask(
+        frame_count=bad.shape[0],
+        sample_rate=SAMPLE_RATE,
+        start_sec=0.08,
+        end_sec=0.17,
+    )
+
+    _model, history = train_region_repair_model_from_arrays(
+        mix_audio=bad,
+        bad_stem_audio=bad,
+        target_stem_audio=target,
+        forensic_source_audio=source,
+        region_mask=mask,
+        region_constraint_masks=[first_constraint, second_constraint],
+        sample_rate=SAMPLE_RATE,
+        issue_type="instrument_leak",
+        config=StemRegionRepairTrainConfig(
+            epochs=2,
+            hidden_channels=8,
+            learning_rate=0.001,
+            region_loss_weight=0.0,
+            outside_loss_weight=0.0,
+            instrumental_region_delta_ratio_loss_weight=3.0,
+            instrumental_region_delta_ratio_limit=0.42,
+            forensic_source_conditioning=True,
+            device="cpu",
+        ),
+    )
+
+    assert history["loss_terms_enabled"]["instrumental_region_delta_ratio"] is True
+    assert history["instrumental_region_delta_ratio_constraint_region_count"] == 2
 
 
 def test_apply_stem_region_repair_accepts_forensic_source_for_conditioned_checkpoint(tmp_path: Path) -> None:

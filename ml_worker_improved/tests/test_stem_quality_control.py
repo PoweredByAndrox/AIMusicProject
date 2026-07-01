@@ -36,6 +36,10 @@ def test_quality_control_reduces_peak_to_target_without_silently_failing(tmp_pat
     assert controlled_sample_rate == sample_rate
     assert manifest["headroom_applied"] is True
     assert manifest["headroom_gain"] < 1.0
+    assert manifest["delivery_status"] == "diagnostic_only"
+    assert manifest["release_status"] == "diagnostic_only"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "stem_quality_control_diagnostic_not_for_listen_pack"
     assert manifest["metrics"]["after"]["peak_dbfs"] <= -0.99
     assert float(np.max(np.abs(controlled_audio))) <= 10 ** (-1.0 / 20.0) + 1e-5
 
@@ -106,5 +110,10 @@ def test_listen_pack_writes_candidate_map(tmp_path: Path) -> None:
 
     candidate_map_path = tmp_path / "listen" / "candidate_map.json"
     saved_map = json.loads(candidate_map_path.read_text(encoding="utf-8"))
+    listen_manifest = json.loads((tmp_path / "listen" / "listen_pack_manifest.json").read_text(encoding="utf-8"))
     assert listen_map == saved_map
     assert sorted(saved_map) == ["00_raw_ref.flac", "01_original.flac", "02_qc.flac"]
+    assert listen_manifest["delivery_allowed"] is False
+    assert listen_manifest["delivery_status"] == "diagnostic_only"
+    assert listen_manifest["presentation_status"] == "stem_quality_control_diagnostic_not_for_listen_pack"
+    assert listen_manifest["accepted_listen_pack_member"] is False

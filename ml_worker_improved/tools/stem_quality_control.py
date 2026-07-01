@@ -17,6 +17,14 @@ from docker_runtime import require_docker_runtime  # noqa: E402
 import numpy as np
 import soundfile as sf
 
+STEM_QC_DELIVERY_CONTRACT = {
+    "delivery_status": "diagnostic_only",
+    "release_status": "diagnostic_only",
+    "delivery_allowed": False,
+    "presentation_status": "stem_quality_control_diagnostic_not_for_listen_pack",
+    "accepted_listen_pack_member": False,
+}
+
 
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:
     audio, sample_rate = sf.read(str(path), always_2d=True, dtype="float32")
@@ -130,6 +138,7 @@ def write_quality_controlled_stem(
 
     manifest = {
         "status": "completed",
+        **STEM_QC_DELIVERY_CONTRACT,
         "pipeline": {
             "mode": "stem_quality_control_v1",
             "strategy": "fail_fast_validation_plus_downward_peak_headroom",
@@ -185,10 +194,23 @@ def write_listen_pack(
         json.dumps(candidate_map, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    listen_manifest = {
+        "schema_version": 1,
+        "mode": "stem_quality_control_diagnostic_listen_pack",
+        **STEM_QC_DELIVERY_CONTRACT,
+        "listen_dir": str(listen_dir),
+        "source_manifest_path": str(manifest.get("manifest_path", "")),
+        "candidate_map": candidate_map,
+    }
+    (listen_dir / "listen_pack_manifest.json").write_text(
+        json.dumps(listen_manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     (listen_dir / "00_README.txt").write_text(
         "\n".join(
             [
-                "Stem quality-control listen pack.",
+                "Stem quality-control diagnostic pack.",
+                "delivery_allowed=false; presentation_status=stem_quality_control_diagnostic_not_for_listen_pack.",
                 "00_raw_ref.flac: optional raw/source reference when provided.",
                 f"{source_label}: original stem before quality control.",
                 f"{output_label}: quality-controlled stem after fail-fast validation and headroom.",
@@ -246,7 +268,12 @@ def main() -> int:
             source_label=str(args.source_label),
             output_label=str(args.output_label),
         )
-        manifest["listen_pack"] = {"listen_dir": str(Path(args.listen_dir).resolve()), "candidate_map": listen_map}
+        manifest["listen_pack"] = {
+            "listen_dir": str(Path(args.listen_dir).resolve()),
+            "manifest_path": str(Path(args.listen_dir).resolve() / "listen_pack_manifest.json"),
+            "candidate_map": listen_map,
+            **STEM_QC_DELIVERY_CONTRACT,
+        }
         Path(str(manifest["manifest_path"])).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     print(json.dumps(manifest, indent=2, ensure_ascii=False))

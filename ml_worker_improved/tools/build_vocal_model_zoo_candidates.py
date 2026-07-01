@@ -33,6 +33,14 @@ from export_melband_vocal_preview import (  # noqa: E402
     _apply_peak_note_debleed,
 )
 
+MODEL_ZOO_DELIVERY_CONTRACT = {
+    "delivery_status": "diagnostic_only",
+    "release_status": "diagnostic_only",
+    "delivery_allowed": False,
+    "presentation_status": "diagnostic_model_zoo_not_for_listen_pack",
+    "accepted_listen_pack_member": False,
+}
+
 
 @dataclass(frozen=True)
 class CandidateArtifact:
@@ -446,6 +454,7 @@ def write_listen_pack(
         listen_dir / "candidate_map.json",
         listen_dir / "model_zoo_metrics.json",
         listen_dir / "model_zoo_delta_metrics.json",
+        listen_dir / "model_zoo_listen_manifest.json",
         listen_dir / "00_README.txt",
     ]:
         _unlink_generated_file(generated_path)
@@ -463,8 +472,27 @@ def write_listen_pack(
     write_json(listen_dir / "candidate_map.json", mapping)
     write_json(listen_dir / "model_zoo_metrics.json", {"candidates": metrics})
     write_json(listen_dir / "model_zoo_delta_metrics.json", {"deltas": delta_metrics})
+    write_json(
+        listen_dir / "model_zoo_listen_manifest.json",
+        {
+            "schema_version": 1,
+            "mode": "vocal_model_zoo_diagnostic_listen_pack",
+            **MODEL_ZOO_DELIVERY_CONTRACT,
+            "listen_dir": str(listen_dir),
+            "candidate_map": mapping,
+            "candidate_count": len(candidates),
+        },
+    )
     (listen_dir / "00_README.txt").write_text(
-        "Listen only here.\n00 = raw first30 reference.\n01+ = model-zoo isolated vocal candidates.\n",
+        "\n".join(
+            [
+                "Diagnostic model-zoo candidate pack.",
+                "delivery_allowed=false; presentation_status=diagnostic_model_zoo_not_for_listen_pack.",
+                "00 = raw first30 reference.",
+                "01+ = model-zoo isolated vocal candidates for comparison only.",
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -829,10 +857,12 @@ def main(argv: list[str] | None = None) -> int:
     manifest = {
         "schema_version": 1,
         "mode": "vocal_model_zoo_first30_candidates",
+        **MODEL_ZOO_DELIVERY_CONTRACT,
         "source_audio_path": str(source_audio_path),
         "raw_ref_path": str(raw_ref_path),
         "output_dir": str(output_dir),
         "listen_dir": str(listen_dir),
+        "listen_pack_manifest": str(listen_dir / "model_zoo_listen_manifest.json"),
         "inputs": {
             "bs_vocals_path": str(bs_vocals_path),
             "mdx_vocals_path": str(mdx_vocals_path),

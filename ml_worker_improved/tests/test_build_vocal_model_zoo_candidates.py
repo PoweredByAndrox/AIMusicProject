@@ -221,12 +221,17 @@ def test_write_listen_pack_removes_stale_generated_files(tmp_path: Path) -> None
         metrics=[],
         delta_metrics=delta_metrics,
     )
+    listen_manifest = (listen_dir / "model_zoo_listen_manifest.json").read_text(encoding="utf-8")
 
     assert not (listen_dir / "09_stale_candidate.flac").exists()
     assert (listen_dir / "00_raw_ref.flac").exists()
     assert (listen_dir / "01_first.flac").exists()
     assert (listen_dir / "02_second.flac").exists()
     assert "delta_vs_baseline_rms" in (listen_dir / "model_zoo_delta_metrics.json").read_text(encoding="utf-8")
+    assert '"delivery_allowed": false' in listen_manifest
+    assert '"delivery_status": "diagnostic_only"' in listen_manifest
+    assert '"presentation_status": "diagnostic_model_zoo_not_for_listen_pack"' in listen_manifest
+    assert '"accepted_listen_pack_member": false' in listen_manifest
 
 
 def test_validate_preview_window_rejects_empty_or_negative_windows() -> None:

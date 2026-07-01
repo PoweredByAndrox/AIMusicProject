@@ -1706,6 +1706,10 @@ Adaptive vocal final selection is defect-aware when segment issue reports exist:
 `max_issue_score`, then `mean_top3_issue_score`, then `issue_window_ratio`, and only uses proxy score as a tie-breaker.
 This prevents a higher proxy-score candidate from hiding a worse measured vocal defect. It does not relax delivery:
 blocked candidates remain `diagnostic_only` and cannot be copied into the accepted listen pack.
+Segment issue clips from a blocked selected candidate are forensic evidence only; manifests must expose them through
+diagnostic fields, not `listen_*` selected-artifact fields.
+Auxiliary quality-control and model-zoo comparison packs are diagnostic surfaces unless a downstream release gate promotes
+an output; their manifests must keep `delivery_allowed=false` and a non-accepted `presentation_status`.
 The defect-effectiveness gate reports both `raw_issue_window_ratio` and material `issue_window_ratio`. Raw ratio keeps
 all detected labels visible for forensic review, while the blocker ratio counts only windows whose severity is at least
 `material_segment_score`; this prevents tiny detector residue labels from causing endless repair loops after severe and
