@@ -30,6 +30,34 @@ NEGATIVE_RATINGS = {"bad", "reject", "rejected", "fail", "failed", "poor", "wors
 TRAINABLE_PERMISSION_STATUSES = {"owned", "licensed", "cleared", "project_owned"}
 GROUND_TRUTH_PERMISSION_STATUSES = {"owned", "licensed", "cleared", "project_owned", "user_owned"}
 BLOCKED_MARKERS = ("blocked", "rejected", "failed", "skip")
+BLOCKING_FAILURE_LABEL_MARKERS = (
+    *BLOCKED_MARKERS,
+    "leak",
+    "bleed",
+    "contamination",
+    "foreign_source",
+    "mix_conservation",
+    "conservation",
+    "vocal_contains",
+    "voice_presence",
+    "residual",
+    "separator_server",
+    "gpu_free_memory",
+    "delivery_pair",
+    "no_clean_candidate",
+)
+FAILURE_TEXT_KEYS = ("dominant_failure_reason", "failure_reason", "reason", "skip_reason")
+FAILURE_LIST_KEYS = (
+    "reasons",
+    "failure_reasons",
+    "blocking_issue_labels",
+    "issue_labels",
+    "blockers",
+    "blocking_reasons",
+    "failed_checks",
+)
+FAILURE_ITEM_KEYS = ("code", "label", "name", "id", "check")
+BOOLEAN_BLOCKER_KEYS = {"blocked", "is_blocked", "has_blocker", "has_blockers"}
 
 SAFETY_FLAGS = {
     "reference_required": False,
@@ -243,7 +271,27 @@ def accepted_contract(payload: dict[str, Any]) -> bool:
     return payload.get("delivery_allowed") is True and presentation_status(payload) in ACCEPTED_PRESENTATION_STATUSES
 
 
-def blocked_like(payload: dict[str, Any]) -> bool:
+def label_blocked_like(labels: Sequence[str]) -> bool:
+    text = " ".join(str(label or "") for label in labels).lower()
+    return any(marker in text for marker in BLOCKING_FAILURE_LABEL_MARKERS)
+
+
+def explicit_blocked_flag(payload: Any, *, root: bool = True) -> bool:
+    if isinstance(payload, dict):
+        for key, child in payload.items():
+            normalized_key = str(key).lower()
+            if normalized_key in BOOLEAN_BLOCKER_KEYS and child is True:
+                return True
+            if root and normalized_key == "delivery_allowed" and child is False:
+                return True
+            if explicit_blocked_flag(child, root=False):
+                return True
+    elif isinstance(payload, list):
+        return any(explicit_blocked_flag(child, root=False) for child in payload)
+    return False
+
+
+def blocked_like(payload: dict[str, Any], failure_labels: Sequence[str] | None = None) -> bool:
     text = " ".join(
         [
             delivery_status(payload),
@@ -252,7 +300,11 @@ def blocked_like(payload: dict[str, Any]) -> bool:
             str(payload.get("dominant_failure_reason") or ""),
         ]
     ).lower()
-    return any(marker in text for marker in BLOCKED_MARKERS)
+    return (
+        explicit_blocked_flag(payload)
+        or any(marker in text for marker in BLOCKED_MARKERS)
+        or label_blocked_like(failure_labels or deep_failure_labels(payload))
+    )
 
 
 def reference_verified(payload: dict[str, Any]) -> bool:
@@ -274,13 +326,32 @@ def reference_verified(payload: dict[str, Any]) -> bool:
 def deep_failure_labels(payload: Any) -> list[str]:
     labels: list[str] = []
 
+    def add_label(value: Any) -> None:
+        for part in str(value or "").split(","):
+            clean = part.strip()
+            if clean:
+                labels.append(clean)
+
+    def add_structured_item(value: Any) -> None:
+        if isinstance(value, dict):
+            for item_key in (*FAILURE_ITEM_KEYS, *FAILURE_TEXT_KEYS):
+                child = value.get(item_key)
+                if isinstance(child, str) and child.strip():
+                    add_label(child)
+            for item_key, child in value.items():
+                if isinstance(item_key, str) and child is True:
+                    add_label(item_key)
+        else:
+            add_label(value)
+
     def visit(value: Any) -> None:
         if isinstance(value, dict):
             for key, child in value.items():
-                if key in {"dominant_failure_reason", "failure_reason", "reason", "skip_reason"} and isinstance(child, str):
-                    labels.append(child)
-                elif key in {"reasons", "failure_reasons", "blocking_issue_labels", "issue_labels"} and isinstance(child, list):
-                    labels.extend(str(item) for item in child if str(item))
+                if key in FAILURE_TEXT_KEYS and isinstance(child, str):
+                    add_label(child)
+                elif key in FAILURE_LIST_KEYS and isinstance(child, list):
+                    for item in child:
+                        add_structured_item(item)
                 visit(child)
         elif isinstance(value, list):
             for child in value:
@@ -396,6 +467,7 @@ def best_feedback(feedback_rows: Sequence[HumanFeedback], *, path: Path, row: di
 def inventory_row(path: Path, artifact_root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     audio_path = selected_audio_path(payload)
     audio_file = Path(audio_path) if audio_path else None
+    failure_labels = deep_failure_labels(payload)
     return {
         "schema": "generic_finetuning_lab_artifact_inventory_row.v1",
         "manifest_path": str(path),
@@ -408,18 +480,18 @@ def inventory_row(path: Path, artifact_root: Path, payload: dict[str, Any]) -> d
         "presentation_status": presentation_status(payload),
         "release_status": release_status(payload),
         "accepted_contract": accepted_contract(payload),
-        "blocked_like": blocked_like(payload),
+        "blocked_like": blocked_like(payload, failure_labels),
         "reference_verified": reference_verified(payload),
         "source_audio_path": source_audio_path(payload),
         "selected_audio_path": audio_path,
         "selected_audio_exists": bool(audio_file and audio_file.exists()),
         "selected_audio_sha256": None,
-        "failure_labels": deep_failure_labels(payload),
+        "failure_labels": failure_labels,
     }
 
 
 def controller_example(row: dict[str, Any], feedback: HumanFeedback | None) -> dict[str, Any]:
-    accepted = bool(row["accepted_contract"])
+    accepted = bool(row["accepted_contract"] and not row["blocked_like"])
     if feedback and feedback.rating in NEGATIVE_RATINGS:
         accepted = False
     return {
@@ -563,6 +635,9 @@ def ground_truth_audio_training_examples(path: Path, payload: dict[str, Any]) ->
 
 
 def hard_eval_case(row: dict[str, Any], feedback: HumanFeedback | None = None) -> dict[str, Any]:
+    failure_labels = list(row["failure_labels"])
+    if not failure_labels and feedback and feedback.rating in NEGATIVE_RATINGS:
+        failure_labels = [f"human_negative_feedback:{feedback.rating}"]
     return {
         "schema": "generic_finetuning_hard_eval_case.v1",
         "id": stable_hash(["hard_eval", row["manifest_path"]])[:16],
@@ -570,8 +645,8 @@ def hard_eval_case(row: dict[str, Any], feedback: HumanFeedback | None = None) -
         "stem_type": row["stem_type"],
         "manifest_path": row["manifest_path"],
         "model_id": row["model_id"],
-        "dominant_failure_reason": row["failure_labels"][0] if row["failure_labels"] else "",
-        "failure_labels": row["failure_labels"],
+        "dominant_failure_reason": failure_labels[0] if failure_labels else "",
+        "failure_labels": failure_labels,
         "human_verified": bool(feedback and feedback.human_verified),
         "human_rating": feedback.rating if feedback else "",
         "split": feedback.split if feedback else "hard_eval",

@@ -25,6 +25,18 @@ targets. Audio examples become trainable only when they are human-verified or
 reference-verified and have a cleared `permission_status` such as `owned` or
 `licensed`.
 
+Machine failure labels win over accepted-looking status fields. Nested
+`dominant_failure_reason`, `failure_reason`, `reasons`, `failure_reasons`,
+`blocking_issue_labels`, `issue_labels`, `blockers`, `blocking_reasons`, and
+`failed_checks` values are normalized into `failure_labels`; labels such as
+`foreign_source_recovered:*`, `mix_conservation_failed`, vocal leak/bleed,
+contamination, residual, delivery pair, separator-server, or GPU-memory
+blockers route the artifact to `hard_eval_cases.jsonl` and force controller
+targets toward `avoid_route_and_generate_alternative` instead of
+audio-positive training. Human negative feedback without machine labels gets a
+synthetic `human_negative_feedback:<rating>` hard-eval reason so hard-eval rows
+never lose their rejection cause.
+
 Verified `ground_truth_manifest.json` bundles are imported as audio-training
 examples when `ground_truth_contract.verified=true` and the rights/permission
 status is trainable. `user_owned` is normalized to `project_owned`. If the
