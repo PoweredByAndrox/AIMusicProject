@@ -398,3 +398,38 @@ def test_materializer_blocks_detail_self_judge_manifest_without_source_audio_pat
     assert detail["missing_inputs"] == ["self_judge_source_audio_path"]
     assert detail["docker_command"] == []
     assert detail["delivery_allowed"] is False
+
+
+def test_materializer_keeps_delta_model_candidate_router_out_of_mac_handoff_scope(tmp_path: Path) -> None:
+    plan, _artifact_root = fixture_plan(tmp_path)
+    plan_payload = json.loads(plan.read_text(encoding="utf-8"))
+    rows_path = Path(plan_payload["rows_jsonl"])
+    row = rows(rows_path)[0]
+    row["recommended_routes"] = [
+        {
+            "issue_category": "residual_vocal_leak",
+            "route": "no_reference_minus_candidate_model_router",
+            "route_status": "delta_router_route",
+            "tool": "tools/materialize_minus_delta_model_candidate_route.py",
+            "next_action": "route_to_alternative_model_candidate",
+        }
+    ]
+    write_jsonl(rows_path, [row])
+    output_dir = tmp_path / "out"
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from tools.materialize_mac_promising_repair_commands import materialize_mac_promising_repair_commands
+
+    manifest = materialize_mac_promising_repair_commands(plan_json=plan, output_dir=output_dir)
+    assert manifest["command_plan_status"] == "blocked_missing_inputs"
+    assert manifest["ready_command_count"] == 0
+    assert manifest["blocked_command_count"] == 1
+    assert manifest["failed_checks"] == ["unsupported_route:no_reference_minus_candidate_model_router"]
+    command_rows = rows(output_dir / "rows.jsonl")
+    assert len(command_rows) == 1
+    row = command_rows[0]
+    assert row["route"] == "no_reference_minus_candidate_model_router"
+    assert row["command_status"] == "blocked_unsupported_route"
+    assert row["missing_inputs"] == ["supported_route_mapping"]
+    assert row["docker_command"] == []
+    assert row["delivery_allowed"] is False

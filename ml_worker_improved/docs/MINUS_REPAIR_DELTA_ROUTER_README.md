@@ -52,6 +52,27 @@ joining the delta evidence with the post-repair self-judge segments. It is the
 safe bridge from plan-only routing to the existing candidate-only leakage repair
 CLI.
 
+When the selected route is `no_reference_minus_candidate_model_router`, pass the
+router plan and the failed repair manifest to
+`tools/materialize_minus_delta_model_candidate_route.py`. That materializer
+does not run inference or publish audio; it mines registry-backed minus-capable
+model candidates and writes Docker commands for
+`/app/tools/run_registered_model_candidate.py --device cuda --target-stem minus`.
+Every generated model candidate remains blocked for listening until it reruns
+the instrumental self-judge gate, the minus repair delta gate, the no-reference
+result judge, and the selector.
+
+Example:
+
+```bash
+docker compose run --rm --no-deps ml-worker python /app/tools/materialize_minus_delta_model_candidate_route.py \
+  --router-plan-json /host_artifacts/loop/it029/router/plan.json \
+  --source-repair-manifest /host_artifacts/loop/it028/lkg/manifest.json \
+  --output-dir /host_artifacts/loop/it030/mdlcmd \
+  --max-candidates 3 \
+  --short-output-names
+```
+
 ## Outputs
 
 The tool writes short Windows-safe artifacts:
