@@ -45,9 +45,15 @@ anything `release_ready`.
 - Invalid modes raise `ValueError`.
 - The optimizer must not use `both` mode as a default selector. It selects vocal
   and minus independently, then runs pair compatibility.
+- Optimizer mode-specific rows must carry explicit `{mode}_score`,
+  `{mode}_decision`, and `{mode}_blockers` fields for the selected mode.
+  Missing mode-specific fields are blockers; generic
+  `overall_no_reference_score` or `decision` fields are diagnostic legacy data,
+  not optimizer selection evidence.
 - The candidate selector can run with `--score-mode vocal|minus|both`; vocal and
   minus modes rank by their own score fields and blockers rather than legacy
-  `overall_no_reference_score`.
+  `overall_no_reference_score`. Missing vocal/minus mode-specific
+  score/decision/blocker fields force a blocked selector decision for that row.
 - The minus candidate matrix builder aggregates existing result-judge,
   self-judge, selector, listen-preview, and GPU provenance evidence into a
   ranked route-selection artifact. It does not rescore audio or relax gates; it

@@ -145,6 +145,40 @@ def test_minus_selector_uses_minus_matrix_not_overall_score() -> None:
     assert row["score_mode"] == "minus"
 
 
+def test_vocal_selector_rejects_missing_mode_schema_despite_generic_accept() -> None:
+    legacy_vocal = judge_row("legacy-vocal", score=0.96, score_mode="vocal")
+    del legacy_vocal["vocal_score"]
+    del legacy_vocal["vocal_decision"]
+    del legacy_vocal["vocal_blockers"]
+
+    result = select_candidates([legacy_vocal], score_mode="vocal")
+
+    row = result["rows"][0]
+    assert row["decision"] == "blocked_hard_case"
+    assert row["selected_candidate_id"] is None
+    assert row["accepted_candidate_count"] == 0
+    assert row["ranked_candidates"][0]["selection_score"] == 0.0
+    assert row["ranked_candidates"][0]["decision"] == "blocked_hard_case"
+    assert {
+        "missing_mode_specific_score:vocal_score",
+        "missing_mode_specific_decision:vocal_decision",
+        "missing_mode_specific_blockers:vocal_blockers",
+    }.issubset(set(row["reasons"]))
+
+
+def test_minus_selector_rejects_missing_mode_blockers() -> None:
+    minus_without_blockers = judge_row("minus-no-blockers", score=0.90, score_mode="minus")
+    del minus_without_blockers["minus_blockers"]
+
+    result = select_candidates([minus_without_blockers], score_mode="minus")
+
+    row = result["rows"][0]
+    assert row["decision"] == "blocked_hard_case"
+    assert row["selected_candidate_id"] is None
+    assert row["accepted_candidate_count"] == 0
+    assert "missing_mode_specific_blockers:minus_blockers" in row["reasons"]
+
+
 def test_minus_selector_blocks_proxy_blocked_detail_gate_even_when_minus_score_accepts() -> None:
     result = select_candidates(
         [

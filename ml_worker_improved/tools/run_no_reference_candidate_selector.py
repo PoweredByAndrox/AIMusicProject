@@ -100,19 +100,38 @@ def stable_unique(values: Iterable[str]) -> list[str]:
     return result
 
 
+def mode_schema_blockers(row: dict[str, Any], score_mode: str = "both") -> list[str]:
+    score_mode = validate_mode(score_mode)
+    if score_mode == "both":
+        return []
+    score_key = f"{score_mode}_score"
+    decision_key = f"{score_mode}_decision"
+    blocker_key = f"{score_mode}_blockers"
+    blockers: list[str] = []
+    if score_key not in row or row.get(score_key) in (None, ""):
+        blockers.append(f"missing_mode_specific_score:{score_key}")
+    if decision_key not in row or row.get(decision_key) in (None, ""):
+        blockers.append(f"missing_mode_specific_decision:{decision_key}")
+    if blocker_key not in row or row.get(blocker_key) is None:
+        blockers.append(f"missing_mode_specific_blockers:{blocker_key}")
+    return blockers
+
+
 def row_score(row: dict[str, Any], score_mode: str = "both") -> float:
     score_mode = validate_mode(score_mode)
     if score_mode == "vocal":
-        return float(row.get("vocal_score") or row.get("overall_no_reference_score") or 0.0)
+        return 0.0 if mode_schema_blockers(row, score_mode) else float(row.get("vocal_score") or 0.0)
     if score_mode == "minus":
-        return float(row.get("minus_score") or row.get("overall_no_reference_score") or 0.0)
+        return 0.0 if mode_schema_blockers(row, score_mode) else float(row.get("minus_score") or 0.0)
     return float(row.get("pair_compatibility_score") or row.get("overall_no_reference_score") or 0.0)
 
 
 def row_decision(row: dict[str, Any], score_mode: str = "both") -> str:
     score_mode = validate_mode(score_mode)
     if score_mode in {"vocal", "minus"}:
-        return str(row.get(f"{score_mode}_decision") or row.get("decision") or "")
+        if mode_schema_blockers(row, score_mode):
+            return "blocked_hard_case"
+        return str(row.get(f"{score_mode}_decision") or "")
     pair_decision = str(row.get("pair_decision") or "")
     if pair_decision == "pair_compatible":
         return "accept_candidate"
@@ -145,6 +164,9 @@ def mode_blockers(row: dict[str, Any], score_mode: str = "both") -> list[str]:
         "minus": "minus_blockers",
         "both": "pair_blockers",
     }[score_mode]
+    schema_blockers = mode_schema_blockers(row, score_mode)
+    if schema_blockers:
+        return stable_unique(schema_blockers + as_list(row.get(blocker_key)))
     if blocker_key in row and row.get(blocker_key) is not None:
         return as_list(row.get(blocker_key))
     return []
@@ -177,6 +199,10 @@ def is_acceptable(row: dict[str, Any], score_mode: str = "both") -> bool:
     )
 
 
+def selection_reasons(row: dict[str, Any], score_mode: str = "both") -> list[str]:
+    return stable_unique(row_reasons(row) + mode_blockers(row, score_mode))
+
+
 def has_segment_complement(rows: list[dict[str, Any]]) -> bool:
     segment_reasons = {
         reason
@@ -196,7 +222,7 @@ def ranked_candidate(row: dict[str, Any], rank: int, score_mode: str = "both") -
         "overall_no_reference_score": float(row.get("overall_no_reference_score") or 0.0),
         "confidence": row_confidence(row),
         "decision": row_decision(row, score_mode),
-        "reasons": row_reasons(row),
+        "reasons": selection_reasons(row, score_mode),
     }
 
 
@@ -208,7 +234,7 @@ def select_track(track_id: str, candidates: list[dict[str, Any]], *, score_mode:
     )
     ranked = [ranked_candidate(row, index + 1, score_mode) for index, row in enumerate(ordered)]
     acceptable = [row for row in ordered if is_acceptable(row, score_mode)]
-    all_reasons = stable_unique(reason for row in ordered for reason in row_reasons(row))
+    all_reasons = stable_unique(reason for row in ordered for reason in selection_reasons(row, score_mode))
     forbidden_actions = stable_unique(BASE_FORBIDDEN_ACTIONS + [action for row in ordered for action in as_list(row.get("forbidden_actions"))])
 
     if not acceptable:
@@ -289,7 +315,7 @@ def select_track(track_id: str, candidates: list[dict[str, Any]], *, score_mode:
         "accepted_candidate_count": len(acceptable),
         "ranked_candidates": ranked,
         "confidence": row_confidence(top),
-        "reasons": stable_unique(["selected_by_no_reference_score"] + row_reasons(top)),
+        "reasons": stable_unique(["selected_by_no_reference_score"] + selection_reasons(top, score_mode)),
         "segment_blend_plan": None,
         "forbidden_actions": forbidden_actions,
     }

@@ -311,6 +311,48 @@ def test_mode_specific_legacy_rows_without_blockers_fall_back_to_reasons() -> No
     assert row["final_decision"] == "blocked_hard_case"
 
 
+def test_mode_specific_optimizer_rejects_missing_mode_schema_despite_generic_accept() -> None:
+    legacy_vocal = {
+        **mode_row("legacy-vocal", mode="vocal", score=0.91),
+        "overall_no_reference_score": 0.96,
+        "decision": "accept_candidate",
+    }
+    del legacy_vocal["vocal_score"]
+    del legacy_vocal["vocal_decision"]
+    del legacy_vocal["vocal_blockers"]
+
+    result = optimize_tracks_mode_specific(
+        [legacy_vocal],
+        [mode_row("accepted-minus", mode="minus", score=0.88)],
+    )
+
+    row = result["rows"][0]
+    assert row["selected_vocal_candidate_id"] is None
+    assert row["selected_minus_candidate_id"] == "accepted-minus"
+    assert row["final_decision"] == "blocked_hard_case"
+    assert {
+        "missing_mode_specific_score:vocal_score",
+        "missing_mode_specific_decision:vocal_decision",
+        "missing_mode_specific_blockers:vocal_blockers",
+    }.issubset(set(row["actions_rejected"][0]["mode_blockers"]))
+
+
+def test_mode_specific_optimizer_rejects_missing_mode_blockers() -> None:
+    vocal_without_blockers = mode_row("vocal-no-blockers", mode="vocal", score=0.91)
+    del vocal_without_blockers["vocal_blockers"]
+
+    result = optimize_tracks_mode_specific(
+        [vocal_without_blockers],
+        [mode_row("accepted-minus", mode="minus", score=0.88)],
+    )
+
+    row = result["rows"][0]
+    assert row["selected_vocal_candidate_id"] is None
+    assert row["selected_minus_candidate_id"] == "accepted-minus"
+    assert row["final_decision"] == "blocked_hard_case"
+    assert "missing_mode_specific_blockers:vocal_blockers" in row["actions_rejected"][0]["mode_blockers"]
+
+
 def test_mode_specific_optimizer_routes_near_vocal_to_preview_segment_plan_only() -> None:
     near_vocal = {
         **mode_row("near-vocal", mode="vocal", score=0.69, decision="select_alternative_candidate"),

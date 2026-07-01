@@ -367,24 +367,60 @@ def optimize_tracks(rows: list[dict[str, Any]], min_delta: float = DEFAULT_MIN_D
     return {"rows": optimized, "summary": build_summary(optimized)}
 
 
-def mode_score(row: dict[str, Any], mode: str) -> float:
+def mode_field(mode: str, suffix: str) -> str:
     if mode == "vocal":
-        return metric(row, "vocal_score", metric(row, "overall_no_reference_score"))
+        return f"vocal_{suffix}"
     if mode == "minus":
-        return metric(row, "minus_score", metric(row, "overall_no_reference_score"))
-    raise ValueError(f"Unsupported optimizer score mode: {mode}")
+        return f"minus_{suffix}"
+    raise ValueError(f"Unsupported optimizer mode: {mode}")
+
+
+def mode_schema_blockers(row: dict[str, Any], mode: str) -> list[str]:
+    score_key = mode_field(mode, "score")
+    decision_key = mode_field(mode, "decision")
+    blocker_key = mode_field(mode, "blockers")
+    blockers: list[str] = []
+    if score_key not in row or row.get(score_key) in (None, ""):
+        blockers.append(f"missing_mode_specific_score:{score_key}")
+    if decision_key not in row or row.get(decision_key) in (None, ""):
+        blockers.append(f"missing_mode_specific_decision:{decision_key}")
+    if blocker_key not in row or row.get(blocker_key) is None:
+        blockers.append(f"missing_mode_specific_blockers:{blocker_key}")
+    return blockers
+
+
+def mode_score(row: dict[str, Any], mode: str) -> float:
+    score_key = mode_field(mode, "score")
+    if score_key not in row or row.get(score_key) in (None, ""):
+        return 0.0
+    return metric(row, score_key)
 
 
 def mode_decision(row: dict[str, Any], mode: str) -> str:
-    return str(row.get(f"{mode}_decision") or row.get("decision") or "")
+    decision_key = mode_field(mode, "decision")
+    if decision_key not in row or row.get(decision_key) in (None, ""):
+        return "blocked_hard_case"
+    return str(row.get(decision_key) or "")
 
 
 def mode_blockers(row: dict[str, Any], mode: str) -> list[str]:
-    blocker_key = f"{mode}_blockers"
+    blocker_key = mode_field(mode, "blockers")
+    schema_blockers = mode_schema_blockers(row, mode)
     explicit = as_list(row.get(blocker_key))
+    if schema_blockers:
+        inherited_reasons = [
+            reason
+            for reason in reasons(row)
+            if reason != "no_reference_proxy_passed"
+        ]
+        return stable_unique(schema_blockers + explicit + inherited_reasons)
     if blocker_key in row and row.get(blocker_key) is not None:
         return explicit
     return explicit + [reason for reason in reasons(row) if reason != "no_reference_proxy_passed"]
+
+
+def mode_rejection_blockers(rows: list[dict[str, Any]], mode: str) -> list[str]:
+    return stable_unique(blocker for row in rows for blocker in mode_blockers(row, mode))
 
 
 def select_mode_candidate(rows: list[dict[str, Any]], mode: str) -> dict[str, Any] | None:
@@ -446,9 +482,21 @@ def optimize_track_mode_specific(track_id: str, vocal_rows: list[dict[str, Any]]
     selected_minus = select_mode_candidate(minus_rows, "minus")
     actions_rejected: list[dict[str, Any]] = []
     if selected_vocal is None:
-        actions_rejected.append({"mode": "vocal", "reason": "no_accepted_vocal_candidate"})
+        actions_rejected.append(
+            {
+                "mode": "vocal",
+                "reason": "no_accepted_vocal_candidate",
+                "mode_blockers": mode_rejection_blockers(vocal_rows, "vocal"),
+            }
+        )
     if selected_minus is None:
-        actions_rejected.append({"mode": "minus", "reason": "no_accepted_minus_candidate"})
+        actions_rejected.append(
+            {
+                "mode": "minus",
+                "reason": "no_accepted_minus_candidate",
+                "mode_blockers": mode_rejection_blockers(minus_rows, "minus"),
+            }
+        )
     if selected_vocal is None or selected_minus is None:
         preview_vocal = selected_vocal
         preview_minus = selected_minus

@@ -20,6 +20,10 @@ or cleanup chain.
 - In `mode_specific` mode, vocal and minus are selected independently from
   separate judge files. The optimizer does not average vocal and minus into one
   selector score; pair compatibility is checked after selection.
+- Mode-specific selection is fail-closed. A row is eligible only when the
+  selected mode has explicit `{mode}_score`, `{mode}_decision`, and
+  `{mode}_blockers` fields. Legacy generic `overall_no_reference_score`,
+  `decision`, or empty/missing blocker fallback is not selection evidence.
 - If one mode has an accepted candidate and the other mode has only
   non-blocked `select_alternative_candidate` rows, the optimizer may return
   `needs_segment_blend` as a preview-only diagnostic route. This is not a
@@ -107,6 +111,12 @@ Mode-specific rows additionally include `selected_vocal_candidate_id`,
 `pair_compatibility_decision`, and candidate-row compatible `mix_path`,
 `vocal_path`, and `instrumental_path` fields for follow-up pair compatibility
 judging.
+
+When a mode-specific row is rejected because required selected-mode fields are
+missing, `actions_rejected[].mode_blockers` records blockers such as
+`missing_mode_specific_score:vocal_score`,
+`missing_mode_specific_decision:vocal_decision`, or
+`missing_mode_specific_blockers:vocal_blockers`.
 
 For preview-only mode-specific rows, `segment_blend_needed=true`,
 `segment_blend_plan.status=preview_only_not_executed`, and
