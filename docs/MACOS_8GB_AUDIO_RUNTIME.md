@@ -49,6 +49,18 @@ CPU diagnostics, and non-audio helpers. It must not be treated as GPU audio
 separation until a specific container proves PyTorch MPS or another real audio
 accelerator path.
 
+The shared CLI guard in `ml_worker_improved/tools/docker_runtime.py` therefore
+reports `runtime_environment=apple_container_orchestration` on Mac when native
+diagnostic mode is not explicitly enabled. `native_mac_cpu_dsp` remains
+diagnostic-only and is allowed only through `--allow-native-runtime` or
+`AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC=1`. Non-Mac/Linux routes may still use the
+existing Docker compose contract for CUDA/container workloads.
+
+When a project command is launched inside Apple `container`, set
+`AIMUSIC_CONTAINER_RUNTIME=apple_container` so manifests can distinguish Apple
+container orchestration from the legacy Docker/Linux route even though both
+look like Linux containers from inside the process.
+
 ### `docker_model_runner_controller_only`
 
 Docker Model Runner is not part of the Mac project execution route unless the

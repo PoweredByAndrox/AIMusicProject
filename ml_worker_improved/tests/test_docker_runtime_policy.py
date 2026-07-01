@@ -169,7 +169,9 @@ class TestDockerRuntimePolicy(unittest.TestCase):
                 return False
 
         original_path = module.Path
+        original_platform_system = module.platform.system
         module.Path = MissingDockerRuntimePath
+        module.platform.system = lambda: "Linux"
         try:
             with self.assertRaisesRegex(
                 RuntimeError,
@@ -181,6 +183,7 @@ class TestDockerRuntimePolicy(unittest.TestCase):
                 )
         finally:
             module.Path = original_path
+            module.platform.system = original_platform_system
 
     def test_shared_docker_runtime_guard_accepts_docker_marker(self):
         module = _load_docker_runtime_module()
@@ -201,6 +204,34 @@ class TestDockerRuntimePolicy(unittest.TestCase):
             )
         finally:
             module.Path = original_path
+
+    def test_cli_runtime_contract_preserves_explicit_apple_container_runtime_marker(self):
+        module = _load_docker_runtime_module()
+
+        class PresentContainerRuntimePath:
+            def __init__(self, value):
+                self.value = value
+
+            def exists(self):
+                return self.value == "/app"
+
+        original_path = module.Path
+        original_platform_system = module.platform.system
+        original_env = dict(module.os.environ)
+        module.Path = PresentContainerRuntimePath
+        module.platform.system = lambda: "Linux"
+        module.os.environ["AIMUSIC_CONTAINER_RUNTIME"] = "apple_container"
+        try:
+            contract = module.cli_runtime_contract(allow_native_runtime=False)
+        finally:
+            module.Path = original_path
+            module.platform.system = original_platform_system
+            module.os.environ.clear()
+            module.os.environ.update(original_env)
+
+        self.assertEqual(contract["runtime_environment"], "apple_container")
+        self.assertEqual(contract["container_runtime"], "apple_container")
+        self.assertFalse(contract["native_runtime_allowed"])
 
     def test_shared_docker_runtime_guard_accepts_explicit_native_macos_diagnostic(self):
         module = _load_docker_runtime_module()
@@ -223,6 +254,61 @@ class TestDockerRuntimePolicy(unittest.TestCase):
                 tool_name="test_tool.py",
                 entrypoint_path="/app/tools/test_tool.py",
             )
+        finally:
+            module.Path = original_path
+            module.platform.system = original_platform_system
+            module.os.environ.clear()
+            module.os.environ.update(original_env)
+
+    def test_cli_runtime_contract_reports_apple_container_on_macos_without_native_diagnostic(self):
+        module = _load_docker_runtime_module()
+
+        class MissingContainerRuntimePath:
+            def __init__(self, value):
+                self.value = value
+
+            def exists(self):
+                return False
+
+        original_path = module.Path
+        original_platform_system = module.platform.system
+        module.Path = MissingContainerRuntimePath
+        module.platform.system = lambda: "Darwin"
+        try:
+            contract = module.cli_runtime_contract(allow_native_runtime=False)
+        finally:
+            module.Path = original_path
+            module.platform.system = original_platform_system
+
+        self.assertEqual(contract["runtime_environment"], "apple_container_orchestration")
+        self.assertEqual(contract["container_runtime"], "apple_container")
+        self.assertFalse(contract["native_runtime_allowed"])
+
+    def test_shared_runtime_guard_rejects_macos_host_with_apple_container_command(self):
+        module = _load_docker_runtime_module()
+
+        class MissingContainerRuntimePath:
+            def __init__(self, value):
+                self.value = value
+
+            def exists(self):
+                return False
+
+        original_path = module.Path
+        original_platform_system = module.platform.system
+        original_env = dict(module.os.environ)
+        module.Path = MissingContainerRuntimePath
+        module.platform.system = lambda: "Darwin"
+        module.os.environ.pop("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC", None)
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Apple container.*/usr/local/bin/container.*not approved.*docker compose",
+            ):
+                module.require_docker_runtime(
+                    tool_name="test_tool.py",
+                    entrypoint_path="/app/tools/test_tool.py",
+                )
         finally:
             module.Path = original_path
             module.platform.system = original_platform_system
