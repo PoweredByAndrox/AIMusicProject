@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from tools.no_reference_score_matrix import (
@@ -59,6 +61,62 @@ def test_minus_mode_detects_severe_vocal_bleed_in_minus() -> None:
     assert "severe_vocal_bleed_in_minus" in result["minus_blockers"]
     assert result["minus_decision"] == "blocked_hard_case"
     assert dominant_defect(good_metrics(vocal_leakage_in_minus_score=0.82), "minus") == "vocal_bleed_in_minus"
+
+
+def test_minus_mode_blocks_missing_vocal_leakage_evidence() -> None:
+    metrics = good_metrics()
+    metrics.pop("vocal_leakage_in_minus_score")
+
+    result = score_candidate(metrics, "minus")
+
+    assert "missing_minus_vocal_leakage_evidence" in result["minus_blockers"]
+    assert result["minus_decision"] == "blocked_hard_case"
+
+
+def test_minus_mode_blocks_missing_instrumental_integrity_evidence() -> None:
+    metrics = good_metrics()
+    metrics.pop("mixture_consistency_score")
+
+    result = score_candidate(metrics, "minus")
+
+    assert "missing_minus_instrumental_integrity_evidence" in result["minus_blockers"]
+    assert result["minus_decision"] == "blocked_hard_case"
+
+
+@pytest.mark.parametrize("bad_value", [None, "", math.nan, math.inf, -math.inf])
+def test_minus_mode_blocks_invalid_vocal_leakage_evidence(bad_value: object) -> None:
+    result = score_candidate(good_metrics(vocal_leakage_in_minus_score=bad_value), "minus")
+
+    assert "missing_minus_vocal_leakage_evidence" in result["minus_blockers"]
+    assert result["minus_decision"] == "blocked_hard_case"
+
+
+@pytest.mark.parametrize("bad_value", [None, "", math.nan, math.inf, -math.inf])
+def test_minus_mode_blocks_invalid_audio_info_integrity_evidence(bad_value: object) -> None:
+    metrics = good_metrics()
+    metrics.pop("mixture_consistency_score")
+    metrics["audio_info"] = {"mixture_consistency_score": bad_value}
+
+    result = score_candidate(metrics, "minus")
+
+    assert "missing_minus_instrumental_integrity_evidence" in result["minus_blockers"]
+    assert result["minus_decision"] == "blocked_hard_case"
+
+
+def test_minus_mode_accepts_required_evidence_from_audio_info() -> None:
+    metrics = good_metrics()
+    metrics.pop("vocal_leakage_in_minus_score")
+    metrics.pop("mixture_consistency_score")
+    metrics["audio_info"] = {
+        "vocal_leakage_in_minus_score": 0.04,
+        "mixture_consistency_score": 0.94,
+    }
+
+    result = score_candidate(metrics, "minus")
+
+    assert "missing_minus_vocal_leakage_evidence" not in result["minus_blockers"]
+    assert "missing_minus_instrumental_integrity_evidence" not in result["minus_blockers"]
+    assert result["minus_decision"] == "accept_candidate"
 
 
 def test_both_mode_detects_sample_rate_mismatch() -> None:

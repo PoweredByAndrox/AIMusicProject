@@ -29,6 +29,12 @@ anything `release_ready`.
   `vocal_blockers`, `vocal_dominant_defect`, and `vocal_decision`.
 - `score_candidate(metrics, "minus")` returns `minus_score`,
   `minus_blockers`, `minus_dominant_defect`, and `minus_decision`.
+- Minus scoring fails closed when required evidence is absent or non-finite.
+  Missing/invalid `vocal_leakage_in_minus_score` records
+  `missing_minus_vocal_leakage_evidence`; missing/invalid
+  `mixture_consistency_score` records
+  `missing_minus_instrumental_integrity_evidence`. Missing evidence is never
+  treated as a clean minus.
 - `pair_compatibility_score(vocal_candidate, minus_candidate)` returns
   `pair_compatibility_score`, `pair_blockers`, and `pair_decision`.
 - Invalid modes raise `ValueError`.
@@ -54,7 +60,7 @@ anything `release_ready`.
   windows use minus-score delta, and `both` windows require both stem deltas plus
   pair compatibility.
 
-## Docker Run
+## Container Run
 
 ```bash
 docker compose run --rm --no-deps ml-worker pytest \
@@ -67,3 +73,6 @@ docker compose run --rm --no-deps ml-worker pytest \
   tests/test_build_no_reference_minus_candidate_score_matrix.py \
   -q
 ```
+
+On Mac targets, run the same project tests through the approved Apple
+`container` route instead of Docker Desktop, Docker daemon, or `docker compose`.

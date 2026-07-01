@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Iterable
 
 
@@ -35,6 +36,10 @@ SCORE_WEIGHTS: dict[str, dict[str, float]] = {
 
 ACCEPT_THRESHOLD = 0.72
 REVIEW_THRESHOLD = 0.55
+MINUS_REQUIRED_EVIDENCE_METRICS = (
+    ("vocal_leakage_in_minus_score", "missing_minus_vocal_leakage_evidence"),
+    ("mixture_consistency_score", "missing_minus_instrumental_integrity_evidence"),
+)
 
 
 def clip01(value: float) -> float:
@@ -89,6 +94,33 @@ def has_metric(payload: dict[str, Any], key: str) -> bool:
         return True
     audio_info = payload.get("audio_info")
     return isinstance(audio_info, dict) and key in audio_info
+
+
+def has_finite_metric(payload: dict[str, Any], key: str) -> bool:
+    if key in payload:
+        value = payload.get(key)
+    else:
+        audio_info = payload.get("audio_info")
+        if not isinstance(audio_info, dict) or key not in audio_info:
+            return False
+        value = audio_info.get(key)
+    if isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def missing_required_evidence(payload: dict[str, Any], mode: str) -> list[str]:
+    mode = validate_mode(mode)
+    if mode != "minus":
+        return []
+    return [
+        blocker
+        for metric_name, blocker in MINUS_REQUIRED_EVIDENCE_METRICS
+        if not has_finite_metric(payload, metric_name)
+    ]
 
 
 def mode_phase_metric(payload: dict[str, Any], mode: str) -> float:
@@ -188,7 +220,7 @@ def detect_blockers(metrics: dict[str, Any], mode: str) -> list[str]:
             blockers.append("vocal_missing_on_active_region")
         return stable_unique(blockers)
     if mode == "minus":
-        blockers = []
+        blockers = missing_required_evidence(metrics, "minus")
         if metric(metrics, "vocal_leakage_in_minus_score") > 0.60 or "vocal_leakage_in_minus" in reasons:
             blockers.append("severe_vocal_bleed_in_minus")
         if metric(metrics, "mixture_consistency_score", 1.0) < 0.55 or "music_damage" in reasons:
