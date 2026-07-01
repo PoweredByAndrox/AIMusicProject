@@ -40,9 +40,11 @@ It blocks fail-closed with:
   - `vocal_projection_proxy`
   - `vocal_stem_corr_proxy`
   - `full_mix_like_risk_proxy`
+- `blocked_remaining_self_judge_blockers` when repair improves the count but
+  the post-repair self-judge still reports any blocker.
 
-Only a strict blocker-count reduction with no unsafe issue increase can produce
-`passed_for_candidate_routing`.
+Only zero remaining post-repair self-judge blockers, plus strict blocker-count
+reduction and no unsafe issue increase, can produce `passed_for_candidate_routing`.
 
 ## Outputs
 
@@ -72,9 +74,10 @@ The delta gate never publishes audio:
 - `requires_downstream_acceptance=true`
 
 `passed_for_candidate_routing` only authorizes the next candidate-only routing
-step. Accepted listen output still requires post-render minus self-judge,
-no-reference result judge, selector acceptance, musical-detail preservation, and
-the listen-preview artifact status contract.
+step after the repaired candidate reaches zero self-judge blockers. Accepted
+listen output still requires post-render minus self-judge, no-reference result
+judge, selector acceptance, musical-detail preservation, and the listen-preview
+artifact status contract.
 
 For blocked gates, pass `gate.json` to
 `tools/plan_minus_repair_delta_router.py`. The router decides whether to switch

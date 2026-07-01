@@ -313,6 +313,9 @@ def evaluate_minus_repair_delta_gate(
     elif delta["unsafe_issue_count_delta"] > 0:
         gate_status = "blocked_unsafe_risk_increase"
         failure_taxonomy = ["unsafe_issue_count_increased"]
+    elif after_blockers > 0:
+        gate_status = "blocked_remaining_self_judge_blockers"
+        failure_taxonomy = ["remaining_self_judge_blockers"]
     else:
         gate_status = "passed_for_candidate_routing"
         failure_taxonomy = []

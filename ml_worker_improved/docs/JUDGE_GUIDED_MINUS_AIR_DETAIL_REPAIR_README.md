@@ -73,8 +73,9 @@ render status only as proof that audio was rendered; it does not make the repair
 delivery artifact.
 After post-render self-judge, compare pre/post evidence with
 `tools/evaluate_minus_repair_delta_gate.py`. If blocker count does not strictly
-decrease, or unsafe vocal/full-mix proxy issues increase, the repair remains
-blocked and cannot advance to listen-preview evaluation.
+decrease, unsafe vocal/full-mix proxy issues increase, or any post-repair
+self-judge blocker remains, the repair remains blocked and cannot advance to
+listen-preview evaluation.
 
 ## Example
 

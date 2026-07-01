@@ -36,7 +36,21 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def delta_gate(tmp_path: Path, *, gate_status: str, rows: list[dict], delta: dict | None = None) -> Path:
+def delta_gate(
+    tmp_path: Path,
+    *,
+    gate_status: str,
+    rows: list[dict],
+    delta: dict | None = None,
+    failure_taxonomy: list[str] | None = None,
+) -> Path:
+    if failure_taxonomy is None:
+        if gate_status == "passed_for_candidate_routing":
+            failure_taxonomy = []
+        elif gate_status == "blocked_remaining_self_judge_blockers":
+            failure_taxonomy = ["remaining_self_judge_blockers"]
+        else:
+            failure_taxonomy = ["blocker_count_not_reduced"]
     rows_path = write_jsonl(tmp_path / "gate" / "rows.jsonl", rows)
     return write_json(
         tmp_path / "gate" / "gate.json",
@@ -51,7 +65,7 @@ def delta_gate(tmp_path: Path, *, gate_status: str, rows: list[dict], delta: dic
                 "persisting_blocker_count": len(rows),
                 **(delta or {}),
             },
-            "failure_taxonomy": ["blocker_count_not_reduced"] if gate_status != "passed_for_candidate_routing" else [],
+            "failure_taxonomy": failure_taxonomy,
             "rows_jsonl": str(rows_path),
             "delivery_allowed": False,
             "presentation_status": "delta_gate_not_for_listen_pack",
@@ -149,6 +163,31 @@ def test_router_for_passed_delta_sends_candidate_to_downstream_gates(tmp_path: P
     assert manifest["selected_route"] == ""
     assert manifest["delivery_allowed"] is False
     assert manifest["requires_downstream_acceptance"] is True
+
+
+def test_router_continues_detail_repair_for_remaining_detail_blockers_after_improvement(tmp_path: Path) -> None:
+    module = _load_module()
+    gate = delta_gate(
+        tmp_path,
+        gate_status="blocked_remaining_self_judge_blockers",
+        rows=[
+            segment("segment_0000", after_issues=[], transition="resolved_blocker"),
+            segment("segment_0001", after_issues=["presence_loss_proxy"], transition="persisting_blocker"),
+        ],
+        delta={"blocker_count_delta": -1, "unsafe_issue_count_delta": 0, "persisting_blocker_count": 1},
+    )
+
+    manifest = module.plan_minus_repair_delta_router(
+        delta_gate_manifest=gate,
+        output_dir=tmp_path / "router",
+        source_route="judge_guided_minus_air_detail_repair",
+    )
+
+    assert manifest["router_status"] == "ready_for_next_candidate_route"
+    assert manifest["selected_next_action"] == "retune_detail_repair"
+    assert manifest["selected_route"] == "judge_guided_minus_air_detail_repair"
+    assert manifest["failure_taxonomy"] == ["remaining_self_judge_blockers", "persistent_detail_loss_blockers"]
+    assert manifest["delivery_allowed"] is False
 
 
 def test_router_halts_when_delta_rows_are_missing(tmp_path: Path) -> None:

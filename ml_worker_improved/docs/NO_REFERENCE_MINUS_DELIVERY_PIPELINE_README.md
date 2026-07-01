@@ -16,8 +16,8 @@ The pipeline is mode-specific for `stem_type=minus`:
    on the repaired candidate;
 6. run `evaluate_minus_repair_delta_gate.py` for any repair branch that has
    pre/post self-judge evidence; the repair remains blocked unless
-   `blocker_count` strictly decreases and unsafe vocal/full-mix proxy issues do
-   not increase;
+   `blocker_count` strictly decreases, unsafe vocal/full-mix proxy issues do
+   not increase, and post-repair self-judge has zero remaining blockers;
 7. if the delta gate blocks the repair, run
    `plan_minus_repair_delta_router.py` to choose the next candidate-only route
    and prevent repeating the same ineffective repair parameters;
@@ -42,7 +42,9 @@ evidence all match. The repair manifest itself remains blocked/candidate-only
 and cannot be published directly.
 Repair branches must also pass `evaluate_minus_repair_delta_gate.py`; a repair
 that changes issue mix but does not reduce self-judge blocker count remains
-blocked as `blocked_no_blocker_reduction`.
+blocked as `blocked_no_blocker_reduction`; a repair that improves the count but
+still leaves blockers remains blocked as
+`blocked_remaining_self_judge_blockers`.
 Blocked delta gates should be routed through
 `plan_minus_repair_delta_router.py`, which produces a plan-only next route and
 keeps `delivery_allowed=false`.

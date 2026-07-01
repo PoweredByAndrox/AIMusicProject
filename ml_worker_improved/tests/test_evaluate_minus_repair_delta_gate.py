@@ -150,7 +150,7 @@ def test_delta_gate_blocks_unsafe_increase_even_with_blocker_reduction(tmp_path:
     assert manifest["delivery_allowed"] is False
 
 
-def test_delta_gate_passes_candidate_routing_only_on_blocker_reduction_without_unsafe_increase(
+def test_delta_gate_blocks_remaining_self_judge_blockers_even_after_reduction(
     tmp_path: Path,
 ) -> None:
     module = _load_module()
@@ -180,10 +180,49 @@ def test_delta_gate_passes_candidate_routing_only_on_blocker_reduction_without_u
         candidate_id="it018-air",
     )
 
-    assert manifest["gate_status"] == "passed_for_candidate_routing"
-    assert manifest["failure_taxonomy"] == []
+    assert manifest["gate_status"] == "blocked_remaining_self_judge_blockers"
+    assert manifest["failure_taxonomy"] == ["remaining_self_judge_blockers"]
     assert manifest["delta"]["blocker_count_delta"] == -2
     assert manifest["delta"]["unsafe_issue_count_delta"] == -1
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "delta_gate_not_for_listen_pack"
+    assert manifest["requires_downstream_acceptance"] is True
+
+
+def test_delta_gate_passes_candidate_routing_only_when_no_blockers_remain(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    before = self_judge_manifest(
+        tmp_path,
+        "before",
+        [
+            row("segment_0000", blocker=True, issues=["low_rms_muffling_proxy"]),
+            row("segment_0001", blocker=True, issues=["presence_loss_proxy"]),
+            row("segment_0002", blocker=True, issues=["vocal_projection_proxy"]),
+        ],
+    )
+    after = self_judge_manifest(
+        tmp_path,
+        "after",
+        [
+            row("segment_0000", blocker=False, issues=[]),
+            row("segment_0001", blocker=False, issues=[]),
+            row("segment_0002", blocker=False, issues=[]),
+        ],
+    )
+
+    manifest = module.evaluate_minus_repair_delta_gate(
+        before_self_judge_manifest=before,
+        after_self_judge_manifest=after,
+        output_dir=tmp_path / "gate",
+        candidate_id="it018-air",
+    )
+
+    assert manifest["gate_status"] == "passed_for_candidate_routing"
+    assert manifest["failure_taxonomy"] == []
+    assert manifest["delta"]["blocker_count_delta"] == -3
+    assert manifest["delta"]["after_blocker_count"] == 0
     assert manifest["delivery_allowed"] is False
     assert manifest["presentation_status"] == "delta_gate_not_for_listen_pack"
     assert manifest["requires_downstream_acceptance"] is True
