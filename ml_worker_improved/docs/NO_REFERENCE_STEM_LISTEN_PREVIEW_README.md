@@ -776,6 +776,18 @@ docker compose run --rm --no-deps ml-worker python tools/build_listen_coverage_s
   --output-dir /app/lab_artifacts/lp_v45_001/cov001
 ```
 
+`tools/run_short_listen_feedback_cycle.py` is only allowed to finish the
+`human_accepted_no_repair_needed` or `repair_queue_ready` paths after the goal
+audit has already proven all non-human machine evidence. Pass
+`--machine-gate-json` from `tools/build_machine_stem_acceptance_gate.py`; that
+gate must carry aggregate validation, semantic review evidence, and completed
+minus audit evidence. If the gate is missing or any other non-human blocker
+remains, the feedback cycle fails closed with
+`goal_audit:machine_evidence_incomplete`, even when the human feedback itself is
+rejected. This prevents rejected feedback from silently becoming a repair queue
+while aggregate validation, semantic review, minus audit, or final machine-gate
+evidence is absent.
+
 ## Validation
 
 ```bash

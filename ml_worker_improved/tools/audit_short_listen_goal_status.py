@@ -185,6 +185,47 @@ def validation_blockers(validation: dict[str, Any]) -> list[str]:
     return blockers
 
 
+def machine_gate_blockers(
+    machine_gate_json: Path | None,
+    *,
+    pack_manifest_json: Path,
+    validation_json: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    evidence = {"machine_gate_json": str(machine_gate_json) if machine_gate_json else ""}
+    if machine_gate_json is None or not machine_gate_json.exists():
+        return evidence, ["machine_acceptance_gate_missing"]
+    gate = read_json(machine_gate_json)
+    evidence.update(
+        {
+            "gate_status": gate.get("gate_status"),
+            "final_result_allowed": gate.get("final_result_allowed"),
+            "semantic_review_json": gate.get("semantic_review_json"),
+            "semantic_review_evidence_count": gate.get("semantic_review_evidence_count"),
+            "minus_audit_json": gate.get("minus_audit_json"),
+            "minus_audit_status": gate.get("minus_audit_status"),
+            "failed_checks": gate.get("failed_checks") or [],
+        }
+    )
+    blockers: list[str] = []
+    if gate.get("schema") != "machine_stem_acceptance_gate.v1":
+        blockers.append("machine_acceptance_gate_schema_unexpected")
+    if gate.get("pack_manifest_json") and str(gate.get("pack_manifest_json")) != str(pack_manifest_json):
+        blockers.append("machine_acceptance_gate_pack_mismatch")
+    if gate.get("validation_json") and str(gate.get("validation_json")) != str(validation_json):
+        blockers.append("machine_acceptance_gate_validation_mismatch")
+    if gate.get("gate_status") != "accepted":
+        blockers.append("machine_acceptance_gate_not_accepted")
+    if gate.get("final_result_allowed") is not True:
+        blockers.append("machine_acceptance_gate_final_result_not_allowed")
+    if gate.get("failed_checks") not in ([], None):
+        blockers.append("machine_acceptance_gate_failed_checks_not_empty")
+    if not str(gate.get("semantic_review_json") or "") or int(gate.get("semantic_review_evidence_count") or 0) <= 0:
+        blockers.append("machine_acceptance_gate_semantic_review_missing")
+    if not str(gate.get("minus_audit_json") or "") or str(gate.get("minus_audit_status") or "") != "completed":
+        blockers.append("machine_acceptance_gate_minus_audit_missing")
+    return evidence, blockers
+
+
 def six_stem_coverage(pack: dict[str, Any], coverage: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
     groups = coverage.get("stem_groups")
     if not isinstance(groups, list):
@@ -346,12 +387,19 @@ def audit_short_listen_goal_status(
     validation_json: Path,
     output_dir: Path,
     human_listen_verdict_json: Path | None = None,
+    machine_gate_json: Path | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
     if progress_path.exists():
         progress_path.unlink()
-    progress(progress_path, "start", pack_manifest_json=str(pack_manifest_json), validation_json=str(validation_json))
+    progress(
+        progress_path,
+        "start",
+        pack_manifest_json=str(pack_manifest_json),
+        validation_json=str(validation_json),
+        machine_gate_json=str(machine_gate_json or ""),
+    )
 
     pack = read_json(pack_manifest_json)
     pack_root = pack_manifest_json.parent
@@ -427,6 +475,20 @@ def audit_short_listen_goal_status(
     )
     checks.append(check("safety_contract", "proved" if not safety_failed else "blocked", {}, safety_failed))
 
+    machine_gate_evidence, machine_gate_failed = machine_gate_blockers(
+        machine_gate_json,
+        pack_manifest_json=pack_manifest_json,
+        validation_json=validation_json,
+    )
+    checks.append(
+        check(
+            "machine_acceptance_gate",
+            "proved" if not machine_gate_failed else "blocked",
+            machine_gate_evidence,
+            machine_gate_failed,
+        )
+    )
+
     human_verdict, human_failed = load_human_verdict(human_listen_verdict_json)
     human_feedback = human_feedback_summary(human_verdict)
     human_evidence = {
@@ -476,6 +538,7 @@ def audit_short_listen_goal_status(
         "audit_id": output_dir.name,
         "pack_manifest_json": str(pack_manifest_json),
         "validation_json": str(validation_json),
+        "machine_gate_json": str(machine_gate_json or ""),
         "goal_status": goal_status,
         "goal_status_reason": goal_status_reason,
         "goal_complete": goal_complete,
@@ -517,6 +580,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--validation-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--human-listen-verdict-json", type=Path)
+    parser.add_argument("--machine-gate-json", type=Path)
     return parser.parse_args(argv)
 
 
@@ -531,6 +595,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         validation_json=args.validation_json,
         output_dir=args.output_dir,
         human_listen_verdict_json=args.human_listen_verdict_json,
+        machine_gate_json=args.machine_gate_json,
     )
     print(
         json.dumps(

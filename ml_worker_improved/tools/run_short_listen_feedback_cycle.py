@@ -113,13 +113,20 @@ def run_short_listen_feedback_cycle(
     aggregate_validation_json: Path,
     feedback_jsonl: Path,
     output_dir: Path,
+    machine_gate_json: Path | None = None,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
     if progress_path.exists():
         progress_path.unlink()
-    progress(progress_path, "start", pack_manifest_json=str(pack_manifest_json), feedback_jsonl=str(feedback_jsonl))
+    progress(
+        progress_path,
+        "start",
+        pack_manifest_json=str(pack_manifest_json),
+        feedback_jsonl=str(feedback_jsonl),
+        machine_gate_json=str(machine_gate_json or ""),
+    )
 
     stages: dict[str, dict[str, Any]] = {}
     failed: list[str] = []
@@ -154,16 +161,26 @@ def run_short_listen_feedback_cycle(
             validation_json=aggregate_validation_json,
             output_dir=audit_dir,
             human_listen_verdict_json=feedback_dir / FEEDBACK_MANIFEST_NAME,
+            machine_gate_json=machine_gate_json,
         )
+        remaining_blockers = audit.get("remaining_blockers") or []
+        non_human_blockers = [
+            str(blocker)
+            for blocker in remaining_blockers
+            if str(blocker) and str(blocker) != "human_listen_verdict_rejected"
+        ]
+        goal_failed_checks = ["machine_evidence_incomplete"] if non_human_blockers else []
         stages["goal_audit"] = {
             "goal_status": audit.get("goal_status"),
             "goal_complete": audit.get("goal_complete"),
-            "remaining_blockers": audit.get("remaining_blockers") or [],
-            "failed_checks": [],
+            "remaining_blockers": remaining_blockers,
+            "failed_checks": goal_failed_checks,
             "audit_json": str(audit_dir / "goal_status_audit.json"),
         }
         if audit.get("goal_status") == "failed_safety_contract":
             failed.append("goal_audit:failed_safety_contract")
+        if goal_failed_checks:
+            failed.append("goal_audit:machine_evidence_incomplete")
 
     if not failed and stages.get("goal_audit", {}).get("goal_status") == "human_listen_rejected":
         repair_dir = output_dir / "repair_queue"
@@ -204,6 +221,7 @@ def run_short_listen_feedback_cycle(
         "pack_manifest_json": str(pack_manifest_json),
         "aggregate_validation_json": str(aggregate_validation_json),
         "feedback_jsonl": str(feedback_jsonl),
+        "machine_gate_json": str(machine_gate_json or ""),
         "output_dir": str(output_dir),
         "stages": stages,
         "failed_checks": failed,
@@ -243,6 +261,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pack-manifest-json", type=Path, required=True)
     parser.add_argument("--aggregate-validation-json", type=Path, required=True)
     parser.add_argument("--feedback-jsonl", type=Path, required=True)
+    parser.add_argument("--machine-gate-json", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args(argv)
 
@@ -257,6 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pack_manifest_json=args.pack_manifest_json,
         aggregate_validation_json=args.aggregate_validation_json,
         feedback_jsonl=args.feedback_jsonl,
+        machine_gate_json=args.machine_gate_json,
         output_dir=args.output_dir,
         command_args=list(argv if argv is not None else sys.argv[1:]),
     )

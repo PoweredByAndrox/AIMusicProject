@@ -121,6 +121,29 @@ def _pack(tmp_path: Path, *, missing_6s_stem: bool = False, release_ready: bool 
     return pack_path, validation_path
 
 
+def _machine_gate(tmp_path: Path, *, pack: Path, validation: Path, accepted: bool = True) -> Path:
+    return _write_json(
+        tmp_path / "gate" / "gate.json",
+        {
+            "schema": "machine_stem_acceptance_gate.v1",
+            "gate_status": "accepted" if accepted else "blocked",
+            "final_result_allowed": accepted,
+            "delivery_allowed": accepted,
+            "presentation_status": "accepted_for_listen_pack" if accepted else "blocked_from_listen_pack",
+            "release_status": "listen_preview_only",
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "pack_manifest_json": str(pack),
+            "validation_json": str(validation),
+            "minus_audit_json": str(tmp_path / "minus" / "audit.json"),
+            "minus_audit_status": "completed" if accepted else "completed_with_blockers",
+            "semantic_review_json": str(tmp_path / "semantic" / "review.json"),
+            "semantic_review_evidence_count": 7 if accepted else 0,
+            "failed_checks": [] if accepted else ["required_stem_quality_not_verified:drums"],
+        },
+    )
+
+
 def _checks_by_id(audit: dict) -> dict[str, dict]:
     return {check["id"]: check for check in audit["checks"]}
 
@@ -132,6 +155,7 @@ def test_audit_short_listen_goal_status_keeps_goal_open_without_human_verdict(tm
         pack_manifest_json=pack,
         validation_json=validation,
         output_dir=tmp_path / "audit",
+        machine_gate_json=_machine_gate(tmp_path, pack=pack, validation=validation),
     )
 
     checks = _checks_by_id(audit)
@@ -141,10 +165,27 @@ def test_audit_short_listen_goal_status_keeps_goal_open_without_human_verdict(tm
     assert "human_listen_verdict_missing" in audit["remaining_blockers"]
     assert checks["short_windows_safe_names"]["status"] == "proved"
     assert checks["six_stem_coverage"]["status"] == "proved"
+    assert checks["machine_acceptance_gate"]["status"] == "proved"
     assert checks["human_listen_verdict"]["status"] == "blocked"
     assert "semantic_clean_ground_truth_for_6s_stems" in audit["not_claimed"]
     assert audit["release_ready"] is False
     assert audit["can_publish_as_result"] is False
+
+
+def test_audit_short_listen_goal_status_blocks_complete_pack_without_machine_gate(tmp_path: Path) -> None:
+    pack, validation = _pack(tmp_path)
+
+    audit = audit_short_listen_goal_status(
+        pack_manifest_json=pack,
+        validation_json=validation,
+        output_dir=tmp_path / "audit",
+    )
+
+    checks = _checks_by_id(audit)
+    assert audit["goal_complete"] is False
+    assert audit["goal_status"] == "machine_evidence_incomplete"
+    assert "machine_acceptance_gate_missing" in audit["remaining_blockers"]
+    assert checks["machine_acceptance_gate"]["status"] == "blocked"
 
 
 def test_audit_short_listen_goal_status_counts_repair_selection_vocal_and_minus(tmp_path: Path) -> None:
@@ -184,6 +225,7 @@ def test_audit_short_listen_goal_status_counts_repair_selection_vocal_and_minus(
         pack_manifest_json=pack,
         validation_json=validation,
         output_dir=tmp_path / "audit",
+        machine_gate_json=_machine_gate(tmp_path, pack=pack, validation=validation),
     )
 
     checks = _checks_by_id(audit)
@@ -201,6 +243,7 @@ def test_audit_short_listen_goal_status_blocks_incomplete_6s_stem_coverage(tmp_p
         pack_manifest_json=pack,
         validation_json=validation,
         output_dir=tmp_path / "audit",
+        machine_gate_json=_machine_gate(tmp_path, pack=pack, validation=validation),
     )
 
     checks = _checks_by_id(audit)
@@ -236,6 +279,7 @@ def test_audit_short_listen_goal_status_blocks_failed_validation(tmp_path: Path)
         pack_manifest_json=pack,
         validation_json=validation,
         output_dir=tmp_path / "audit",
+        machine_gate_json=_machine_gate(tmp_path, pack=pack, validation=validation),
     )
 
     checks = _checks_by_id(audit)
@@ -282,6 +326,7 @@ def test_audit_short_listen_goal_status_reports_rejected_human_feedback(tmp_path
         validation_json=validation,
         output_dir=tmp_path / "audit",
         human_listen_verdict_json=feedback,
+        machine_gate_json=_machine_gate(tmp_path, pack=pack, validation=validation),
     )
 
     checks = _checks_by_id(audit)
