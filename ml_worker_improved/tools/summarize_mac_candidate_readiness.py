@@ -17,6 +17,35 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 ACCEPTED_PRESENTATION_STATUS = "accepted_for_listen_pack"
+LISTEN_FEEDBACK_SCHEMAS = {"short_listen_feedback_manifest.v1"}
+VOCAL_LEAK_TAG_MARKERS = (
+    "residual_vocal",
+    "vocal_leak",
+    "leaked_vocal",
+    "background_vocal",
+    "pitch_shifted_vocal",
+)
+DETAIL_LOSS_TAG_MARKERS = (
+    "detail_loss",
+    "missing_detail",
+    "muffled",
+    "presence_loss",
+    "air_detail_loss",
+)
+PROMISING_HANDOFF_ROUTES = {
+    "detail_loss": {
+        "route": "judge_guided_minus_air_detail_repair",
+        "route_status": "documented_route",
+        "tool": "tools/apply_judge_guided_minus_air_detail_repair.py",
+        "next_action": "run_judge_guided_minus_air_detail_repair",
+    },
+    "residual_vocal_leak": {
+        "route": "detail_preserving_residual_vocal_cleanup",
+        "route_status": "missing_implementation",
+        "tool": "",
+        "next_action": "run_detail_preserving_residual_vocal_cleanup",
+    },
+}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -84,6 +113,117 @@ def _audibility_summary(audibility_audit: Mapping[str, Any] | None) -> dict[str,
     }
 
 
+def _listen_feedback_issue_categories(issue_tags: list[str]) -> list[str]:
+    categories: set[str] = set()
+    for raw_tag in issue_tags:
+        tag = raw_tag.lower()
+        if any(marker in tag for marker in VOCAL_LEAK_TAG_MARKERS):
+            categories.add("residual_vocal_leak")
+        if any(marker in tag for marker in DETAIL_LOSS_TAG_MARKERS):
+            categories.add("detail_loss")
+    return sorted(categories)
+
+
+def _listen_feedback_summary(feedback: Mapping[str, Any] | None, feedback_path: Path | None) -> dict[str, Any]:
+    if feedback is None:
+        return {"status": "missing", "manifest": "", "blocks_delivery": False, "blocker_reasons": [], "next_actions": []}
+
+    schema = str(feedback.get("schema") or "")
+    overall = str(feedback.get("overall_listen_verdict") or "")
+    failed_checks = [str(value) for value in feedback.get("failed_checks") or [] if str(value)]
+    items = [dict(item) for item in feedback.get("items") or [] if isinstance(item, Mapping)]
+    rejected_items = [item for item in items if str(item.get("verdict") or "") == "rejected"]
+    issue_tags = sorted({str(tag) for item in rejected_items for tag in item.get("issue_tags") or [] if str(tag)})
+    issue_categories = _listen_feedback_issue_categories(issue_tags)
+
+    blockers: list[str] = []
+    next_actions: list[str] = []
+    if schema not in LISTEN_FEEDBACK_SCHEMAS:
+        blockers.append("listen_feedback_schema_invalid")
+        next_actions.append("rebuild_listen_feedback_manifest")
+    if failed_checks or overall == "invalid":
+        blockers.append("listen_feedback_invalid")
+        next_actions.append("rebuild_listen_feedback_manifest")
+    if bool(feedback.get("delivery_allowed")) or bool(feedback.get("release_ready")) or bool(feedback.get("can_publish_as_result")):
+        blockers.append("listen_feedback_contract_violation")
+        next_actions.append("rebuild_listen_feedback_manifest")
+    if overall == "rejected" or rejected_items:
+        blockers.append("human_listen_feedback_rejected")
+        next_actions.append("route_human_feedback_to_failure_taxonomy")
+    if "residual_vocal_leak" in issue_categories:
+        blockers.append("human_feedback_residual_vocal_leak")
+        next_actions.append("run_detail_preserving_residual_vocal_cleanup")
+    if "detail_loss" in issue_categories:
+        blockers.append("human_feedback_detail_loss")
+        next_actions.append("run_judge_guided_minus_air_detail_repair")
+
+    if "listen_feedback_invalid" in blockers or "listen_feedback_schema_invalid" in blockers or "listen_feedback_contract_violation" in blockers:
+        status = "invalid"
+    elif "human_listen_feedback_rejected" in blockers:
+        status = "rejected"
+    elif overall == "accepted":
+        status = "accepted"
+    else:
+        status = "provided"
+
+    return {
+        "status": status,
+        "manifest": str(feedback_path or ""),
+        "source_schema": schema,
+        "overall_listen_verdict": overall,
+        "review_coverage_status": str(feedback.get("review_coverage_status") or ""),
+        "reviewed_item_count": _int_value(feedback.get("reviewed_item_count")),
+        "rejected_item_count": len(rejected_items),
+        "issue_tags": issue_tags,
+        "issue_categories": issue_categories,
+        "failed_checks": failed_checks,
+        "blocks_delivery": bool(blockers),
+        "blocker_reasons": _unique(blockers),
+        "next_actions": _unique(next_actions),
+        "contract": {
+            "diagnostic_feedback_only": True,
+            "does_not_create_listen_result": True,
+            "rejected_feedback_blocks_delivery": True,
+        },
+    }
+
+
+def _promising_blocked_handoff(listen_feedback_summary: Mapping[str, Any]) -> dict[str, Any]:
+    if str(listen_feedback_summary.get("status") or "") != "rejected":
+        return {
+            "status": "not_applicable",
+            "delivery_allowed": False,
+            "presentation_status": "diagnostic_only_handoff",
+            "issue_categories": [],
+            "issue_tags": [],
+            "recommended_routes": [],
+            "contract": {
+                "diagnostic_only": True,
+                "does_not_create_listen_result": True,
+                "requires_objective_gate_before_delivery": True,
+            },
+        }
+    issue_categories = [str(value) for value in listen_feedback_summary.get("issue_categories") or [] if str(value)]
+    routes: list[dict[str, Any]] = []
+    for category in issue_categories:
+        route = PROMISING_HANDOFF_ROUTES.get(category)
+        if route:
+            routes.append({"issue_category": category, **route})
+    return {
+        "status": "promising_but_blocked",
+        "delivery_allowed": False,
+        "presentation_status": "diagnostic_only_handoff",
+        "issue_categories": issue_categories,
+        "issue_tags": [str(value) for value in listen_feedback_summary.get("issue_tags") or [] if str(value)],
+        "recommended_routes": routes,
+        "contract": {
+            "diagnostic_only": True,
+            "does_not_create_listen_result": True,
+            "requires_objective_gate_before_delivery": True,
+        },
+    }
+
+
 def _mapping_value(payload: Mapping[str, Any], key: str) -> dict[str, Any]:
     value = payload.get(key)
     return dict(value) if isinstance(value, Mapping) else {}
@@ -137,9 +277,25 @@ def _reference_audit_status(reference_audit: Mapping[str, Any] | None, *, source
 def _objective_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     before_score = payload.get("before_score") if isinstance(payload.get("before_score"), Mapping) else {}
     after_score = payload.get("after_score") if isinstance(payload.get("after_score"), Mapping) else {}
-    before_count = _int_value(payload.get("before_region_count"), before_score.get("total_fail_regions"), before_score.get("all_region_count"))
-    after_count = _int_value(payload.get("after_region_count"), after_score.get("total_fail_regions"), after_score.get("all_region_count"), _score_region_count(after_score))
+    guard = _mapping_value(payload, "guard")
+    before_count = _int_value(
+        payload.get("before_region_count"),
+        before_score.get("total_fail_regions"),
+        before_score.get("all_region_count"),
+        guard.get("score_region_count"),
+        guard.get("before_region_count"),
+    )
+    after_count = _int_value(
+        payload.get("after_region_count"),
+        after_score.get("total_fail_regions"),
+        after_score.get("all_region_count"),
+        guard.get("after_repair_region_count"),
+        guard.get("after_region_count"),
+        _score_region_count(after_score),
+    )
     verdict = str(after_score.get("verdict") or "")
+    if not verdict:
+        verdict = str(guard.get("after_repair_verdict") or guard.get("score_verdict") or "")
     if not verdict:
         verdict = "pass" if before_count > 0 and after_count == 0 else "fail" if after_count > 0 else "unknown"
     return {
@@ -157,6 +313,10 @@ def _status_from_blockers(*, accepted: bool, selection: bool, failed_objective: 
         return "blocked_missing_audibility_audit"
     if "audibility_delta_below_gate" in blockers or "source_candidate_same_path" in blockers:
         return "blocked_inaudible_candidate"
+    if "listen_feedback_invalid" in blockers or "listen_feedback_schema_invalid" in blockers or "listen_feedback_contract_violation" in blockers:
+        return "blocked_invalid_listen_feedback"
+    if "human_listen_feedback_rejected" in blockers:
+        return "blocked_human_listen_feedback"
     if "full_holdout_validation_failed" in blockers:
         return "blocked_failed_full_holdout_validation"
     if "reference_bundle_mismatched_to_source" in blockers:
@@ -175,6 +335,7 @@ def summarize_manifest(
     *,
     reference_audit_path: Path | None = None,
     audibility_audit_path: Path | None = None,
+    listen_feedback_path: Path | None = None,
     full_holdout_validation_path: Path | None = None,
     require_audibility_audit: bool = False,
     source_audio_path_override: str = "",
@@ -183,10 +344,13 @@ def summarize_manifest(
     payload = _load_json(manifest_path)
     reference_audit = _load_json(reference_audit_path) if reference_audit_path else None
     audibility_audit = _load_json(audibility_audit_path) if audibility_audit_path else None
+    listen_feedback = _load_json(listen_feedback_path) if listen_feedback_path else None
     full_holdout_validation = _load_json(full_holdout_validation_path) if full_holdout_validation_path else None
     audibility_failed = _audibility_audit_failed(audibility_audit)
     audibility_missing = bool(require_audibility_audit and audibility_audit is None)
-    accepted = _delivery_contract_passes(payload) and not audibility_failed and not audibility_missing
+    listen_feedback_summary = _listen_feedback_summary(listen_feedback, listen_feedback_path)
+    listen_feedback_blocks_delivery = bool(listen_feedback_summary.get("blocks_delivery"))
+    accepted = _delivery_contract_passes(payload) and not audibility_failed and not audibility_missing and not listen_feedback_blocks_delivery
     schema = str(payload.get("schema") or "")
     presentation_status = str(payload.get("presentation_status") or "")
     delivery_allowed = bool(payload.get("delivery_allowed"))
@@ -203,6 +367,8 @@ def summarize_manifest(
     reference_source_audio_path = str(reference_audit.get("source_audio_path") or reference_audit.get("reference_audio_path") or "") if reference_audit else ""
     ref_status = _reference_audit_status(reference_audit, source_track_identity=source_track_identity)
     objective = _objective_summary(payload)
+    guard = _mapping_value(payload, "guard")
+    guard_blockers = [str(value) for value in guard.get("blocker_reasons") or [] if str(value)]
 
     blockers: list[str] = []
     next_actions: list[str] = []
@@ -224,6 +390,9 @@ def summarize_manifest(
     elif audibility_missing:
         blockers.append("audibility_audit_missing")
         next_actions.append("run_audibility_delta_audit_for_candidate")
+    if listen_feedback_blocks_delivery:
+        blockers.extend([str(value) for value in listen_feedback_summary.get("blocker_reasons") or []])
+        next_actions.extend([str(value) for value in listen_feedback_summary.get("next_actions") or []])
 
     selected_full_holdout_status = str(selected.get("full_holdout_resolution_status") or payload.get("full_holdout_resolution_status") or "")
     holdout_validation_status = str(full_holdout_validation.get("status") or "") if full_holdout_validation else "missing"
@@ -261,6 +430,7 @@ def summarize_manifest(
     failed_objective = "pitch_guard_failed" in failed_checks or objective["after_fail_regions"] > 0 or objective["pitch_guard_verdict"] == "fail"
     if failed_objective:
         blockers.extend(failed_checks or ["pitch_guard_failed"])
+        blockers.extend(guard_blockers)
         next_actions.append("continue_model_routing_or_training_until_objective_gate_passes")
 
     if not accepted:
@@ -308,6 +478,9 @@ def summarize_manifest(
         "reference_audit_status": ref_status,
         "audibility_audit": _audibility_summary(audibility_audit),
         "audibility_audit_status": str(audibility_audit.get("verdict") or "missing") if audibility_audit is not None else "missing",
+        "listen_feedback": listen_feedback_summary,
+        "listen_feedback_status": str(listen_feedback_summary.get("status") or "missing"),
+        "promising_blocked_handoff": _promising_blocked_handoff(listen_feedback_summary),
         "full_holdout_validation_status": holdout_validation_status,
         "full_holdout_validation": {
             "manifest": str(full_holdout_validation_path) if full_holdout_validation_path else "",
@@ -322,6 +495,7 @@ def summarize_manifest(
             "accepted_requires_delivery_allowed": True,
             "accepted_requires_presentation_status": ACCEPTED_PRESENTATION_STATUS,
             "provided_audibility_audit_must_pass": True,
+            "provided_listen_feedback_must_not_reject": True,
             "provided_full_holdout_validation_must_pass": True,
             "required_audibility_audit": bool(require_audibility_audit),
             "diagnostic_artifacts_are_not_listen_results": True,
@@ -334,6 +508,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--reference-audit", type=Path)
     parser.add_argument("--audibility-audit", type=Path)
+    parser.add_argument("--listen-feedback", type=Path)
     parser.add_argument("--full-holdout-validation", type=Path)
     parser.add_argument("--require-audibility-audit", action="store_true")
     parser.add_argument("--source-audio-path", default="")
@@ -348,6 +523,7 @@ def main() -> int:
         args.manifest,
         reference_audit_path=args.reference_audit,
         audibility_audit_path=args.audibility_audit,
+        listen_feedback_path=args.listen_feedback,
         full_holdout_validation_path=args.full_holdout_validation,
         require_audibility_audit=bool(args.require_audibility_audit),
         source_audio_path_override=args.source_audio_path,

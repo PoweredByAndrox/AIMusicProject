@@ -23,6 +23,36 @@ audibility audit blocks an otherwise accepted-looking manifest with
 summary with `--require-audibility-audit`; without an audit manifest it then
 fails closed as `blocked_missing_audibility_audit`.
 
+If a human listen feedback manifest is supplied with `--listen-feedback`, it is
+treated as diagnostic evidence only. Rejected feedback blocks delivery with
+`blocked_human_listen_feedback` even when the source manifest otherwise looks
+accepted. Known issue tags are mapped into machine-actionable blockers:
+
+```text
+residual_vocal_* / vocal_leak / pitch_shifted_vocal -> human_feedback_residual_vocal_leak
+detail_loss / missing_detail / muffled / presence_loss -> human_feedback_detail_loss
+```
+
+The corresponding next actions are:
+
+```text
+run_detail_preserving_residual_vocal_cleanup
+run_judge_guided_minus_air_detail_repair
+```
+
+This is the handoff for promising-but-blocked minus candidates: listener notes
+about blurred vocal leak or missing detail are preserved in the readiness
+summary, but the artifact remains `delivery_allowed=false` until objective,
+audibility, holdout, reference, and delivery gates pass.
+
+The same information is also emitted as `promising_blocked_handoff` so a planner
+does not need to infer route intent from free-form notes. For `detail_loss`, the
+recommended route points to the documented
+`tools/apply_judge_guided_minus_air_detail_repair.py` family. For
+`residual_vocal_leak`, the handoff currently marks the route as
+`missing_implementation` instead of pretending that a production cleanup route
+already exists.
+
 If a residual candidate full-holdout validation manifest is supplied with
 `--full-holdout-validation`, it must also pass. This evidence is produced by
 `tools/validate_mac_residual_candidate_full_holdout.py` and remains
@@ -41,6 +71,19 @@ candidate. Typical blockers are:
 - `diagnostic_presentation_status`
 - `audibility_delta_below_gate`
 
+For alternate minus route manifests such as `mac_alt_minus_route_eval.v1`, the
+objective summary is read from the nested `guard` block:
+
+```text
+guard.score_region_count
+guard.after_repair_region_count
+guard.after_repair_verdict
+guard.blocker_reasons
+```
+
+This keeps full-region pitch-vocal leaks visible in readiness reports even when
+the route did not use the older flat `before_score` / `after_score` fields.
+
 Example Docker-only run for root `artifacts` manifests:
 
 ```bash
@@ -52,6 +95,7 @@ docker compose run --rm --no-deps \
   python tools/summarize_mac_candidate_readiness.py \
     --manifest /host_artifacts/mac_api/it7sel003/selection.json \
     --audibility-audit /host_artifacts/mac_api/it7aud001/d003/manifest.json \
+    --listen-feedback /host_artifacts/loop/it013/fbk.json \
     --full-holdout-validation /host_artifacts/mac_api/it7fh001/d003/manifest.json \
     --require-audibility-audit \
     --out /host_artifacts/mac_api/it7rd001/sel

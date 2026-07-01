@@ -46,6 +46,39 @@ def test_readiness_blocks_pitch_guard_failed_diagnostic_manifest(tmp_path: Path)
     assert summary["next_actions"][0] == "continue_model_routing_or_training_until_objective_gate_passes"
 
 
+def test_readiness_extracts_alt_minus_guard_objective_from_nested_guard(tmp_path: Path) -> None:
+    manifest = _write_json(
+        tmp_path / "altm002" / "manifest.json",
+        {
+            "schema": "mac_alt_minus_route_eval.v1",
+            "delivery_status": "blocked",
+            "delivery_allowed": False,
+            "listen_pack_created": False,
+            "presentation_status": "diagnostic_only_not_for_listen_pack",
+            "guard": {
+                "score_verdict": "fail",
+                "score_region_count": 16,
+                "after_repair_verdict": "fail",
+                "after_repair_region_count": 16,
+                "blocker_reasons": ["pitch_shifted_vocal_in_instrumental"],
+            },
+        },
+    )
+
+    summary = readiness.summarize_manifest(manifest)
+
+    assert summary["status"] == "blocked_failed_objective_gate"
+    assert summary["objective_summary"] == {
+        "before_fail_regions": 16,
+        "after_fail_regions": 16,
+        "region_delta": 0,
+        "pitch_guard_verdict": "fail",
+    }
+    assert "pitch_guard_failed" in summary["blocker_reasons"]
+    assert "pitch_shifted_vocal_in_instrumental" in summary["blocker_reasons"]
+    assert "continue_model_routing_or_training_until_objective_gate_passes" in summary["next_actions"]
+
+
 def test_readiness_marks_pareto_selection_as_full_holdout_not_listen_result(tmp_path: Path) -> None:
     selection = _write_json(
         tmp_path / "sel" / "selection.json",
@@ -390,3 +423,181 @@ def test_readiness_can_require_audibility_audit_before_acceptance(tmp_path: Path
     assert summary["audibility_audit_status"] == "missing"
     assert "audibility_audit_missing" in summary["blocker_reasons"]
     assert "run_audibility_delta_audit_for_candidate" in summary["next_actions"]
+
+
+def test_readiness_blocks_rejected_listen_feedback_without_promoting_candidate(tmp_path: Path) -> None:
+    manifest = _write_json(
+        tmp_path / "accepted" / "pack.json",
+        {
+            "schema": "fully_automatic_stem_listen_pack.v1",
+            "status": "accepted",
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "listen_pack_created": True,
+            "presentation_status": "accepted_for_listen_pack",
+        },
+    )
+    feedback = _write_json(
+        tmp_path / "feedback" / "feedback.json",
+        {
+            "schema": "short_listen_feedback_manifest.v1",
+            "overall_listen_verdict": "rejected",
+            "review_coverage_status": "subset",
+            "reviewed_item_count": 1,
+            "failed_checks": [],
+            "delivery_allowed": False,
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "presentation_status": "human_feedback_not_for_listen_pack",
+            "items": [
+                {
+                    "schema": "short_listen_feedback_item.v1",
+                    "audio_path": "audio/t001/minus.flac",
+                    "verdict": "rejected",
+                    "issue_tags": [
+                        "residual_vocal_middle",
+                        "detail_loss",
+                    ],
+                    "note": "Promising minus, but blurred vocal is still audible and details are missing.",
+                }
+            ],
+            "issue_tag_counts": {"detail_loss": 1, "residual_vocal_middle": 1},
+        },
+    )
+
+    summary = readiness.summarize_manifest(manifest, listen_feedback_path=feedback)
+
+    assert summary["status"] == "blocked_human_listen_feedback"
+    assert summary["listen_result_allowed"] is False
+    assert summary["delivery_allowed"] is False
+    assert summary["listen_feedback_status"] == "rejected"
+    assert summary["listen_feedback"]["issue_categories"] == [
+        "detail_loss",
+        "residual_vocal_leak",
+    ]
+    assert "human_listen_feedback_rejected" in summary["blocker_reasons"]
+    assert "human_feedback_residual_vocal_leak" in summary["blocker_reasons"]
+    assert "human_feedback_detail_loss" in summary["blocker_reasons"]
+    assert "run_detail_preserving_residual_vocal_cleanup" in summary["next_actions"]
+    assert "run_judge_guided_minus_air_detail_repair" in summary["next_actions"]
+    assert summary["promising_blocked_handoff"] == {
+        "status": "promising_but_blocked",
+        "delivery_allowed": False,
+        "presentation_status": "diagnostic_only_handoff",
+        "issue_categories": [
+            "detail_loss",
+            "residual_vocal_leak",
+        ],
+        "issue_tags": [
+            "detail_loss",
+            "residual_vocal_middle",
+        ],
+        "recommended_routes": [
+            {
+                "issue_category": "detail_loss",
+                "route": "judge_guided_minus_air_detail_repair",
+                "route_status": "documented_route",
+                "tool": "tools/apply_judge_guided_minus_air_detail_repair.py",
+                "next_action": "run_judge_guided_minus_air_detail_repair",
+            },
+            {
+                "issue_category": "residual_vocal_leak",
+                "route": "detail_preserving_residual_vocal_cleanup",
+                "route_status": "missing_implementation",
+                "tool": "",
+                "next_action": "run_detail_preserving_residual_vocal_cleanup",
+            },
+        ],
+        "contract": {
+            "diagnostic_only": True,
+            "does_not_create_listen_result": True,
+            "requires_objective_gate_before_delivery": True,
+        },
+    }
+
+
+def test_cli_accepts_listen_feedback_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = _write_json(
+        tmp_path / "accepted" / "pack.json",
+        {
+            "schema": "fully_automatic_stem_listen_pack.v1",
+            "status": "accepted",
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "listen_pack_created": True,
+            "presentation_status": "accepted_for_listen_pack",
+        },
+    )
+    feedback = _write_json(
+        tmp_path / "feedback" / "feedback.json",
+        {
+            "schema": "short_listen_feedback_manifest.v1",
+            "overall_listen_verdict": "rejected",
+            "review_coverage_status": "subset",
+            "reviewed_item_count": 1,
+            "failed_checks": [],
+            "delivery_allowed": False,
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "items": [
+                {
+                    "audio_path": "audio/t001/minus.flac",
+                    "verdict": "rejected",
+                    "issue_tags": ["muffled_minus"],
+                }
+            ],
+        },
+    )
+    out = tmp_path / "out"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "summarize_mac_candidate_readiness.py",
+            "--manifest",
+            str(manifest),
+            "--listen-feedback",
+            str(feedback),
+            "--out",
+            str(out),
+        ],
+    )
+
+    assert readiness.main() == 0
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "blocked_human_listen_feedback"
+    assert summary["listen_feedback_status"] == "rejected"
+    assert "run_judge_guided_minus_air_detail_repair" in summary["next_actions"]
+
+
+def test_readiness_blocks_listen_feedback_contract_violation(tmp_path: Path) -> None:
+    manifest = _write_json(
+        tmp_path / "accepted" / "pack.json",
+        {
+            "schema": "fully_automatic_stem_listen_pack.v1",
+            "status": "accepted",
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "listen_pack_created": True,
+            "presentation_status": "accepted_for_listen_pack",
+        },
+    )
+    feedback = _write_json(
+        tmp_path / "feedback" / "feedback.json",
+        {
+            "schema": "short_listen_feedback_manifest.v1",
+            "overall_listen_verdict": "accepted",
+            "review_coverage_status": "complete",
+            "reviewed_item_count": 1,
+            "failed_checks": [],
+            "delivery_allowed": True,
+            "items": [],
+        },
+    )
+
+    summary = readiness.summarize_manifest(manifest, listen_feedback_path=feedback)
+
+    assert summary["status"] == "blocked_invalid_listen_feedback"
+    assert summary["listen_feedback_status"] == "invalid"
+    assert "listen_feedback_contract_violation" in summary["blocker_reasons"]
+    assert "rebuild_listen_feedback_manifest" in summary["next_actions"]
