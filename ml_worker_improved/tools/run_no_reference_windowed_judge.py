@@ -405,11 +405,10 @@ def aggregate_metrics(window_metrics: list[dict[str, Any]], *, score_mode: str =
             decision = "accept_candidate"
         elif pair_result["pair_decision"] == "needs_pair_reconciliation":
             decision = "needs_pair_reconciliation"
-        elif overall >= 0.55:
-            decision = "select_alternative_candidate"
         else:
             decision = "blocked_hard_case"
-            reasons = stable_unique(reasons + ["low_no_reference_score"])
+            pair_blockers = as_list(pair_result.get("pair_blockers"))
+            reasons = stable_unique(reasons + (pair_blockers or ["low_no_reference_score"]))
     aggregated["score_mode"] = score_mode
     aggregated["decision"] = decision
     aggregated["reasons"] = reasons
@@ -476,12 +475,25 @@ def window_metric_summary(window: dict[str, Any], metrics: dict[str, Any], *, sc
         summary["minus_musical_detail_preservation_gate"] = build_minus_musical_detail_preservation_gate(summary)
         apply_minus_detail_gate_override(summary)
     if score_mode == "vocal":
-        summary["window_fitness"] = summary["vocal_score"]
+        summary["window_fitness"] = (
+            0.0
+            if summary.get("vocal_decision") == "blocked_hard_case"
+            else summary["vocal_score"]
+        )
     elif score_mode == "minus":
         summary["window_fitness"] = 0.0 if summary.get("minus_decision") == "blocked_hard_case" else summary["minus_score"]
     else:
-        summary["window_fitness"] = summary["pair_compatibility_score"]
-    summary["pair_window_fitness"] = pair_compatibility_score(summary, summary)["pair_compatibility_score"]
+        summary["window_fitness"] = (
+            0.0
+            if summary.get("pair_decision") == "blocked_pair_incompatible"
+            else summary["pair_compatibility_score"]
+        )
+    pair_window_result = pair_compatibility_score(summary, summary)
+    summary["pair_window_fitness"] = (
+        0.0
+        if pair_window_result.get("pair_decision") == "blocked_pair_incompatible"
+        else pair_window_result["pair_compatibility_score"]
+    )
     summary["score_mode"] = score_mode
     return summary
 

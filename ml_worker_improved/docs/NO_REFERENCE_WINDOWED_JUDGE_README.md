@@ -21,9 +21,17 @@ human CSV.
 - Output rows also include `window_metrics` for downstream metadata-only segment
   planning. Each window metric row records `kind`, `start_sec`, `duration_sec`,
   component scores, blocker reasons, and `window_fitness`.
+- `window_fitness` is a routing fitness, not a raw component score. When the
+  selected `--score-mode` decision is hard-blocked by vocal/minus/pair blockers,
+  the window fitness is forced to `0.0` so downstream segment planners cannot
+  rank a blocked window as a usable repair target.
 - `--score-mode vocal|minus|both` controls the decision matrix. Vocal and minus
   modes evaluate one stem independently; `both` is for pair compatibility, not
   default optimizer selection.
+- In `both` mode, the top-level `decision` follows the pair compatibility gate.
+  A blocked pair remains `blocked_hard_case` even when the legacy shared
+  `overall_no_reference_score` is high, and pair blockers are copied into
+  top-level `reasons`.
 
 ## Window Strategy
 

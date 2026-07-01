@@ -457,6 +457,34 @@ def test_aggregate_both_mode_accepts_pair_compatible_without_shared_score_cutoff
     assert result["decision"] == "accept_candidate"
 
 
+def test_aggregate_both_mode_blocks_pair_blockers_despite_high_shared_score() -> None:
+    result = aggregate_metrics(
+        [
+            {
+                "mixture_consistency_score": 0.92,
+                "vocal_leakage_in_minus_score": 0.05,
+                "instrumental_leakage_in_vocal_score": 0.05,
+                "vocal_activity_confidence": 0.86,
+                "silence_hallucination_score": 0.04,
+                "robotic_artifact_score": 0.04,
+                "thin_vocal_score": 0.08,
+                "transient_damage_score": 0.06,
+                "phase_consistency_score": 0.92,
+                "pair_phase_consistency_score": math.inf,
+                "confidence": 0.82,
+                "reasons": ["no_reference_proxy_passed"],
+            }
+        ],
+        score_mode="both",
+    )
+
+    assert "invalid_no_reference_metric:pair_phase_consistency_score" in result["pair_blockers"]
+    assert result["pair_decision"] == "blocked_pair_incompatible"
+    assert result["overall_no_reference_score"] > 0.72
+    assert result["decision"] == "blocked_hard_case"
+    assert "invalid_no_reference_metric:pair_phase_consistency_score" in result["reasons"]
+
+
 def test_window_metric_summary_uses_mode_specific_fitness() -> None:
     window = {"kind": "middle", "start_sec": 0.0, "duration_sec": 12.0}
     metrics = {
@@ -479,6 +507,57 @@ def test_window_metric_summary_uses_mode_specific_fitness() -> None:
     assert vocal["window_fitness"] == vocal["vocal_score"]
     assert minus["window_fitness"] == minus["minus_score"]
     assert vocal["window_fitness"] > minus["window_fitness"]
+
+
+def test_window_metric_summary_vocal_blocker_zeroes_window_fitness() -> None:
+    window = {"kind": "middle", "start_sec": 0.0, "duration_sec": 12.0}
+    metrics = {
+        "mixture_consistency_score": 0.92,
+        "vocal_leakage_in_minus_score": 0.05,
+        "instrumental_leakage_in_vocal_score": 0.05,
+        "vocal_activity_confidence": 0.86,
+        "silence_hallucination_score": 0.04,
+        "robotic_artifact_score": 0.04,
+        "thin_vocal_score": 0.08,
+        "transient_damage_score": 0.06,
+        "phase_consistency_score": 0.92,
+        "vocal_phase_consistency_score": math.inf,
+        "confidence": 0.82,
+        "reasons": ["no_reference_proxy_passed"],
+    }
+
+    vocal = window_metric_summary(window, metrics, score_mode="vocal")
+
+    assert "invalid_no_reference_metric:vocal_phase_consistency_score" in vocal["vocal_blockers"]
+    assert vocal["vocal_decision"] == "blocked_hard_case"
+    assert vocal["vocal_score"] > 0.70
+    assert vocal["window_fitness"] == 0.0
+
+
+def test_window_metric_summary_pair_blocker_zeroes_window_fitness() -> None:
+    window = {"kind": "middle", "start_sec": 0.0, "duration_sec": 12.0}
+    metrics = {
+        "mixture_consistency_score": 0.92,
+        "vocal_leakage_in_minus_score": 0.05,
+        "instrumental_leakage_in_vocal_score": 0.05,
+        "vocal_activity_confidence": 0.86,
+        "silence_hallucination_score": 0.04,
+        "robotic_artifact_score": 0.04,
+        "thin_vocal_score": 0.08,
+        "transient_damage_score": 0.06,
+        "phase_consistency_score": 0.92,
+        "pair_phase_consistency_score": math.inf,
+        "confidence": 0.82,
+        "reasons": ["no_reference_proxy_passed"],
+    }
+
+    pair = window_metric_summary(window, metrics, score_mode="both")
+
+    assert "invalid_no_reference_metric:pair_phase_consistency_score" in pair["pair_blockers"]
+    assert pair["pair_decision"] == "blocked_pair_incompatible"
+    assert pair["pair_compatibility_score"] > 0.70
+    assert pair["window_fitness"] == 0.0
+    assert pair["pair_window_fitness"] == 0.0
 
 
 def test_window_metric_summary_minus_detail_gate_blocks_window() -> None:
