@@ -5,13 +5,21 @@
 `no_reference_minus_candidate_model_router` into registered-model minus
 candidate commands.
 
-This is a Docker-only metadata materializer:
+This is a container-backed metadata materializer:
 
 - `gpu_inference_skipped=true` for the materializer itself;
 - generated candidate commands require `gpu_registered_model_inference`;
 - no audio is rendered by the materializer;
 - no model training, fine-tune, threshold relaxation, or registry edit happens;
 - no generated command row is publishable as a listen result.
+
+For Mac targets, the approved container orchestrator is Apple `container`
+(`/usr/local/bin/container`), not Docker Desktop, Docker daemon, `docker compose`,
+or Docker VMM. The current registered-model command rows are Linux/CUDA
+in-container command plans. When the materializer is run as
+`native_mac_cpu_dsp`, it blocks with
+`command_plan_status=blocked_mac_registered_model_runtime_unavailable` until a
+real Mac/Apple-container registered-model adapter exists.
 
 The materializer reads the router failure taxonomy and unresolved issue summary,
 expands proxy labels such as `vocal_projection_proxy` into registry labels such
@@ -25,19 +33,19 @@ python /app/tools/run_registered_model_candidate.py <source_audio> <output_dir> 
   --target-stem minus
 ```
 
-`<source_audio>` and `<output_dir>` in `docker_command` must be
+`<source_audio>` and `<output_dir>` in `in_container_command` must be
 container-visible paths. Host provenance remains in `source_audio_path` and
-`output_dir`, but command arguments are remapped to Docker paths such as
-`/host_artifacts/...`. If either path cannot be mapped to a known Docker-visible
+`output_dir`, but command arguments are remapped to container paths such as
+`/host_artifacts/...`. If either path cannot be mapped to a known container-visible
 prefix, the materializer writes
-`command_plan_status=blocked_missing_docker_path_mapping` with
-`failed_checks=["docker_path_mapping_missing"]` instead of emitting a fake-ready
+`command_plan_status=blocked_missing_container_path_mapping` with
+`failed_checks=["container_path_mapping_missing"]` instead of emitting a fake-ready
 command.
 
 For Mac artifact-loop runs that use `/host_artifacts/...`, the surrounding
-Docker route must mount the host artifact root at `/host_artifacts`. The
-materializer emits inside-container command arrays only; it does not add Docker
-volume flags or make host-only `/Users/...` paths visible by itself.
+Apple-container route must mount the host artifact root at `/host_artifacts`.
+The materializer emits inside-container command arrays only; it does not add
+container run flags or make host-only `/Users/...` paths visible by itself.
 
 ## Required Inputs
 
@@ -63,8 +71,8 @@ progress.jsonl
 
 - selected registered model ids;
 - source audio provenance;
-- Docker-visible source/output paths;
-- Docker command arrays;
+- container-visible source/output paths;
+- `in_container_command` arrays;
 - availability checks from the model registry;
 - required downstream gates.
 

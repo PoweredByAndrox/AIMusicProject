@@ -3,7 +3,7 @@
 `tools/plan_minus_repair_delta_router.py` turns a
 `minus_repair_delta_gate.v1` manifest into a candidate-only next-route plan.
 
-This is a Docker-only metadata planner:
+This is a container-backed metadata planner:
 
 - `gpu_inference_skipped=true`
 - `acceleration_mode=external_only_cpu_metadata_planning`
@@ -56,19 +56,25 @@ When the selected route is `no_reference_minus_candidate_model_router`, pass the
 router plan and the failed repair manifest to
 `tools/materialize_minus_delta_model_candidate_route.py`. That materializer
 does not run inference or publish audio; it mines registry-backed minus-capable
-model candidates and writes Docker commands for
+model candidates and writes `in_container_command` arrays for
 `/app/tools/run_registered_model_candidate.py --device cuda --target-stem minus`.
 Those generated commands are ready only when source/output paths are
 container-visible, for example under `/host_artifacts/...`; otherwise the
-materializer blocks with `docker_path_mapping_missing`. Every generated model
-candidate remains blocked for listening until it reruns the instrumental
+materializer blocks with `container_path_mapping_missing`.
+
+For Mac targets, route orchestration must use Apple `container`
+(`/usr/local/bin/container`). Docker Desktop, Docker daemon, `docker compose`,
+and Docker VMM are not approved Mac project execution routes. The registered
+CUDA command-plan path is blocked under `native_mac_cpu_dsp` until a real
+Mac/Apple-container registered-model adapter is implemented. Every generated
+model candidate remains blocked for listening until it reruns the instrumental
 self-judge gate, the minus repair delta gate, the no-reference result judge, and
 the selector.
 
 Example:
 
 ```bash
-docker compose run --rm --no-deps ml-worker python /app/tools/materialize_minus_delta_model_candidate_route.py \
+/usr/local/bin/container run --rm <project-image> python /app/tools/materialize_minus_delta_model_candidate_route.py \
   --router-plan-json /host_artifacts/loop/it029/router/plan.json \
   --source-repair-manifest /host_artifacts/loop/it028/lkg/manifest.json \
   --output-dir /host_artifacts/loop/it030/mdlcmd \
@@ -113,7 +119,7 @@ before listen-pack acceptance.
 ## Example
 
 ```bash
-docker compose run --rm --no-deps ml-worker python /app/tools/plan_minus_repair_delta_router.py \
+/usr/local/bin/container run --rm <project-image> python /app/tools/plan_minus_repair_delta_router.py \
   --delta-gate-manifest /host_artifacts/loop/it018/gate/gate.json \
   --output-dir /host_artifacts/loop/it019/router \
   --source-route judge_guided_minus_air_detail_repair \

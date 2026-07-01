@@ -143,6 +143,7 @@ def test_model_candidate_materializer_builds_registered_minus_command_plan(tmp_p
         output_dir=tmp_path / "host_artifacts" / "out",
         registry=demo_registry(tmp_path),
         max_candidates=3,
+        runtime_environment="container",
         native_runtime_allowed=True,
     )
 
@@ -173,7 +174,7 @@ def test_model_candidate_materializer_builds_registered_minus_command_plan(tmp_p
     assert row["requires_post_judge"] is True
     assert row["delivery_allowed"] is False
     assert row["can_publish_as_result"] is False
-    assert row["docker_command"] == [
+    assert row["in_container_command"] == [
         "python",
         "/app/tools/run_registered_model_candidate.py",
         "/host_artifacts/src/mix.flac",
@@ -185,16 +186,20 @@ def test_model_candidate_materializer_builds_registered_minus_command_plan(tmp_p
         "--target-stem",
         "minus",
     ]
+    assert "docker_command" not in row
     assert "persistent_unsafe_vocal_or_full_mix_blockers" in manifest["source_failure_taxonomy"]
     assert "vocal_residue_in_minus" in manifest["expanded_failure_labels"]
     assert all(len(path.name) <= 32 for path in (tmp_path / "host_artifacts" / "out").rglob("*"))
     assert row["source_audio_path"] == str(tmp_path / "host_artifacts" / "src" / "mix.flac")
     assert row["output_dir"] == str(tmp_path / "host_artifacts" / "out" / "mdl" / "m001")
-    assert row["docker_source_audio_path"] == "/host_artifacts/src/mix.flac"
-    assert row["docker_output_dir"] == "/host_artifacts/out/mdl/m001"
+    assert row["container_source_audio_path"] == "/host_artifacts/src/mix.flac"
+    assert row["container_output_dir"] == "/host_artifacts/out/mdl/m001"
+    assert manifest["container_source_audio_path"] == "/host_artifacts/src/mix.flac"
+    assert manifest["container_output_dir"] == "/host_artifacts/out"
+    assert manifest["container_runtime_contract"]["mac_target_runtime"] == "apple_container"
 
 
-def test_model_candidate_materializer_blocks_without_docker_visible_paths(tmp_path: Path) -> None:
+def test_model_candidate_materializer_blocks_without_container_visible_paths(tmp_path: Path) -> None:
     module = _load_module()
     source_audio = tmp_path / "src" / "mix.flac"
     source_audio.parent.mkdir(parents=True, exist_ok=True)
@@ -216,18 +221,39 @@ def test_model_candidate_materializer_blocks_without_docker_visible_paths(tmp_pa
         registry=demo_registry(tmp_path),
     )
 
-    assert manifest["command_plan_status"] == "blocked_missing_docker_path_mapping"
+    assert manifest["command_plan_status"] == "blocked_missing_container_path_mapping"
     assert manifest["ready_command_count"] == 0
     assert manifest["blocked_command_count"] == 1
-    assert manifest["failed_checks"] == ["docker_path_mapping_missing"]
-    assert manifest["docker_path_mapping"] == {
+    assert manifest["failed_checks"] == ["container_path_mapping_missing"]
+    assert manifest["container_path_mapping"] == {
         "source_audio_path": str(source_audio),
         "output_dir": str(tmp_path / "out"),
-        "docker_source_audio_path": "",
-        "docker_output_dir": "",
+        "container_source_audio_path": "",
+        "container_output_dir": "",
         "failed_path_fields": ["source_audio_path", "output_dir"],
     }
     assert read_jsonl(tmp_path / "out" / "cmds.jsonl") == []
+
+
+def test_model_candidate_materializer_blocks_mac_native_registered_model_runtime(tmp_path: Path) -> None:
+    module = _load_module()
+
+    manifest = module.materialize_minus_delta_model_candidate_route(
+        router_plan_json=router_plan(tmp_path),
+        source_repair_manifest=source_repair_manifest(tmp_path),
+        output_dir=tmp_path / "host_artifacts" / "out",
+        registry=demo_registry(tmp_path),
+        runtime_environment="native_mac_cpu_dsp",
+        native_runtime_allowed=True,
+    )
+
+    assert manifest["command_plan_status"] == "blocked_mac_registered_model_runtime_unavailable"
+    assert manifest["ready_command_count"] == 0
+    assert manifest["blocked_command_count"] == 1
+    assert manifest["failed_checks"] == ["mac_registered_model_runtime_not_configured"]
+    assert manifest["container_runtime_contract"]["mac_target_runtime"] == "apple_container"
+    assert manifest["container_runtime_contract"]["registered_model_mac_runtime_status"] == "not_configured"
+    assert read_jsonl(tmp_path / "host_artifacts" / "out" / "cmds.jsonl") == []
 
 
 def test_model_candidate_materializer_blocks_when_router_did_not_select_route(tmp_path: Path) -> None:
@@ -320,4 +346,4 @@ def test_model_candidate_materializer_resolves_relative_delta_gate_from_router_p
     assert manifest["source_audio_path"] == str(source_audio)
     command_rows = read_jsonl(tmp_path / "host_artifacts" / "out" / "cmds.jsonl")
     assert command_rows[0]["source_audio_path"] == str(source_audio)
-    assert command_rows[0]["docker_source_audio_path"] == "/host_artifacts/src/mix.flac"
+    assert command_rows[0]["container_source_audio_path"] == "/host_artifacts/src/mix.flac"

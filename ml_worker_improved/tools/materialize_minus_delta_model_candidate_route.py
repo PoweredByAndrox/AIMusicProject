@@ -31,7 +31,7 @@ SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
 MODEL_OUTPUT_DIR_NAME = "mdl"
 DEFAULT_MAX_CANDIDATES = 3
-DOCKER_VISIBLE_PATH_PREFIXES = (
+CONTAINER_VISIBLE_PATH_PREFIXES = (
     "/app",
     "/host_artifacts",
     "/host_testing_stuff_music",
@@ -39,6 +39,13 @@ DOCKER_VISIBLE_PATH_PREFIXES = (
     "/host_downloads",
     "/main_lab_artifacts",
 )
+FORBIDDEN_MAC_RUNTIME_ROUTES = (
+    "docker_desktop",
+    "docker_daemon",
+    "docker_compose",
+    "docker_vmm",
+)
+MAC_NATIVE_RUNTIME_ENVIRONMENT_PREFIXES = ("native_mac", "macos_native", "mac_host")
 
 FAILURE_LABEL_EXPANSIONS = {
     "persistent_unsafe_vocal_or_full_mix_blockers": (
@@ -128,11 +135,31 @@ def is_prefixed_path(path_text: str, prefix: str) -> bool:
     return path_text == normalized_prefix or path_text.startswith(f"{normalized_prefix}/")
 
 
-def docker_visible_path(value: Any) -> str | None:
+def container_runtime_contract(runtime_environment: str) -> dict[str, Any]:
+    return {
+        "runtime_environment": str(runtime_environment),
+        "mac_target_runtime": "apple_container",
+        "forbidden_mac_runtime_routes": list(FORBIDDEN_MAC_RUNTIME_ROUTES),
+        "command_field": "in_container_command",
+        "path_mapping_field": "container_path_mapping",
+        "registered_model_mac_runtime_status": (
+            "not_configured"
+            if is_mac_native_registered_model_runtime_unavailable(runtime_environment)
+            else "not_applicable_or_external_container"
+        ),
+    }
+
+
+def is_mac_native_registered_model_runtime_unavailable(runtime_environment: str) -> bool:
+    normalized = str(runtime_environment or "").strip().lower()
+    return any(normalized.startswith(prefix) for prefix in MAC_NATIVE_RUNTIME_ENVIRONMENT_PREFIXES)
+
+
+def container_visible_path(value: Any) -> str | None:
     normalized = normalize_path_text(value)
     if not normalized:
         return None
-    for prefix in DOCKER_VISIBLE_PATH_PREFIXES:
+    for prefix in CONTAINER_VISIBLE_PATH_PREFIXES:
         if is_prefixed_path(normalized, prefix):
             return normalized
     host_artifacts_marker = "/host_artifacts/"
@@ -144,23 +171,23 @@ def docker_visible_path(value: Any) -> str | None:
     return None
 
 
-def docker_path_mapping_payload(
+def container_path_mapping_payload(
     *,
     source_audio_path: Path,
     output_dir: Path,
-    docker_source_audio_path: str | None,
-    docker_output_dir: str | None,
+    container_source_audio_path: str | None,
+    container_output_dir: str | None,
 ) -> dict[str, Any]:
     failed_path_fields: list[str] = []
-    if not docker_source_audio_path:
+    if not container_source_audio_path:
         failed_path_fields.append("source_audio_path")
-    if not docker_output_dir:
+    if not container_output_dir:
         failed_path_fields.append("output_dir")
     return {
         "source_audio_path": str(source_audio_path),
         "output_dir": str(output_dir),
-        "docker_source_audio_path": docker_source_audio_path or "",
-        "docker_output_dir": docker_output_dir or "",
+        "container_source_audio_path": container_source_audio_path or "",
+        "container_output_dir": container_output_dir or "",
         "failed_path_fields": failed_path_fields,
     }
 
@@ -313,11 +340,11 @@ def blocked_manifest(
     status: str,
     failed_checks: Sequence[str],
     command_args: Sequence[str],
-    runtime_environment: str = "docker",
+    runtime_environment: str = "container",
     native_runtime_allowed: bool = False,
     source_failure_taxonomy: Sequence[str] = (),
     expanded_labels: Sequence[str] = (),
-    docker_path_mapping: dict[str, Any] | None = None,
+    container_path_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest = {
         "schema": SCHEMA,
@@ -350,6 +377,7 @@ def blocked_manifest(
         "requires_delta_gate": True,
         "expected_acceleration_mode": "external_only_cpu_metadata_planning",
         "runtime_environment": str(runtime_environment),
+        "container_runtime_contract": container_runtime_contract(runtime_environment),
         "native_runtime_allowed": bool(native_runtime_allowed),
         "gpu_inference_skipped": True,
         "gpu_inference_skip_reason": "materializer writes registered model command plans only",
@@ -361,8 +389,8 @@ def blocked_manifest(
         },
         "command_args": list(command_args),
     }
-    if docker_path_mapping is not None:
-        manifest["docker_path_mapping"] = dict(docker_path_mapping)
+    if container_path_mapping is not None:
+        manifest["container_path_mapping"] = dict(container_path_mapping)
     write_jsonl(output_dir / ROWS_NAME, [])
     write_jsonl(output_dir / COMMAND_ROWS_NAME, [])
     write_json(output_dir / MANIFEST_NAME, manifest)
@@ -380,7 +408,7 @@ def materialize_minus_delta_model_candidate_route(
     candidate_id: str | None = None,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     command_args: Sequence[str] | None = None,
-    runtime_environment: str = "docker",
+    runtime_environment: str = "container",
     native_runtime_allowed: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -459,16 +487,13 @@ def materialize_minus_delta_model_candidate_route(
             expanded_labels=expanded_labels,
         )
 
-    docker_source_audio_path = docker_visible_path(source_audio_path)
-    docker_output_dir = docker_visible_path(output_dir)
-    docker_mapping = docker_path_mapping_payload(
-        source_audio_path=source_audio_path,
-        output_dir=output_dir,
-        docker_source_audio_path=docker_source_audio_path,
-        docker_output_dir=docker_output_dir,
-    )
-    if not docker_source_audio_path or not docker_output_dir:
-        progress(progress_path, "docker_path_mapping_failed", docker_path_mapping=docker_mapping)
+    if is_mac_native_registered_model_runtime_unavailable(runtime_environment):
+        progress(
+            progress_path,
+            "mac_registered_model_runtime_blocked",
+            runtime_environment=str(runtime_environment),
+            container_runtime_contract=container_runtime_contract(runtime_environment),
+        )
         return blocked_manifest(
             output_dir=output_dir,
             progress_path=progress_path,
@@ -476,16 +501,42 @@ def materialize_minus_delta_model_candidate_route(
             source_repair_manifest=source_repair_manifest,
             candidate_id=resolved_candidate_id,
             selected_route=selected_route,
-            status="blocked_missing_docker_path_mapping",
-            failed_checks=["docker_path_mapping_missing"],
+            status="blocked_mac_registered_model_runtime_unavailable",
+            failed_checks=["mac_registered_model_runtime_not_configured"],
             command_args=command_args or [],
             runtime_environment=runtime_environment,
             native_runtime_allowed=native_runtime_allowed,
             source_failure_taxonomy=source_failures,
             expanded_labels=expanded_labels,
-            docker_path_mapping=docker_mapping,
         )
-    progress(progress_path, "docker_path_mapping_ready", docker_path_mapping=docker_mapping)
+
+    container_source_audio_path = container_visible_path(source_audio_path)
+    container_output_dir = container_visible_path(output_dir)
+    container_mapping = container_path_mapping_payload(
+        source_audio_path=source_audio_path,
+        output_dir=output_dir,
+        container_source_audio_path=container_source_audio_path,
+        container_output_dir=container_output_dir,
+    )
+    if not container_source_audio_path or not container_output_dir:
+        progress(progress_path, "container_path_mapping_failed", container_path_mapping=container_mapping)
+        return blocked_manifest(
+            output_dir=output_dir,
+            progress_path=progress_path,
+            router_plan_json=router_plan_json,
+            source_repair_manifest=source_repair_manifest,
+            candidate_id=resolved_candidate_id,
+            selected_route=selected_route,
+            status="blocked_missing_container_path_mapping",
+            failed_checks=["container_path_mapping_missing"],
+            command_args=command_args or [],
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
+            source_failure_taxonomy=source_failures,
+            expanded_labels=expanded_labels,
+            container_path_mapping=container_mapping,
+        )
+    progress(progress_path, "container_path_mapping_ready", container_path_mapping=container_mapping)
 
     registry = registry or default_model_registry()
     suggestions = registry.suggest_next_candidates(
@@ -522,14 +573,14 @@ def materialize_minus_delta_model_candidate_route(
     for index, suggestion in enumerate(suggestions, start=1):
         candidate_alias = f"m{index:03d}"
         route_output_dir = output_dir / MODEL_OUTPUT_DIR_NAME / candidate_alias
-        docker_route_output_dir = docker_visible_path(route_output_dir)
-        if not docker_route_output_dir:
-            raise RuntimeError(f"internal_docker_output_mapping_failed:{route_output_dir}")
+        container_route_output_dir = container_visible_path(route_output_dir)
+        if not container_route_output_dir:
+            raise RuntimeError(f"internal_container_output_mapping_failed:{route_output_dir}")
         command = [
             "python",
             TOOL,
-            docker_source_audio_path,
-            docker_route_output_dir,
+            container_source_audio_path,
+            container_route_output_dir,
             "--model-id",
             suggestion.model_id,
             "--device",
@@ -557,12 +608,13 @@ def materialize_minus_delta_model_candidate_route(
                 "source_repair_manifest": str(source_repair_manifest),
                 "source_audio_path": str(source_audio_path),
                 "output_dir": str(route_output_dir),
-                "docker_source_audio_path": docker_source_audio_path,
-                "docker_output_dir": docker_route_output_dir,
-                "docker_path_mapping": docker_mapping,
-                "docker_command": command,
+                "container_source_audio_path": container_source_audio_path,
+                "container_output_dir": container_route_output_dir,
+                "container_path_mapping": container_mapping,
+                "in_container_command": command,
                 "expected_acceleration_mode": "gpu_registered_model_inference",
                 "runtime_environment": str(runtime_environment),
+                "container_runtime_contract": container_runtime_contract(runtime_environment),
                 "native_runtime_allowed": False,
                 "materializer_native_runtime_allowed": bool(native_runtime_allowed),
                 "requires_post_judge": True,
@@ -587,9 +639,9 @@ def materialize_minus_delta_model_candidate_route(
         "router_plan_json": str(router_plan_json),
         "source_repair_manifest": str(source_repair_manifest),
         "source_audio_path": str(source_audio_path),
-        "docker_source_audio_path": docker_source_audio_path,
-        "docker_output_dir": docker_output_dir,
-        "docker_path_mapping": docker_mapping,
+        "container_source_audio_path": container_source_audio_path,
+        "container_output_dir": container_output_dir,
+        "container_path_mapping": container_mapping,
         "rows_jsonl": str(output_dir / ROWS_NAME),
         "command_rows_jsonl": str(output_dir / COMMAND_ROWS_NAME),
         "summary_md": str(output_dir / SUMMARY_NAME),
@@ -609,6 +661,7 @@ def materialize_minus_delta_model_candidate_route(
         "requires_delta_gate": True,
         "expected_acceleration_mode": "external_only_cpu_metadata_planning",
         "runtime_environment": str(runtime_environment),
+        "container_runtime_contract": container_runtime_contract(runtime_environment),
         "native_runtime_allowed": bool(native_runtime_allowed),
         "gpu_inference_skipped": True,
         "gpu_inference_skip_reason": "materializer writes registered model command plans only",
@@ -646,7 +699,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--allow-native-runtime",
         action="store_true",
-        help="Allow native Mac metadata planning only; generated model commands remain Docker/GPU commands.",
+        help="Allow native Mac metadata planning only; registered-model command rows remain blocked without a Mac adapter.",
     )
     return parser.parse_args(argv)
 
