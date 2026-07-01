@@ -13,11 +13,11 @@ The master manifest can be accepted only when:
 5. selected vocal and minus paths are present;
 6. neither source manifest reports a safety violation such as training, model changes, cleanup route additions, threshold relaxation, or audio export/copy;
 7. `--pair-compatibility-jsonl` contains an exact matching `score_mode=both` row for the selected vocal/minus paths;
-8. that pair row has `pair_decision=pair_compatible`, empty `pair_blockers`, and at least 5 judged windows.
+8. that pair row has `pair_decision=pair_compatible`, empty `pair_blockers`, no blocking semantic labels in generic `decision/reasons`, and at least 5 judged windows.
 
 Missing pair compatibility evidence is fail-closed with `dominant_failure_reason=pair_compatibility_evidence_missing`. A row for a different selected stem path is blocked with `pair_compatibility_no_exact_match`.
 
-The `both` row is compatibility evidence only. Its generic `decision` field is preserved in provenance but is not used as a vocal/minus selector, because vocal and minus acceptance must already come from their separate mode-specific listen-preview manifests.
+The `both` row is compatibility evidence only. Its generic `decision` field is not used as a vocal/minus selector, because vocal and minus acceptance must already come from their separate mode-specific listen-preview manifests. However, generic `decision/reasons` are still semantic-clearance evidence: labels such as `vocal_leakage_in_minus`, `foreign_source_recovered:*`, residual, leak/bleed, or mix-conservation blockers fail closed before the master can become listenable.
 
 When the accepted vocal and accepted minus manifests exist but no exact pair row exists yet, use `tools/build_no_reference_pair_candidate_from_listen_manifests.py` to create a provenance-safe one-row candidate JSONL, then run `tools/run_no_reference_windowed_judge.py --score-mode both` on that row. Do not hand-write pair rows or reuse pair rows for different selected stem paths.
 
@@ -34,8 +34,8 @@ Accepted output remains listen-preview only:
 - `stem_type=both`
 - `accepted_stem_count=2`
 - `pair_decision=pair_compatible`
-- `pair_score_mode_decision=<raw both-mode generic decision, diagnostic only>`
-- `pair_score_mode_reasons=<raw both-mode generic reasons, diagnostic only>`
+- `pair_score_mode_decision=<raw both-mode generic decision, after semantic-clearance check>`
+- `pair_score_mode_reasons=<raw both-mode generic reasons, after semantic-clearance check>`
 - `pair_compatibility_score=<both-mode score>`
 - `release_ready=false`
 - `can_mark_release_ready=false`

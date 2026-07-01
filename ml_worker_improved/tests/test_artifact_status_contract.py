@@ -65,6 +65,56 @@ def test_accepted_for_listen_pack_is_listenable_when_delivery_allowed(tmp_path: 
     view.assert_promotable()
 
 
+def test_accepted_for_listen_pack_with_semantic_failure_labels_is_not_promotable(tmp_path: Path) -> None:
+    manifest = write_manifest(
+        tmp_path / "accepted_with_leak_labels.json",
+        {
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "quality_audit": {
+                "issue_labels": [
+                    "foreign_source_recovered:minus:vocals,mix_conservation_failed",
+                    "candidate_manifest_created",
+                ],
+            },
+        },
+    )
+    view = status_view_from_manifest(manifest)
+    assert view.blocked
+    assert not view.listenable
+    assert view.dominant_failure_reason == "foreign_source_recovered:minus:vocals"
+    assert "foreign_source_recovered:minus:vocals" in view.blocking_failure_labels
+    assert "mix_conservation_failed" in view.blocking_failure_labels
+    with pytest.raises(ArtifactContractError, match="artifact_with_blocking_failure_labels"):
+        can_promote_to_listen_result(manifest)
+
+
+def test_accepted_for_listen_pack_with_structured_blockers_is_not_promotable(tmp_path: Path) -> None:
+    manifest = write_manifest(
+        tmp_path / "accepted_with_structured_blockers.json",
+        {
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "quality_audit": {
+                "blockers": [
+                    {"code": "foreign_source_recovered:minus:vocals", "severity": "hard"},
+                    {"label": "voice_presence_guard_failed"},
+                ],
+                "is_blocked": True,
+            },
+        },
+    )
+    view = status_view_from_manifest(manifest)
+    assert view.blocked
+    assert not view.listenable
+    assert view.dominant_failure_reason == "foreign_source_recovered:minus:vocals"
+    assert "voice_presence_guard_failed" in view.blocking_failure_labels
+    with pytest.raises(ArtifactContractError, match="artifact_with_blocking_failure_labels"):
+        view.assert_promotable()
+
+
 def test_release_ready_is_deliverable_when_delivery_allowed(tmp_path: Path) -> None:
     manifest = write_manifest(
         tmp_path / "release.json",

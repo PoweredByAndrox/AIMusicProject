@@ -214,6 +214,22 @@ def test_dense_gate_with_insufficient_embedded_windows_is_blocked(tmp_path: Path
     assert "row:0:vocal_insufficient_window_count" in manifest["dense_delivery_gate_evidence_failures"]
 
 
+def test_dense_gate_with_semantic_blocker_reason_is_blocked(tmp_path: Path) -> None:
+    optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [accepted_optimizer_row()])
+    dense_gate = dense_delivery_gate_evidence()
+    dense_gate["minus"]["reasons"] = ["foreign_source_recovered:minus:vocals"]
+    gate = dense_gate_manifest(tmp_path / "dense_gate.json", optimizer, dense_delivery_gate=dense_gate)
+
+    manifest = build_manifest(optimizer, dense_delivery_gate_manifest_json=gate)
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "dense_delivery_gate_missing_mode_specific_evidence"
+    assert manifest["dense_delivery_gate_evidence_failures"] == [
+        "row:0:minus_blocking_semantic_label:foreign_source_recovered:minus:vocals"
+    ]
+
+
 def test_written_manifest_satisfies_artifact_status_contract(tmp_path: Path) -> None:
     optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [accepted_optimizer_row()])
     gate = dense_gate_manifest(tmp_path / "dense_gate.json", optimizer)

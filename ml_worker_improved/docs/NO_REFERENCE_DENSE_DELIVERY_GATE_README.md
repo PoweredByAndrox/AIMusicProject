@@ -19,6 +19,7 @@ A row can become `accepted_for_listen_pack` only when:
 - phase-corrected optimizer rows are eligible only when they carry `requires_post_correction_judge=true`;
 - matching dense judge rows exist for `vocal`, `minus`, and `both`;
 - every mode has `decision=accept_candidate`;
+- every mode has no blocking semantic labels in generic `decision/reasons`;
 - each mode has at least `--min-window-count` windows;
 - mode-specific blockers are empty;
 - `both` mode is pair-compatible;
@@ -30,6 +31,10 @@ A row can become `accepted_for_listen_pack` only when:
 
 Generic `decision=accept_candidate` plus `window_count` is diagnostic-only and
 is not sufficient evidence for listen-preview promotion.
+Generic `decision/reasons` still participate in semantic-clearance blocking:
+labels such as `foreign_source_recovered:*`, vocal leak/bleed, residual, or
+mix-conservation failures block the dense gate even when mode-specific scores
+and blockers otherwise look accepted.
 Optimizer metadata such as `pair_compatibility_decision` and generic
 `overall_no_reference_score` also cannot substitute for dense
 `pair_decision`, `pair_compatibility_score`, and `pair_blockers`.

@@ -138,6 +138,27 @@ def test_pair_candidate_blocks_non_accepted_source(tmp_path: Path) -> None:
     assert manifest["candidate_rows"] == []
 
 
+def test_pair_candidate_blocks_accepted_source_with_semantic_failure_labels(tmp_path: Path) -> None:
+    vocal = accepted_vocal_manifest()
+    vocal["quality_audit"] = {
+        "issue_labels": [
+            "foreign_source_recovered:vocal:minus,mix_conservation_failed",
+            "candidate_manifest_created",
+        ],
+    }
+    vocal_json = write_json(tmp_path / "vocal_manifest.json", vocal)
+    minus_json = write_json(tmp_path / "minus_manifest.json", accepted_minus_manifest())
+
+    manifest = build_pair_candidate_manifest(
+        vocal_manifest_json=vocal_json,
+        minus_manifest_json=minus_json,
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["dominant_failure_reason"] == "source_stem_manifest_not_accepted"
+    assert manifest["candidate_rows"] == []
+
+
 def test_cli_writes_candidate_jsonl_and_summary(tmp_path: Path) -> None:
     output_jsonl = tmp_path / "pair_candidate_rows.jsonl"
     summary_json = tmp_path / "pair_candidate_manifest.json"

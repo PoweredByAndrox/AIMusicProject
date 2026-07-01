@@ -21,6 +21,40 @@ BLOCKED_STATUSES = {
     "rejected",
     "skipped",
 }
+BLOCKING_FAILURE_LABEL_MARKERS = (
+    "blocked",
+    "rejected",
+    "failed",
+    "skip",
+    "leak",
+    "bleed",
+    "contamination",
+    "foreign_source",
+    "mix_conservation",
+    "conservation",
+    "vocal_contains",
+    "voice_presence",
+    "residual",
+    "separator_server",
+    "gpu_free_memory",
+    "delivery_pair",
+    "candidate_delivery_blocked",
+    "no_clean_candidate",
+    "artifact_or_timbre_damage",
+)
+FAILURE_LABEL_KEYS = {
+    "failure_labels",
+    "issue_labels",
+    "failed_checks",
+    "blocked_checks",
+    "blocking_issue_labels",
+    "blockers",
+    "blocking_reasons",
+    "check_names",
+    "forbidden_actions",
+}
+FAILURE_ITEM_KEYS = ("code", "label", "name", "id", "check", "reason")
+BOOLEAN_BLOCKER_KEYS = {"blocked", "is_blocked", "has_blocker", "has_blockers"}
 
 
 class ArtifactContractError(ValueError):
@@ -40,23 +74,34 @@ class ArtifactStatusView:
     model_id: str | None = None
     candidate_id: str | None = None
     audio_path: str | None = None
+    blocking_failure_labels: tuple[str, ...] = ()
 
     @property
     def listenable(self) -> bool:
-        return self.delivery_allowed and self.presentation_status in LISTENABLE_PRESENTATION_STATUSES
+        return (
+            self.delivery_allowed
+            and not self.blocking_failure_labels
+            and self.presentation_status in LISTENABLE_PRESENTATION_STATUSES
+        )
 
     @property
     def deliverable(self) -> bool:
-        return self.delivery_allowed and self.release_status in DELIVERABLE_RELEASE_STATUSES
+        return (
+            self.delivery_allowed
+            and not self.blocking_failure_labels
+            and self.release_status in DELIVERABLE_RELEASE_STATUSES
+        )
 
     @property
     def blocked(self) -> bool:
         values = {self.delivery_status, self.presentation_status, self.release_status}
-        return not self.delivery_allowed or bool(values & BLOCKED_STATUSES)
+        return not self.delivery_allowed or bool(values & BLOCKED_STATUSES) or bool(self.blocking_failure_labels)
 
     def assert_promotable(self) -> None:
         if not self.source_manifest or not self.manifest_sha256:
             raise ArtifactContractError("artifact_without_manifest_provenance_cannot_be_promoted")
+        if self.blocking_failure_labels:
+            raise ArtifactContractError("artifact_with_blocking_failure_labels_cannot_be_result")
         if self.blocked:
             raise ArtifactContractError("diagnostic_or_blocked_artifact_cannot_be_result")
         if not (self.listenable or self.deliverable):
@@ -147,32 +192,107 @@ def infer_stem_type(payload: dict[str, Any], manifest_path: Path | None = None) 
     return "unknown"
 
 
+def add_failure_label(labels: set[str], value: Any) -> None:
+    for part in str(value or "").split(","):
+        clean = part.strip()
+        if clean:
+            labels.add(clean)
+
+
+def add_structured_failure_item(labels: set[str], value: Any) -> None:
+    if isinstance(value, dict):
+        for key in FAILURE_ITEM_KEYS:
+            child = value.get(key)
+            if isinstance(child, str) and child.strip():
+                add_failure_label(labels, child)
+        for key, child in value.items():
+            if isinstance(key, str) and key.lower() in BOOLEAN_BLOCKER_KEYS and child is True:
+                add_failure_label(labels, key)
+            elif isinstance(child, (dict, list)):
+                add_structured_failure_item(labels, child)
+    elif isinstance(value, list):
+        for item in value:
+            add_structured_failure_item(labels, item)
+    else:
+        add_failure_label(labels, value)
+
+
 def collect_failure_labels(payload: Any) -> set[str]:
     labels: set[str] = set()
     if isinstance(payload, dict):
         for key, value in payload.items():
             key_l = str(key).lower()
-            if key_l in {
-                "failure_labels",
-                "issue_labels",
-                "failed_checks",
-                "blocked_checks",
-                "blocking_issue_labels",
-                "check_names",
-                "forbidden_actions",
-            }:
+            if key_l in FAILURE_LABEL_KEYS:
                 if isinstance(value, list):
-                    labels.update(str(item).strip() for item in value if str(item).strip())
+                    for item in value:
+                        add_structured_failure_item(labels, item)
                 elif isinstance(value, str) and value.strip():
-                    labels.add(value.strip())
+                    add_failure_label(labels, value)
+                elif isinstance(value, dict):
+                    add_structured_failure_item(labels, value)
+            elif key_l in BOOLEAN_BLOCKER_KEYS and value is True:
+                add_failure_label(labels, key_l)
             elif key_l in {"status", "delivery_status", "presentation_status", "release_status"}:
-                if isinstance(value, str) and value.strip() in BLOCKED_STATUSES:
-                    labels.add(value.strip())
+                normalized_status = str(value).strip().lower()
+                if normalized_status in BLOCKED_STATUSES:
+                    add_failure_label(labels, normalized_status)
             labels.update(collect_failure_labels(value))
     elif isinstance(payload, list):
         for item in payload:
             labels.update(collect_failure_labels(item))
     return labels
+
+
+def blocking_failure_labels(payload: dict[str, Any]) -> tuple[str, ...]:
+    labels = collect_failure_labels(payload)
+    return blocking_labels_from_label_set(labels)
+
+
+def blocking_labels_from_label_set(labels: set[str]) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            label
+            for label in labels
+            if any(marker in label.lower() for marker in BLOCKING_FAILURE_LABEL_MARKERS)
+        )
+    )
+
+
+def blocking_labels_from_values(*values: Any) -> tuple[str, ...]:
+    labels: list[str] = []
+    seen: set[str] = set()
+
+    def add_if_blocking(value: Any) -> None:
+        for part in str(value or "").split(","):
+            clean = part.strip()
+            if (
+                clean
+                and clean not in seen
+                and any(marker in clean.lower() for marker in BLOCKING_FAILURE_LABEL_MARKERS)
+            ):
+                seen.add(clean)
+                labels.append(clean)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in FAILURE_ITEM_KEYS:
+                child = value.get(key)
+                if isinstance(child, str) and child.strip():
+                    add_if_blocking(child)
+            for key, child in value.items():
+                if isinstance(key, str) and key.lower() in BOOLEAN_BLOCKER_KEYS and child is True:
+                    add_if_blocking(key)
+                elif isinstance(child, (dict, list)):
+                    visit(child)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        else:
+            add_if_blocking(value)
+
+    for value in values:
+        visit(value)
+    return tuple(labels)
 
 
 def infer_dominant_failure_reason(payload: dict[str, Any]) -> str:
@@ -265,7 +385,17 @@ def normalize_manifest_status(payload: dict[str, Any], manifest_path: Path) -> A
             or release_status in DELIVERABLE_RELEASE_STATUSES
         ),
     )
+    blocking_labels = blocking_failure_labels(payload)
     dominant = infer_dominant_failure_reason(payload)
+    if blocking_labels and dominant in {
+        "",
+        "accepted",
+        "accepted_for_listen_pack",
+        "none",
+        "release_ready",
+        "unknown",
+    }:
+        dominant = blocking_labels[0]
     if not delivery_allowed and dominant in {
         "",
         "accepted",
@@ -325,6 +455,7 @@ def normalize_manifest_status(payload: dict[str, Any], manifest_path: Path) -> A
         model_id=model_id,
         candidate_id=candidate_id,
         audio_path=audio_path,
+        blocking_failure_labels=blocking_labels,
     )
 
 

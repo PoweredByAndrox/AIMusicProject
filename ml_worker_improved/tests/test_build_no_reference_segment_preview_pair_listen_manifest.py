@@ -125,6 +125,22 @@ def test_pair_listen_manifest_accepts_exact_compatible_segment_preview_pair(tmp_
     assert can_promote_to_listen_result(output_manifest) is True
 
 
+def test_pair_listen_manifest_blocks_semantic_blocker_reasons(tmp_path: Path) -> None:
+    source = segment_preview_manifest(tmp_path)
+    source_json = write_json(tmp_path / "segment_preview_listen_manifest.json", source)
+    pair_row = accepted_pair_row(source)
+    pair_row["decision"] = "blocked_hard_case"
+    pair_row["reasons"] = ["vocal_leakage_in_minus"]
+    pair_jsonl = write_jsonl(tmp_path / "pair_compatibility.jsonl", [pair_row])
+
+    manifest = build_manifest(segment_preview_manifest_json=source_json, pair_compatibility_jsonl=pair_jsonl)
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "blocked_from_listen_pack"
+    assert manifest["dominant_failure_reason"] == "pair_compatibility_blocking_semantic_label:vocal_leakage_in_minus"
+
+
 def test_pair_listen_manifest_blocks_path_mismatch(tmp_path: Path) -> None:
     source = segment_preview_manifest(tmp_path)
     pair_row = accepted_pair_row(source)

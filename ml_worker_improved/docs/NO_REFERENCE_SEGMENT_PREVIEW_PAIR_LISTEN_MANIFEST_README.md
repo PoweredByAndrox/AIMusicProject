@@ -18,8 +18,14 @@ The gate accepts only when:
 5. `--pair-compatibility-jsonl` contains an exact matching row for the same
    mix/vocal/minus paths;
 6. that row has `score_mode=both`, `pair_decision=pair_compatible`,
-   empty `pair_blockers`, `pair_compatibility_score`, and at least five judged
+   empty `pair_blockers`, no blocking semantic labels in generic
+   `decision/reasons`, `pair_compatibility_score`, and at least five judged
    windows.
+
+Generic both-mode `decision/reasons` are not vocal/minus selectors, but they
+are semantic-clearance evidence. Labels such as `vocal_leakage_in_minus`,
+`foreign_source_recovered:*`, residual, leak/bleed, or mix-conservation
+blockers fail closed before this pair manifest can become listenable.
 
 Accepted output remains listen-preview only:
 

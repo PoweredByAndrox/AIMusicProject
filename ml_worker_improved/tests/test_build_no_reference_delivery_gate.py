@@ -191,6 +191,29 @@ def test_gate_blocks_when_one_dense_mode_fails(tmp_path: Path) -> None:
     assert "minus" in manifest["skipped_rows"][0]["failed_modes"]
 
 
+def test_gate_blocks_accept_decision_with_semantic_blocker_reason(tmp_path: Path) -> None:
+    paths = write_gate_inputs(tmp_path)
+    minus_rows = [judge_row("minus")]
+    minus_rows[0]["reasons"] = ["foreign_source_recovered:minus:vocals"]
+    paths["minus"] = write_jsonl(tmp_path / "minus.jsonl", minus_rows)
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=paths["optimizer"],
+        vocal_judge_jsonl=paths["vocal"],
+        minus_judge_jsonl=paths["minus"],
+        both_judge_jsonl=paths["both"],
+        min_window_count=5,
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["accepted_count"] == 0
+    assert manifest["skipped_rows"][0]["skip_reason"] == "dense_delivery_gate_failed"
+    assert "minus_blocking_semantic_label:foreign_source_recovered:minus:vocals" in manifest["skipped_rows"][0][
+        "failed_checks"
+    ]
+
+
 def test_gate_blocks_missing_dense_evidence(tmp_path: Path) -> None:
     paths = write_gate_inputs(tmp_path, include_both=False)
 

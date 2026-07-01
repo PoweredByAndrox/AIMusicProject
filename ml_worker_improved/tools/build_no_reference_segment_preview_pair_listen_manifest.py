@@ -9,7 +9,12 @@ from typing import Any, Iterable, Sequence
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from tools.artifact_status_contract import ArtifactContractError, can_promote_to_listen_result, sha256_file
+from tools.artifact_status_contract import (
+    ArtifactContractError,
+    blocking_labels_from_values,
+    can_promote_to_listen_result,
+    sha256_file,
+)
 from tools.docker_runtime import require_docker_runtime
 
 
@@ -203,6 +208,9 @@ def pair_row_matches_source(row: dict[str, Any], manifest: dict[str, Any]) -> bo
 
 
 def pair_row_failure_reason(row: dict[str, Any]) -> str:
+    blocking_labels = blocking_labels_from_values(row.get("reasons"), row.get("decision"))
+    if blocking_labels:
+        return f"pair_compatibility_blocking_semantic_label:{blocking_labels[0]}"
     if str(row.get("score_mode") or "") != "both":
         return "pair_compatibility_not_both_mode"
     if str(row.get("pair_decision") or "") != "pair_compatible":

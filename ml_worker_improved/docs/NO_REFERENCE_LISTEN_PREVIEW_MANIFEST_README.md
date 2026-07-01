@@ -14,6 +14,9 @@ The generated manifest is listenable only when:
 - `--dense-delivery-gate-manifest-json` is provided;
 - the dense gate manifest is promotable by
   `artifact_status_contract.can_promote_to_listen_result()`;
+- the dense gate and generated manifest contain no blocking failure labels such
+  as `foreign_source_recovered:*`, `mix_conservation_failed`, vocal leak/bleed,
+  residual, separator-server, delivery-pair, or GPU-memory blockers;
 - the dense gate source manifest hash matches `--optimizer-result-jsonl`;
 - accepted rows include `dense_delivery_gate` evidence for vocal, minus, and
   pair checks;

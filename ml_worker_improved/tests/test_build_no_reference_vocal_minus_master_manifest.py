@@ -168,7 +168,7 @@ def test_master_manifest_blocks_incompatible_pair_decision(tmp_path: Path) -> No
     assert manifest["dominant_failure_reason"] == "pair_compatibility_not_accepted"
 
 
-def test_master_manifest_accepts_pair_compatible_row_when_both_mode_decision_is_stem_blocked(tmp_path: Path) -> None:
+def test_master_manifest_blocks_pair_compatible_row_when_both_mode_has_semantic_blocker(tmp_path: Path) -> None:
     pair_row = accepted_pair_compatibility_row()
     pair_row["decision"] = "blocked_hard_case"
     pair_row["reasons"] = ["vocal_leakage_in_minus"]
@@ -179,11 +179,9 @@ def test_master_manifest_accepts_pair_compatible_row_when_both_mode_decision_is_
         pair_compatibility_jsonl=write_jsonl(tmp_path / "pair_compatibility.jsonl", [pair_row]),
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
-    assert manifest["pair_decision"] == "pair_compatible"
-    assert manifest["pair_score_mode_decision"] == "blocked_hard_case"
-    assert manifest["pair_score_mode_reasons"] == ["vocal_leakage_in_minus"]
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "pair_compatibility_blocking_semantic_label:vocal_leakage_in_minus"
 
 
 def test_master_manifest_blocks_if_either_stem_is_not_accepted(tmp_path: Path) -> None:

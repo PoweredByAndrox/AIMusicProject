@@ -12,7 +12,13 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from tools.artifact_status_contract import ArtifactContractError, can_promote_to_listen_result, sha256_file, stable_track_hash
+from tools.artifact_status_contract import (
+    ArtifactContractError,
+    blocking_labels_from_values,
+    can_promote_to_listen_result,
+    sha256_file,
+    stable_track_hash,
+)
 
 
 ACCEPTED_FINAL_DECISIONS = {
@@ -114,6 +120,8 @@ def dense_gate_mode_failures(mode: str, gate: Any, *, min_window_count: int) -> 
 
     score_key, decision_key, blocker_key, accepted_decision = dense_gate_contract(mode)
     failures: list[str] = []
+    blocking_labels = blocking_labels_from_values(gate.get("reasons"), gate.get("decision"))
+    failures.extend(f"{mode}_blocking_semantic_label:{label}" for label in blocking_labels)
     if str(gate.get("decision") or "") != "accept_candidate":
         failures.append(f"{mode}_decision_not_accepted")
     if as_int(gate.get("window_count")) < min_window_count:

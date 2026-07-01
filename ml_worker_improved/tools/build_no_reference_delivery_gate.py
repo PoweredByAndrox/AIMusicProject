@@ -12,7 +12,12 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from tools.artifact_status_contract import ArtifactContractError, can_promote_to_listen_result, sha256_file
+from tools.artifact_status_contract import (
+    ArtifactContractError,
+    blocking_labels_from_values,
+    can_promote_to_listen_result,
+    sha256_file,
+)
 from tools.build_no_reference_listen_preview_manifest import (
     SAFETY_FLAGS,
     is_accepted_optimizer_row,
@@ -120,6 +125,8 @@ def dense_gate_view(mode: str, row: dict[str, Any] | None, *, min_window_count: 
 
     failures: list[str] = []
     decision = str(row.get("decision") or "")
+    blocking_labels = blocking_labels_from_values(row.get("reasons"), decision)
+    failures.extend(f"{mode}_blocking_semantic_label:{label}" for label in blocking_labels)
     if decision != "accept_candidate":
         failures.append(f"{mode}_decision_not_accepted")
     schema_failures = mode_schema_failures(mode, row)

@@ -11,7 +11,12 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from tools.artifact_status_contract import ArtifactContractError, can_promote_to_listen_result, sha256_file  # noqa: E402
+from tools.artifact_status_contract import (  # noqa: E402
+    ArtifactContractError,
+    blocking_labels_from_values,
+    can_promote_to_listen_result,
+    sha256_file,
+)
 
 
 SAFETY_FLAGS = {
@@ -179,6 +184,9 @@ def pair_row_matches_sources(row: dict[str, Any], vocal_manifest: dict[str, Any]
 
 
 def pair_row_failure_reason(row: dict[str, Any]) -> str:
+    blocking_labels = blocking_labels_from_values(row.get("reasons"), row.get("decision"))
+    if blocking_labels:
+        return f"pair_compatibility_blocking_semantic_label:{blocking_labels[0]}"
     if str(row.get("score_mode") or "") != "both":
         return "pair_compatibility_not_both_mode"
     if str(row.get("pair_decision") or "") != "pair_compatible":
