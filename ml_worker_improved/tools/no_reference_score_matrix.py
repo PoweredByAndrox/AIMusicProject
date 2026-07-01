@@ -40,10 +40,55 @@ MINUS_REQUIRED_EVIDENCE_METRICS = (
     ("vocal_leakage_in_minus_score", "missing_minus_vocal_leakage_evidence"),
     ("mixture_consistency_score", "missing_minus_instrumental_integrity_evidence"),
 )
+VOCAL_NUMERIC_SCORE_METRICS = (
+    "instrumental_leakage_in_vocal_score",
+    "mixture_consistency_score",
+    "phase_consistency_score",
+    "robotic_artifact_score",
+    "silence_hallucination_score",
+    "thin_vocal_score",
+    "transient_damage_score",
+    "vocal_activity_confidence",
+    "vocal_phase_consistency_score",
+    "vocal_tail_loss_score",
+)
+MINUS_NUMERIC_SCORE_METRICS = (
+    "high_band_damage_score",
+    "instrumental_phase_consistency_score",
+    "minus_phase_consistency_score",
+    "mixture_consistency_score",
+    "phase_consistency_score",
+    "pumping_or_holes_score",
+    "robotic_artifact_score",
+    "spectral_balance_damage_score",
+    "transient_damage_score",
+    "vocal_leakage_in_minus_score",
+)
+PAIR_NUMERIC_SCORE_METRICS = (
+    "channels",
+    "duration",
+    "duration_sec",
+    "duration_seconds",
+    "energy_balance_score",
+    "instrumental_leakage_in_vocal_score",
+    "mixture_consistency_score",
+    "pair_phase_consistency_score",
+    "phase_consistency_score",
+    "sample_rate",
+    "vocal_leakage_in_minus_score",
+)
+MODE_NUMERIC_SCORE_METRICS = {
+    "vocal": VOCAL_NUMERIC_SCORE_METRICS,
+    "minus": MINUS_NUMERIC_SCORE_METRICS,
+    "both": PAIR_NUMERIC_SCORE_METRICS,
+}
 
 
 def clip01(value: float) -> float:
-    return round(max(0.0, min(1.0, float(value))), 6)
+    number = finite_float(value)
+    if number is None:
+        return 0.0
+    return round(max(0.0, min(1.0, number)), 6)
 
 
 def validate_mode(mode: str) -> str:
@@ -54,10 +99,21 @@ def validate_mode(mode: str) -> str:
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
+    number = finite_float(value)
+    if number is not None:
+        return number
+    fallback = finite_float(default)
+    return fallback if fallback is not None else 0.0
+
+
+def finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
-        return float(default)
+        return None
+    return number if math.isfinite(number) else None
 
 
 def as_list(value: Any) -> list[str]:
@@ -82,11 +138,11 @@ def stable_unique(values: Iterable[str]) -> list[str]:
 
 def metric(payload: dict[str, Any], key: str, default: float = 0.0) -> float:
     if key in payload:
-        return as_float(payload.get(key), default)
+        return as_float(payload.get(key), 0.0)
     audio_info = payload.get("audio_info")
     if isinstance(audio_info, dict) and key in audio_info:
-        return as_float(audio_info.get(key), default)
-    return float(default)
+        return as_float(audio_info.get(key), 0.0)
+    return as_float(default, 0.0)
 
 
 def has_metric(payload: dict[str, Any], key: str) -> bool:
@@ -96,20 +152,28 @@ def has_metric(payload: dict[str, Any], key: str) -> bool:
     return isinstance(audio_info, dict) and key in audio_info
 
 
-def has_finite_metric(payload: dict[str, Any], key: str) -> bool:
+def metric_value(payload: dict[str, Any], key: str) -> tuple[bool, Any]:
     if key in payload:
-        value = payload.get(key)
-    else:
-        audio_info = payload.get("audio_info")
-        if not isinstance(audio_info, dict) or key not in audio_info:
-            return False
-        value = audio_info.get(key)
-    if isinstance(value, bool):
-        return False
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError):
-        return False
+        return True, payload.get(key)
+    audio_info = payload.get("audio_info")
+    if isinstance(audio_info, dict) and key in audio_info:
+        return True, audio_info.get(key)
+    return False, None
+
+
+def has_finite_metric(payload: dict[str, Any], key: str) -> bool:
+    exists, value = metric_value(payload, key)
+    return exists and finite_float(value) is not None
+
+
+def invalid_numeric_metric_blockers(payload: dict[str, Any], mode: str) -> list[str]:
+    mode = validate_mode(mode)
+    blockers: list[str] = []
+    for key in MODE_NUMERIC_SCORE_METRICS[mode]:
+        exists, value = metric_value(payload, key)
+        if exists and finite_float(value) is None:
+            blockers.append(f"invalid_no_reference_metric:{key}")
+    return stable_unique(blockers)
 
 
 def missing_required_evidence(payload: dict[str, Any], mode: str) -> list[str]:
@@ -204,7 +268,7 @@ def detect_blockers(metrics: dict[str, Any], mode: str) -> list[str]:
     mode = validate_mode(mode)
     reasons = _reasons(metrics)
     if mode == "vocal":
-        blockers: list[str] = []
+        blockers = invalid_numeric_metric_blockers(metrics, "vocal")
         if metric(metrics, "instrumental_leakage_in_vocal_score") > 0.72 or "instrumental_leakage_in_vocal" in reasons:
             blockers.append("severe_instrumental_bleed_in_vocal")
         if metric(metrics, "robotic_artifact_score") > 0.82 or reasons.intersection({"robotic_or_noise_artifact", "robotic_artifact", "musical_noise"}):
@@ -220,7 +284,7 @@ def detect_blockers(metrics: dict[str, Any], mode: str) -> list[str]:
             blockers.append("vocal_missing_on_active_region")
         return stable_unique(blockers)
     if mode == "minus":
-        blockers = missing_required_evidence(metrics, "minus")
+        blockers = invalid_numeric_metric_blockers(metrics, "minus") + missing_required_evidence(metrics, "minus")
         if metric(metrics, "vocal_leakage_in_minus_score") > 0.60 or "vocal_leakage_in_minus" in reasons:
             blockers.append("severe_vocal_bleed_in_minus")
         if metric(metrics, "mixture_consistency_score", 1.0) < 0.55 or "music_damage" in reasons:
@@ -345,28 +409,42 @@ def score_candidate(metrics: dict[str, Any], mode: str) -> dict[str, Any]:
     }
 
 
-def _identity_value(payload: dict[str, Any], *keys: str) -> Any:
+def _identity_value(payload: dict[str, Any], *keys: str) -> tuple[str | None, Any]:
     for key in keys:
-        if key in payload and payload.get(key) not in (None, ""):
-            return payload.get(key)
-        audio_info = payload.get("audio_info")
-        if isinstance(audio_info, dict) and key in audio_info and audio_info.get(key) not in (None, ""):
-            return audio_info.get(key)
-    return None
+        exists, value = metric_value(payload, key)
+        if exists:
+            return key, value
+    return None, None
+
+
+def _identity_finite_number(payload: dict[str, Any], *keys: str) -> tuple[str | None, float | None, bool]:
+    key, value = _identity_value(payload, *keys)
+    if key is None:
+        return None, None, False
+    number = finite_float(value)
+    return key, number, number is None
 
 
 def _compatibility_identity_score(vocal_candidate: dict[str, Any], minus_candidate: dict[str, Any]) -> tuple[float, list[str]]:
     blockers: list[str] = []
     score = 1.0
     for key, blocker in (("sample_rate", "sample_rate_mismatch"), ("channels", "channel_mismatch")):
-        left = _identity_value(vocal_candidate, key)
-        right = _identity_value(minus_candidate, key)
+        _, left, left_invalid = _identity_finite_number(vocal_candidate, key)
+        _, right, right_invalid = _identity_finite_number(minus_candidate, key)
+        if left_invalid or right_invalid:
+            blockers.append(f"invalid_no_reference_metric:{key}")
+            score = 0.0
+            continue
         if left is not None and right is not None and left != right:
             blockers.append(blocker)
             score = min(score, 0.0)
-    left_duration = _identity_value(vocal_candidate, "duration_sec", "duration_seconds", "duration")
-    right_duration = _identity_value(minus_candidate, "duration_sec", "duration_seconds", "duration")
-    if left_duration is not None and right_duration is not None and abs(as_float(left_duration) - as_float(right_duration)) > 0.05:
+    left_key, left_duration, left_duration_invalid = _identity_finite_number(vocal_candidate, "duration_sec", "duration_seconds", "duration")
+    right_key, right_duration, right_duration_invalid = _identity_finite_number(minus_candidate, "duration_sec", "duration_seconds", "duration")
+    for key, invalid in ((left_key, left_duration_invalid), (right_key, right_duration_invalid)):
+        if key is not None and invalid:
+            blockers.append(f"invalid_no_reference_metric:{key}")
+            score = 0.0
+    if left_duration is not None and right_duration is not None and abs(left_duration - right_duration) > 0.05:
         blockers.append("duration_mismatch")
         score = min(score, 0.0)
     return score, blockers
@@ -374,6 +452,8 @@ def _compatibility_identity_score(vocal_candidate: dict[str, Any], minus_candida
 
 def pair_compatibility_score(vocal_candidate: dict[str, Any], minus_candidate: dict[str, Any]) -> dict[str, Any]:
     identity_score, blockers = _compatibility_identity_score(vocal_candidate, minus_candidate)
+    blockers.extend(invalid_numeric_metric_blockers(vocal_candidate, "both"))
+    blockers.extend(invalid_numeric_metric_blockers(minus_candidate, "both"))
     mixture = clip01(min(metric(vocal_candidate, "mixture_consistency_score", 1.0), metric(minus_candidate, "mixture_consistency_score", 1.0)))
     phase = clip01(min(mode_phase_metric(vocal_candidate, "both"), mode_phase_metric(minus_candidate, "both")))
     vocal_leakage = max(metric(vocal_candidate, "vocal_leakage_in_minus_score"), metric(minus_candidate, "vocal_leakage_in_minus_score"))
@@ -393,7 +473,7 @@ def pair_compatibility_score(vocal_candidate: dict[str, Any], minus_candidate: d
     }
     score = _weighted_score(components, SCORE_WEIGHTS["both"])
     blockers = stable_unique(blockers)
-    if blockers and any(blocker in {"sample_rate_mismatch", "channel_mismatch", "duration_mismatch", "severe_mixture_reconstruction_drift", "phase_collapse"} for blocker in blockers):
+    if blockers:
         decision = "blocked_pair_incompatible"
     elif score >= ACCEPT_THRESHOLD:
         decision = "pair_compatible"

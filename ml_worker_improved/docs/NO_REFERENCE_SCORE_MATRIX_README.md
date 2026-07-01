@@ -35,6 +35,11 @@ anything `release_ready`.
   `mixture_consistency_score` records
   `missing_minus_instrumental_integrity_evidence`. Missing evidence is never
   treated as a clean minus.
+- Present numeric scoring metrics and pair identity metadata must be finite
+  numbers. `None`, empty strings, booleans, `NaN`, and `Inf` values record
+  `invalid_no_reference_metric:<metric_name>` blockers instead of being clipped
+  into a good score component. Missing optional metrics may still use the
+  scorer's documented defaults for compatibility with partial legacy payloads.
 - `pair_compatibility_score(vocal_candidate, minus_candidate)` returns
   `pair_compatibility_score`, `pair_blockers`, and `pair_decision`.
 - Invalid modes raise `ValueError`.

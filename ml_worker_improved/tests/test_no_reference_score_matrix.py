@@ -7,6 +7,7 @@ import pytest
 from tools.no_reference_score_matrix import (
     SCORE_WEIGHTS,
     allowed_actions_for_defect,
+    clip01,
     detect_blockers,
     dominant_defect,
     pair_compatibility_score,
@@ -43,6 +44,11 @@ def test_weights_sum_to_one(mode: str) -> None:
 def test_invalid_mode_fails_with_clear_error() -> None:
     with pytest.raises(ValueError, match="Unsupported no-reference score mode"):
         score_candidate(good_metrics(), "shared")
+
+
+@pytest.mark.parametrize("bad_value", [math.nan, math.inf, -math.inf])
+def test_clip01_treats_non_finite_values_as_zero(bad_value: float) -> None:
+    assert clip01(bad_value) == 0.0
 
 
 def test_vocal_mode_detects_severe_instrumental_bleed_in_vocal() -> None:
@@ -119,6 +125,17 @@ def test_minus_mode_accepts_required_evidence_from_audio_info() -> None:
     assert result["minus_decision"] == "accept_candidate"
 
 
+@pytest.mark.parametrize(
+    "metric_name",
+    ["transient_damage_score", "high_band_damage_score", "instrumental_phase_consistency_score"],
+)
+def test_minus_mode_blocks_invalid_present_optional_score_metrics(metric_name: str) -> None:
+    result = score_candidate(good_metrics(**{metric_name: math.nan}), "minus")
+
+    assert f"invalid_no_reference_metric:{metric_name}" in result["minus_blockers"]
+    assert result["minus_decision"] == "blocked_hard_case"
+
+
 def test_both_mode_detects_sample_rate_mismatch() -> None:
     result = pair_compatibility_score(
         good_metrics(candidate_id="vocal-a", sample_rate=44_100),
@@ -127,6 +144,56 @@ def test_both_mode_detects_sample_rate_mismatch() -> None:
 
     assert result["score_mode"] == "both"
     assert "sample_rate_mismatch" in result["pair_blockers"]
+    assert result["pair_decision"] == "blocked_pair_incompatible"
+
+
+def test_both_mode_blocks_invalid_present_pair_score_metrics() -> None:
+    result = pair_compatibility_score(
+        good_metrics(candidate_id="vocal-a", energy_balance_score=math.nan),
+        good_metrics(candidate_id="minus-b"),
+    )
+
+    assert "invalid_no_reference_metric:energy_balance_score" in result["pair_blockers"]
+    assert result["pair_decision"] == "blocked_pair_incompatible"
+
+
+@pytest.mark.parametrize("metric_name", ["sample_rate", "channels", "duration_sec"])
+@pytest.mark.parametrize("bad_value", [None, "", False, math.nan, math.inf, -math.inf])
+def test_both_mode_blocks_invalid_present_identity_metrics(metric_name: str, bad_value: object) -> None:
+    result = pair_compatibility_score(
+        good_metrics(candidate_id="vocal-a", **{metric_name: bad_value}),
+        good_metrics(candidate_id="minus-b", **{metric_name: bad_value}),
+    )
+
+    assert f"invalid_no_reference_metric:{metric_name}" in result["pair_blockers"]
+    assert result["pair_score_components"]["duration_channel_sr_compatibility"] == 0.0
+    assert result["pair_decision"] == "blocked_pair_incompatible"
+
+
+def test_invalid_vocal_phase_metric_does_not_use_generic_phase_fallback() -> None:
+    result = score_candidate(good_metrics(vocal_phase_consistency_score=math.inf), "vocal")
+
+    assert "invalid_no_reference_metric:vocal_phase_consistency_score" in result["vocal_blockers"]
+    assert result["vocal_score_components"]["phase_stereo_stability"] == 0.0
+    assert result["vocal_decision"] == "blocked_hard_case"
+
+
+def test_invalid_minus_phase_metric_does_not_use_generic_phase_fallback() -> None:
+    result = score_candidate(good_metrics(instrumental_phase_consistency_score=math.inf), "minus")
+
+    assert "invalid_no_reference_metric:instrumental_phase_consistency_score" in result["minus_blockers"]
+    assert result["minus_score_components"]["phase_stereo_stability"] == 0.0
+    assert result["minus_decision"] == "blocked_hard_case"
+
+
+def test_invalid_pair_phase_metric_does_not_use_generic_phase_fallback() -> None:
+    result = pair_compatibility_score(
+        good_metrics(candidate_id="vocal-a", pair_phase_consistency_score=math.inf),
+        good_metrics(candidate_id="minus-b"),
+    )
+
+    assert "invalid_no_reference_metric:pair_phase_consistency_score" in result["pair_blockers"]
+    assert result["pair_score_components"]["phase_alignment"] == 0.0
     assert result["pair_decision"] == "blocked_pair_incompatible"
 
 
