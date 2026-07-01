@@ -11,6 +11,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+from artifact_name_policy import indexed_audio_filename  # noqa: E402
 from docker_runtime import require_docker_runtime  # noqa: E402
 from apply_judge_guided_minus_vocal_leakage_repair import (  # noqa: E402
     align_channels_and_length,
@@ -434,15 +435,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--air-high-hz", type=float, default=12000.0)
     parser.add_argument("--body-low-hz", type=float, default=120.0)
     parser.add_argument("--body-high-hz", type=float, default=1800.0)
+    parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
 
 def build_judge_guided_minus_air_detail_repair(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "minus_judge_guided_air_detail_repair.flac"
-    manifest_path = output_dir / "judge_guided_minus_air_detail_repair_manifest.json"
-    candidate_row_jsonl = output_dir / "candidate_pair.jsonl"
+    short_output_names = bool(getattr(args, "short_output_names", False))
+    output_path = output_dir / (indexed_audio_filename("m", 1) if short_output_names else "minus_judge_guided_air_detail_repair.flac")
+    manifest_path = output_dir / ("manifest.json" if short_output_names else "judge_guided_minus_air_detail_repair_manifest.json")
+    candidate_row_jsonl = output_dir / ("rows.jsonl" if short_output_names else "candidate_pair.jsonl")
 
     progress("start", output_manifest_path=str(manifest_path))
     rows = read_jsonl(args.self_judge_jsonl)
@@ -515,6 +518,17 @@ def build_judge_guided_minus_air_detail_repair(args: argparse.Namespace) -> dict
         selected_windows=selected_windows,
         repair_metrics=repair_metrics,
     )
+    manifest["manifest_path"] = str(manifest_path)
+    manifest["short_output_names"] = short_output_names
+    if short_output_names:
+        manifest["artifact_name_policy"] = {
+            "schema": "short_windows_safe_artifact_names.v1",
+            "audio_filename": output_path.name,
+            "manifest_filename": manifest_path.name,
+            "rows_filename": candidate_row_jsonl.name,
+            "raw_track_or_candidate_ids_in_path": False,
+            "provenance_in_manifest": True,
+        }
     write_jsonl(candidate_row_jsonl, [manifest["candidate_row"]])
     write_json(manifest_path, manifest)
     progress(
@@ -536,7 +550,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "manifest_path": str(Path(args.output_dir) / "judge_guided_minus_air_detail_repair_manifest.json"),
+                "manifest_path": str(manifest.get("manifest_path") or Path(args.output_dir) / "judge_guided_minus_air_detail_repair_manifest.json"),
                 "candidate_audio_path": manifest["artifacts"]["minus_air_detail_repair_flac"],
                 "candidate_row_jsonl": manifest["candidate_row_jsonl"],
                 "selected_window_count": manifest["repair"]["selected_window_count"],

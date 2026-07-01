@@ -100,4 +100,5 @@ When the full-pack planner reports
 `tools/materialize_mac_promising_repair_commands.py` to resolve concrete Docker
 commands from the readiness/source manifests. The materializer can prepare the
 vocal-leakage repair command from objective guard regions, but it blocks the
-air/detail route until windowed detail self-judge evidence exists.
+air/detail route until a matching `instrumental_self_judge_gate` manifest with
+safe windowed detail evidence is supplied.

@@ -42,6 +42,20 @@ The repair adds bounded band-limited `source_mix - base_minus` detail inside a s
 If `--vocal-guide-path` is supplied, the added detail layer is projected against the vocal guide and
 suppressed before writing the candidate. This is a guardrail, not an acceptance gate.
 
+## Output Names
+
+Use `--short-output-names` for generated loop/listen/debug artifacts. In that
+mode the route writes:
+
+```text
+m001.flac
+manifest.json
+rows.jsonl
+```
+
+The manifest records `short_output_names=true` and an
+`artifact_name_policy` block with the short filenames and provenance status.
+
 ## Delivery Contract
 
 The manifest is intentionally candidate-only:

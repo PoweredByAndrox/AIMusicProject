@@ -22,7 +22,7 @@ def rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def fixture_plan(tmp_path: Path) -> Path:
+def fixture_plan(tmp_path: Path) -> tuple[Path, Path]:
     artifact_root = tmp_path / "mac_api" / "altm002"
     for name in ("instrumental.flac", "vocals.flac", "raw_ref.flac"):
         path = artifact_root / "bci" / name
@@ -102,7 +102,7 @@ def fixture_plan(tmp_path: Path) -> Path:
             }
         ],
     )
-    return write_json(
+    plan = write_json(
         tmp_path / "plan" / "plan.json",
         {
             "schema": "full_pack_loop_iteration_plan.v1",
@@ -114,10 +114,11 @@ def fixture_plan(tmp_path: Path) -> Path:
             "failed_checks": [],
         },
     )
+    return plan, artifact_root
 
 
 def test_materializer_builds_leakage_command_and_blocks_missing_detail_judge(tmp_path: Path) -> None:
-    plan = fixture_plan(tmp_path)
+    plan, _artifact_root = fixture_plan(tmp_path)
     output_dir = tmp_path / "out"
 
     result = subprocess.run(
@@ -157,3 +158,243 @@ def test_materializer_builds_leakage_command_and_blocks_missing_detail_judge(tmp
     assert generated["window_metrics"][0]["issues"] == ["vocal_leakage_in_minus"]
     assert generated["window_metrics"][0]["vocal_leakage_in_minus_score"] == 0.81
     assert all(len(path.name) <= 32 for path in output_dir.rglob("*") if path.is_file())
+
+
+def test_materializer_builds_air_detail_command_from_self_judge_manifest(tmp_path: Path) -> None:
+    plan, artifact_root = fixture_plan(tmp_path)
+    repaired_minus = tmp_path / "loop" / "it016" / "lkg" / "m001.flac"
+    repaired_minus.parent.mkdir(parents=True, exist_ok=True)
+    repaired_minus.write_bytes(b"")
+    rows_jsonl = write_jsonl(
+        tmp_path / "self" / "rows.jsonl",
+        [
+            {
+                "segment_id": "segment_0001",
+                "window_sec": [5.0, 10.0],
+                "candidate_label": "it016_lkg",
+                "issues": ["low_rms_muffling_proxy", "presence_loss_proxy"],
+                "issue_severities": {"low_rms_ratio": 0.71, "presence_loss": 0.31},
+                "blocker": True,
+                "severity_score": 0.71,
+                "self_judge_contract": {"proxy_only": True, "not_delivery_result": True},
+            },
+            {
+                "segment_id": "segment_0002",
+                "window_sec": [10.0, 15.0],
+                "candidate_label": "it016_lkg",
+                "issues": ["air_loss_proxy", "vocal_projection_proxy"],
+                "issue_severities": {"air_loss": 0.42, "vocal_projection": 0.83},
+                "blocker": True,
+                "severity_score": 0.83,
+                "self_judge_contract": {"proxy_only": True, "not_delivery_result": True},
+            },
+        ],
+    )
+    self_manifest = write_json(
+        tmp_path / "self" / "manifest.json",
+        {
+            "schema_version": 1,
+            "mode": "instrumental_self_judge_gate",
+            "source_audio_path": str(artifact_root / "bci" / "raw_ref.flac"),
+            "segments_jsonl": str(rows_jsonl),
+            "overall": {"status": "proxy_blocked", "blocker_count": 2, "segment_count": 2},
+            "candidate": {
+                "label": "it016_lkg",
+                "instrumental_path": str(repaired_minus),
+                "vocal_path": str(artifact_root / "bci" / "vocals.flac"),
+            },
+            "delivery_contract": {
+                "delivery_allowed": False,
+                "presentation_status": "diagnostic_self_judge_not_for_listen_pack",
+            },
+        },
+    )
+    output_dir = tmp_path / "out"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/materialize_mac_promising_repair_commands.py",
+            "--plan-json",
+            str(plan),
+            "--output-dir",
+            str(output_dir),
+            "--minus-self-judge-manifest",
+            str(self_manifest),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = json.loads((output_dir / "cmds.json").read_text(encoding="utf-8"))
+    assert manifest["command_plan_status"] == "ready"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["ready_command_count"] == 2
+    assert manifest["blocked_command_count"] == 0
+    assert manifest["failed_checks"] == []
+    command_rows = rows(output_dir / "rows.jsonl")
+    detail = {row["route"]: row for row in command_rows}["judge_guided_minus_air_detail_repair"]
+    assert detail["command_status"] == "ready"
+    assert detail["safe_detail_window_count"] == 1
+    assert detail["blocked_unsafe_detail_window_count"] == 1
+    assert detail["generated_detail_jsonl"].endswith("dtl/rows.jsonl")
+    assert detail["base_minus_path"] == str(repaired_minus)
+    assert detail["docker_command"][:2] == ["python", "tools/apply_judge_guided_minus_air_detail_repair.py"]
+    assert detail["docker_command"][3] == str(repaired_minus)
+    assert detail["docker_command"][4] == detail["generated_detail_jsonl"]
+    assert "--short-output-names" in detail["docker_command"]
+    assert "--vocal-guide-path" in detail["docker_command"]
+    generated = rows(output_dir / "dtl" / "rows.jsonl")
+    assert len(generated) == 1
+    assert generated[0]["candidate_label"] == "it016_lkg"
+    assert generated[0]["window_sec"] == [5.0, 10.0]
+    assert generated[0]["issues"] == ["low_rms_muffling_proxy", "presence_loss_proxy"]
+    assert generated[0]["judge_source"] == "instrumental_self_judge_gate"
+    assert generated[0]["detail_materializer_source"] == "minus_self_judge_manifest"
+    assert generated[0]["source_audio_path"] == str(artifact_root / "bci" / "raw_ref.flac")
+    assert generated[0]["minus_path"] == str(repaired_minus)
+    assert generated[0]["instrumental_path"] == str(repaired_minus)
+    assert all(len(path.name) <= 32 for path in output_dir.rglob("*") if path.is_file())
+
+
+def test_materializer_blocks_ambiguous_detail_self_judge_manifests(tmp_path: Path) -> None:
+    plan, artifact_root = fixture_plan(tmp_path)
+    rows_jsonl = write_jsonl(
+        tmp_path / "self" / "rows.jsonl",
+        [
+            {
+                "segment_id": "segment_0001",
+                "window_sec": [5.0, 10.0],
+                "candidate_label": "candidate_a",
+                "issues": ["low_rms_muffling_proxy"],
+                "issue_severities": {"low_rms_ratio": 0.71},
+                "blocker": True,
+                "severity_score": 0.71,
+            }
+        ],
+    )
+    manifest_paths = []
+    for label in ("candidate_a", "candidate_b"):
+        minus_path = tmp_path / "minus" / f"{label}.flac"
+        minus_path.parent.mkdir(parents=True, exist_ok=True)
+        minus_path.write_bytes(b"")
+        manifest_paths.append(
+            write_json(
+                tmp_path / "self" / f"{label}.json",
+                {
+                    "schema_version": 1,
+                    "mode": "instrumental_self_judge_gate",
+                    "source_audio_path": str(artifact_root / "bci" / "raw_ref.flac"),
+                    "segments_jsonl": str(rows_jsonl),
+                    "overall": {"status": "proxy_blocked", "blocker_count": 1, "segment_count": 1},
+                    "candidate": {
+                        "label": label,
+                        "instrumental_path": str(minus_path),
+                        "vocal_path": str(artifact_root / "bci" / "vocals.flac"),
+                    },
+                    "delivery_contract": {"delivery_allowed": False},
+                },
+            )
+        )
+    output_dir = tmp_path / "out"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/materialize_mac_promising_repair_commands.py",
+            "--plan-json",
+            str(plan),
+            "--output-dir",
+            str(output_dir),
+            "--minus-self-judge-manifest",
+            str(manifest_paths[0]),
+            "--minus-self-judge-manifest",
+            str(manifest_paths[1]),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    manifest = json.loads((output_dir / "cmds.json").read_text(encoding="utf-8"))
+    assert manifest["command_plan_status"] == "partial_ready_missing_inputs"
+    assert manifest["ready_command_count"] == 1
+    assert manifest["blocked_command_count"] == 1
+    assert manifest["failed_checks"] == ["detail_route_self_judge_manifest_ambiguous"]
+    command_rows = rows(output_dir / "rows.jsonl")
+    detail = {row["route"]: row for row in command_rows}["judge_guided_minus_air_detail_repair"]
+    assert detail["command_status"] == "blocked_ambiguous_windowed_detail_judge"
+    assert detail["missing_inputs"] == ["unambiguous_self_judge_manifest"]
+    assert detail["candidate_self_judge_manifest_count"] == 2
+    assert detail["docker_command"] == []
+    assert detail["delivery_allowed"] is False
+
+
+def test_materializer_blocks_detail_self_judge_manifest_without_source_audio_path(tmp_path: Path) -> None:
+    plan, artifact_root = fixture_plan(tmp_path)
+    minus_path = tmp_path / "minus" / "candidate.flac"
+    minus_path.parent.mkdir(parents=True, exist_ok=True)
+    minus_path.write_bytes(b"")
+    rows_jsonl = write_jsonl(
+        tmp_path / "self" / "rows.jsonl",
+        [
+            {
+                "segment_id": "segment_0001",
+                "window_sec": [5.0, 10.0],
+                "candidate_label": "candidate",
+                "issues": ["low_rms_muffling_proxy"],
+                "issue_severities": {"low_rms_ratio": 0.71},
+                "blocker": True,
+                "severity_score": 0.71,
+            }
+        ],
+    )
+    self_manifest = write_json(
+        tmp_path / "self" / "manifest.json",
+        {
+            "schema_version": 1,
+            "mode": "instrumental_self_judge_gate",
+            "segments_jsonl": str(rows_jsonl),
+            "overall": {"status": "proxy_blocked", "blocker_count": 1, "segment_count": 1},
+            "candidate": {
+                "label": "candidate",
+                "instrumental_path": str(minus_path),
+                "vocal_path": str(artifact_root / "bci" / "vocals.flac"),
+            },
+            "delivery_contract": {"delivery_allowed": False},
+        },
+    )
+    output_dir = tmp_path / "out"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/materialize_mac_promising_repair_commands.py",
+            "--plan-json",
+            str(plan),
+            "--output-dir",
+            str(output_dir),
+            "--minus-self-judge-manifest",
+            str(self_manifest),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    manifest = json.loads((output_dir / "cmds.json").read_text(encoding="utf-8"))
+    assert manifest["command_plan_status"] == "partial_ready_missing_inputs"
+    assert manifest["failed_checks"] == ["detail_route_windowed_judge_missing"]
+    command_rows = rows(output_dir / "rows.jsonl")
+    detail = {row["route"]: row for row in command_rows}["judge_guided_minus_air_detail_repair"]
+    assert detail["command_status"] == "blocked_missing_windowed_detail_judge"
+    assert detail["missing_inputs"] == ["self_judge_source_audio_path"]
+    assert detail["docker_command"] == []
+    assert detail["delivery_allowed"] is False

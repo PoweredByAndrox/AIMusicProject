@@ -43,9 +43,27 @@ The generated rows are provenance-safe conversions of objective guard regions
 into `vocal_leakage_in_minus` window rows. They are not human timestamps or
 track-specific hardcodes.
 
-`judge_guided_minus_air_detail_repair` remains blocked until a windowed detail
-self-judge JSONL is available. Global human feedback such as `detail_loss` is
-not enough to select repair windows safely.
+`judge_guided_minus_air_detail_repair` can be materialized when
+`--minus-self-judge-manifest` points at an `instrumental_self_judge_gate`
+manifest whose `segments_jsonl` contains safe detail blocker windows. The
+materializer writes:
+
+```text
+dtl/rows.jsonl
+```
+
+Only detail issues are kept:
+
+```text
+air_loss_proxy
+presence_loss_proxy
+low_rms_muffling_proxy
+```
+
+Rows with unsafe vocal/full-mix issues are counted and excluded. If multiple
+self-judge manifests match the same source mix, the detail route is blocked as
+ambiguous instead of silently choosing one. Global human feedback such as
+`detail_loss` is not enough to select repair windows safely.
 
 ## Outputs
 
@@ -57,6 +75,7 @@ rows.jsonl
 summary.md
 progress.jsonl
 leak/rows.jsonl
+dtl/rows.jsonl
 ```
 
 `cmds.json` keeps delivery blocked:
@@ -73,6 +92,7 @@ If one route is ready and another route is missing inputs, the status is:
 command_plan_status=partial_ready_missing_inputs
 ```
 
-The ready leakage command still creates only a candidate-only repair. It must
-pass post-render minus self-judge, result judge, selector, and listen-preview
-contracts before any accepted delivery wrapper can use it.
+Ready leakage and detail commands still create only candidate-only repairs. They
+use `--short-output-names` and must pass post-render minus self-judge, result
+judge, selector, and listen-preview contracts before any accepted delivery
+wrapper can use them.

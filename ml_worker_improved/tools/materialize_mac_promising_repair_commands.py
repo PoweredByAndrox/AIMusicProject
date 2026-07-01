@@ -24,7 +24,15 @@ SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
 LEAK_DIR_NAME = "leak"
 LEAK_ROWS_NAME = "rows.jsonl"
+DETAIL_DIR_NAME = "dtl"
+DETAIL_ROWS_NAME = "rows.jsonl"
+AIR_DETAIL_OUTPUT_DIR_NAME = "air"
 MISSING_PATH = Path("__missing_path__")
+
+# Mirrors the documented issue contract consumed by
+# apply_judge_guided_minus_air_detail_repair.py without importing the audio stack.
+DETAIL_ISSUES = {"air_loss_proxy", "presence_loss_proxy", "low_rms_muffling_proxy"}
+UNSAFE_DETAIL_ISSUES = {"vocal_projection_proxy", "vocal_stem_corr_proxy", "full_mix_like_risk_proxy"}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -86,6 +94,18 @@ def stable_unique(values: Iterable[str]) -> list[str]:
     return result
 
 
+def as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def normalized_path_text(value: Any) -> str:
+    return str(value or "").replace("\\", "/").rstrip("/")
+
+
 def canonical_path(value: Any, base_dir: Path) -> Path:
     text = str(value or "").strip()
     if not text:
@@ -124,6 +144,89 @@ def candidate_paths(source_manifest: dict[str, Any], source_manifest_json: Path)
         "minus": canonical_path(candidate.get("instrumental_path"), source_manifest_json.parent),
         "vocals": canonical_path(candidate.get("vocals_path"), source_manifest_json.parent),
     }
+
+
+def self_judge_manifest_inputs(self_judge_manifest_json: Path) -> dict[str, Any]:
+    manifest = read_json(self_judge_manifest_json)
+    candidate = manifest.get("candidate") if isinstance(manifest.get("candidate"), dict) else {}
+    raw_ref_path = canonical_path(manifest.get("source_audio_path"), self_judge_manifest_json.parent)
+    segments_path = canonical_path(manifest.get("segments_jsonl"), self_judge_manifest_json.parent)
+    minus_path = canonical_path(
+        candidate.get("instrumental_path")
+        or candidate.get("minus_path")
+        or candidate.get("selected_minus_path")
+        or manifest.get("candidate_instrumental_path"),
+        self_judge_manifest_json.parent,
+    )
+    vocal_path = canonical_path(candidate.get("vocal_path"), self_judge_manifest_json.parent)
+    candidate_label = str(candidate.get("label") or manifest.get("candidate_label") or "")
+    if not candidate_label and path_is_set(minus_path):
+        candidate_label = minus_path.stem
+    return {
+        "manifest": manifest,
+        "manifest_json": self_judge_manifest_json,
+        "raw_ref": raw_ref_path,
+        "segments": segments_path,
+        "minus": minus_path,
+        "vocals": vocal_path,
+        "candidate_label": candidate_label,
+    }
+
+
+def select_self_judge_inputs(
+    *,
+    self_judge_manifest_jsons: Sequence[Path],
+    raw_ref_path: Path,
+) -> tuple[dict[str, Any] | None, int]:
+    inputs: list[dict[str, Any]] = []
+    for manifest_json in self_judge_manifest_jsons:
+        if manifest_json.exists():
+            inputs.append(self_judge_manifest_inputs(manifest_json))
+    if not inputs:
+        return None, 0
+    requested = normalized_path_text(raw_ref_path)
+    matches = [item for item in inputs if normalized_path_text(item["raw_ref"]) == requested]
+    if len(matches) == 1:
+        return matches[0], 0
+    if len(matches) > 1:
+        return None, len(matches)
+    if len(inputs) == 1:
+        return inputs[0], 0
+    return None, len(inputs)
+
+
+def row_issues(row: dict[str, Any]) -> set[str]:
+    return {str(issue) for issue in as_list(row.get("issues")) if str(issue)}
+
+
+def detail_judge_rows(
+    *,
+    self_judge_rows_jsonl: Path,
+    candidate_id: str,
+    raw_ref_path: Path,
+    minus_path: Path,
+) -> tuple[list[dict[str, Any]], int]:
+    rows: list[dict[str, Any]] = []
+    unsafe_detail_count = 0
+    for row in iter_jsonl(self_judge_rows_jsonl):
+        issues = row_issues(row)
+        has_detail_issue = bool(issues & DETAIL_ISSUES)
+        has_unsafe_issue = bool(issues & UNSAFE_DETAIL_ISSUES)
+        if has_detail_issue and has_unsafe_issue:
+            unsafe_detail_count += 1
+        if not bool(row.get("blocker")) or not has_detail_issue or has_unsafe_issue:
+            continue
+        converted = dict(row)
+        converted["schema"] = "windowed_minus_judge_row.v1"
+        converted["candidate_id"] = candidate_id
+        converted["candidate_label"] = str(row.get("candidate_label") or candidate_id)
+        converted["source_audio_path"] = str(raw_ref_path)
+        converted["minus_path"] = str(minus_path)
+        converted["instrumental_path"] = str(minus_path)
+        converted["judge_source"] = "instrumental_self_judge_gate"
+        converted["detail_materializer_source"] = "minus_self_judge_manifest"
+        rows.append(converted)
+    return rows, unsafe_detail_count
 
 
 def leakage_judge_rows(
@@ -176,25 +279,148 @@ def materialize_route_row(
     queue_item_id: str,
     source_manifest_json: Path,
     output_dir: Path,
+    minus_self_judge_manifest_jsons: Sequence[Path],
 ) -> tuple[dict[str, Any], list[str]]:
     source_manifest = read_json(source_manifest_json)
     paths = candidate_paths(source_manifest, source_manifest_json)
     missing = [name for name, path in paths.items() if not path_is_set(path) or not path.exists()]
     route_name = str(route.get("route") or "")
     if route_name == "judge_guided_minus_air_detail_repair":
+        source_missing = [name for name in ("raw_ref",) if name in missing]
+        self_judge_inputs, ambiguous_count = select_self_judge_inputs(
+            self_judge_manifest_jsons=minus_self_judge_manifest_jsons,
+            raw_ref_path=paths["raw_ref"],
+        )
+        if ambiguous_count:
+            return (
+                {
+                    "schema": "mac_promising_repair_command_row.v1",
+                    "route": route_name,
+                    "tool": str(route.get("tool") or ""),
+                    "command_status": "blocked_ambiguous_windowed_detail_judge",
+                    "missing_inputs": ["unambiguous_self_judge_manifest"],
+                    "source_manifest_json": str(source_manifest_json),
+                    "candidate_self_judge_manifest_count": ambiguous_count,
+                    "delivery_allowed": False,
+                    "can_publish_as_result": False,
+                    "docker_command": [],
+                },
+                ["detail_route_self_judge_manifest_ambiguous"],
+            )
+        if self_judge_inputs is None:
+            return (
+                {
+                    "schema": "mac_promising_repair_command_row.v1",
+                    "route": route_name,
+                    "tool": str(route.get("tool") or ""),
+                    "command_status": "blocked_missing_windowed_detail_judge",
+                    "missing_inputs": ["self_judge_jsonl"],
+                    "source_manifest_json": str(source_manifest_json),
+                    "delivery_allowed": False,
+                    "can_publish_as_result": False,
+                    "docker_command": [],
+                },
+                ["detail_route_windowed_judge_missing"],
+            )
+        raw_ref_path = self_judge_inputs["raw_ref"] if path_is_set(self_judge_inputs["raw_ref"]) else paths["raw_ref"]
+        detail_missing = list(source_missing)
+        if not path_is_set(self_judge_inputs["raw_ref"]):
+            detail_missing.append("self_judge_source_audio_path")
+        elif normalized_path_text(self_judge_inputs["raw_ref"]) != normalized_path_text(paths["raw_ref"]):
+            detail_missing.append("self_judge_source_audio_path_mismatch")
+        for name in ("segments", "minus"):
+            path = self_judge_inputs[name]
+            if not path_is_set(path) or not path.exists():
+                detail_missing.append(f"self_judge_{name}")
+        vocal_path = self_judge_inputs["vocals"]
+        if path_is_set(vocal_path) and not vocal_path.exists():
+            detail_missing.append("self_judge_vocals")
+        if not path_is_set(raw_ref_path) or not raw_ref_path.exists():
+            detail_missing.append("raw_ref")
+        if detail_missing:
+            return (
+                {
+                    "schema": "mac_promising_repair_command_row.v1",
+                    "route": route_name,
+                    "tool": str(route.get("tool") or ""),
+                    "command_status": "blocked_missing_windowed_detail_judge",
+                    "missing_inputs": stable_unique(detail_missing),
+                    "source_manifest_json": str(source_manifest_json),
+                    "self_judge_manifest_json": str(self_judge_inputs["manifest_json"]),
+                    "delivery_allowed": False,
+                    "can_publish_as_result": False,
+                    "docker_command": [],
+                },
+                ["detail_route_windowed_judge_missing"],
+            )
+        candidate_label = str(self_judge_inputs.get("candidate_label") or queue_item_id)
+        detail_rows_path = output_dir / DETAIL_DIR_NAME / DETAIL_ROWS_NAME
+        detail_rows, unsafe_detail_count = detail_judge_rows(
+            self_judge_rows_jsonl=self_judge_inputs["segments"],
+            candidate_id=candidate_label,
+            raw_ref_path=raw_ref_path,
+            minus_path=self_judge_inputs["minus"],
+        )
+        write_jsonl(detail_rows_path, detail_rows)
+        if not detail_rows:
+            return (
+                {
+                    "schema": "mac_promising_repair_command_row.v1",
+                    "route": route_name,
+                    "tool": str(route.get("tool") or ""),
+                    "command_status": "blocked_no_safe_detail_windows",
+                    "missing_inputs": ["safe_detail_windows"],
+                    "source_manifest_json": str(source_manifest_json),
+                    "self_judge_manifest_json": str(self_judge_inputs["manifest_json"]),
+                    "source_self_judge_jsonl": str(self_judge_inputs["segments"]),
+                    "generated_detail_jsonl": str(detail_rows_path),
+                    "blocked_unsafe_detail_window_count": unsafe_detail_count,
+                    "delivery_allowed": False,
+                    "can_publish_as_result": False,
+                    "docker_command": [],
+                },
+                ["detail_route_safe_detail_windows_missing"],
+            )
+        route_output_dir = output_dir / AIR_DETAIL_OUTPUT_DIR_NAME
+        command = [
+            "python",
+            str(route.get("tool") or "tools/apply_judge_guided_minus_air_detail_repair.py"),
+            str(raw_ref_path),
+            str(self_judge_inputs["minus"]),
+            str(detail_rows_path),
+            str(route_output_dir),
+            "--candidate-id",
+            candidate_label,
+            "--track-id",
+            queue_item_id,
+            "--short-output-names",
+        ]
+        if path_is_set(vocal_path):
+            command.extend(["--vocal-guide-path", str(vocal_path)])
         return (
             {
                 "schema": "mac_promising_repair_command_row.v1",
                 "route": route_name,
                 "tool": str(route.get("tool") or ""),
-                "command_status": "blocked_missing_windowed_detail_judge",
-                "missing_inputs": ["self_judge_jsonl"],
+                "command_status": "ready",
+                "missing_inputs": [],
                 "source_manifest_json": str(source_manifest_json),
+                "self_judge_manifest_json": str(self_judge_inputs["manifest_json"]),
+                "source_self_judge_jsonl": str(self_judge_inputs["segments"]),
+                "generated_detail_jsonl": str(detail_rows_path),
+                "raw_ref_path": str(raw_ref_path),
+                "base_minus_path": str(self_judge_inputs["minus"]),
+                "vocal_guide_path": str(vocal_path) if path_is_set(vocal_path) else None,
+                "output_dir": str(route_output_dir),
+                "docker_command": command,
+                "safe_detail_window_count": len(detail_rows),
+                "blocked_unsafe_detail_window_count": unsafe_detail_count,
+                "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+                "requires_post_judge": True,
                 "delivery_allowed": False,
                 "can_publish_as_result": False,
-                "docker_command": [],
             },
-            ["detail_route_windowed_judge_missing"],
+            [],
         )
     if route_name != "judge_guided_minus_vocal_leakage_repair":
         return (
@@ -320,6 +546,7 @@ def materialize_mac_promising_repair_commands(
     *,
     plan_json: Path,
     output_dir: Path,
+    minus_self_judge_manifest_jsons: Sequence[Path] = (),
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -361,6 +588,7 @@ def materialize_mac_promising_repair_commands(
                 queue_item_id=queue_item_id,
                 source_manifest_json=source_manifest_json,
                 output_dir=output_dir,
+                minus_self_judge_manifest_jsons=minus_self_judge_manifest_jsons,
             )
             command_rows.append(row)
             failed.extend(row_failed)
@@ -409,6 +637,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--minus-self-judge-manifest", action="append", type=Path, default=[])
     return parser.parse_args(argv)
 
 
@@ -421,6 +650,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = materialize_mac_promising_repair_commands(
         plan_json=args.plan_json,
         output_dir=args.output_dir,
+        minus_self_judge_manifest_jsons=args.minus_self_judge_manifest,
         command_args=list(argv if argv is not None else sys.argv[1:]),
     )
     print(

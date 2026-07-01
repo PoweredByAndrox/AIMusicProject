@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
@@ -22,6 +25,29 @@ def _load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def write_jsonl(path: Path, rows: list[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
+def last_json_object(stdout: str) -> dict:
+    decoder = json.JSONDecoder()
+    objects = []
+    index = 0
+    while index < len(stdout):
+        while index < len(stdout) and stdout[index].isspace():
+            index += 1
+        if index >= len(stdout):
+            break
+        payload, next_index = decoder.raw_decode(stdout, index)
+        if isinstance(payload, dict):
+            objects.append(payload)
+        index = next_index
+    assert objects
+    return objects[-1]
 
 
 class JudgeGuidedMinusAirDetailRepairTests(unittest.TestCase):
@@ -225,6 +251,70 @@ class JudgeGuidedMinusAirDetailRepairTests(unittest.TestCase):
             manifest["candidate_row"]["candidate_family"],
             "judge_guided_minus_air_detail_repair",
         )
+
+    def test_air_detail_repair_supports_short_output_names(self) -> None:
+        sample_rate = 44100
+        duration_sec = 0.5
+        time = np.arange(int(sample_rate * duration_sec), dtype=np.float32) / sample_rate
+        raw = 0.08 * np.sin(2.0 * np.pi * 880.0 * time) + 0.03 * np.sin(2.0 * np.pi * 8000.0 * time)
+        base = raw * 0.35
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp_path = Path(tmp_name)
+            raw_path = tmp_path / "raw.flac"
+            base_path = tmp_path / "minus.flac"
+            sf.write(raw_path, raw, sample_rate, subtype="PCM_24")
+            sf.write(base_path, base, sample_rate, subtype="PCM_24")
+            judge_rows = write_jsonl(
+                tmp_path / "rows.jsonl",
+                [
+                    {
+                        "candidate_label": "short_minus",
+                        "window_sec": [0.05, 0.35],
+                        "issues": ["air_loss_proxy", "presence_loss_proxy"],
+                        "issue_severities": {"air_loss": 0.8, "presence_loss": 0.4},
+                        "blocker": True,
+                        "severity_score": 0.8,
+                    }
+                ],
+            )
+            output_dir = tmp_path / "out"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/apply_judge_guided_minus_air_detail_repair.py",
+                    str(raw_path),
+                    str(base_path),
+                    str(judge_rows),
+                    str(output_dir),
+                    "--candidate-id",
+                    "short_minus",
+                    "--track-id",
+                    "t001",
+                    "--short-output-names",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            stdout = last_json_object(result.stdout)
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(stdout["manifest_path"], str(output_dir / "manifest.json"))
+            self.assertTrue((output_dir / "m001.flac").exists())
+            self.assertTrue((output_dir / "rows.jsonl").exists())
+            self.assertEqual(manifest["manifest_path"], str(output_dir / "manifest.json"))
+            self.assertTrue(manifest["short_output_names"])
+            self.assertEqual(manifest["artifact_name_policy"]["audio_filename"], "m001.flac")
+            self.assertFalse(manifest["artifact_name_policy"]["raw_track_or_candidate_ids_in_path"])
+            self.assertFalse(manifest["delivery_allowed"])
+            self.assertTrue(manifest["requires_post_judge"])
+            self.assertTrue(all(len(path.name) <= 32 for path in output_dir.rglob("*") if path.is_file()))
 
 
 if __name__ == "__main__":
