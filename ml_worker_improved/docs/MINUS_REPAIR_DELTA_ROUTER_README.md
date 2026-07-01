@@ -1,0 +1,85 @@
+# Minus Repair Delta Router
+
+`tools/plan_minus_repair_delta_router.py` turns a
+`minus_repair_delta_gate.v1` manifest into a candidate-only next-route plan.
+
+This is a Docker-only metadata planner:
+
+- `gpu_inference_skipped=true`
+- `acceleration_mode=external_only_cpu_metadata_planning`
+- no audio rendering
+- no model training
+- no model registry edits
+- no threshold relaxation
+- no per-track hardcoded timestamps
+
+## Inputs
+
+The planner requires:
+
+- `--delta-gate-manifest`: output from `evaluate_minus_repair_delta_gate.py`;
+- `--output-dir`: short-name artifact directory;
+- optional `--source-route`: route that produced the failed repair;
+- optional `--candidate-id`: provenance override.
+
+The delta-gate manifest must point at readable `rows.jsonl` segment delta rows.
+
+## Routing Policy
+
+The planner reads unresolved segment transitions and classifies persistent
+blockers:
+
+- unsafe vocal/full-mix proxy blockers route to
+  `switch_to_leakage_repair` / `judge_guided_minus_vocal_leakage_repair`;
+- detail-only blockers route to `retune_detail_repair` and block repeating the
+  same detail repair parameters;
+- unclassified persistent blockers route to `switch_to_segment_router`;
+- a passed delta gate routes only to downstream acceptance gates.
+
+The planner blocks repeating the same repair route when the delta gate reports
+zero blocker reduction.
+
+## Outputs
+
+The tool writes short Windows-safe artifacts:
+
+```text
+plan.json
+rows.jsonl
+summary.md
+progress.jsonl
+```
+
+`plan.json` includes:
+
+- `router_status`
+- `selected_next_action`
+- `selected_route`
+- `blocked_repeat_routes`
+- `failure_taxonomy`
+- `required_actions`
+- `issue_summary`
+
+## Delivery Contract
+
+The router never publishes audio:
+
+- `delivery_allowed=false`
+- `can_publish_as_result=false`
+- `presentation_status=router_plan_not_for_listen_pack`
+- `requires_downstream_acceptance=true`
+
+It only plans the next candidate-only route. Any generated candidate must rerun
+self-judge, delta gate, result judge, selector, and listen-preview status gates
+before listen-pack acceptance.
+
+## Example
+
+```bash
+docker compose run --rm --no-deps ml-worker python /app/tools/plan_minus_repair_delta_router.py \
+  --delta-gate-manifest /host_artifacts/loop/it018/gate/gate.json \
+  --output-dir /host_artifacts/loop/it019/router \
+  --source-route judge_guided_minus_air_detail_repair \
+  --candidate-id it017_air \
+  --short-output-names
+```

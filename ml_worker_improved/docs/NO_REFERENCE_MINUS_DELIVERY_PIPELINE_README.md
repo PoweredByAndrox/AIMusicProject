@@ -18,10 +18,13 @@ The pipeline is mode-specific for `stem_type=minus`:
    pre/post self-judge evidence; the repair remains blocked unless
    `blocker_count` strictly decreases and unsafe vocal/full-mix proxy issues do
    not increase;
-7. run `run_no_reference_result_judge.py` with `score_mode=minus` so each row carries `minus_score`,
+7. if the delta gate blocks the repair, run
+   `plan_minus_repair_delta_router.py` to choose the next candidate-only route
+   and prevent repeating the same ineffective repair parameters;
+8. run `run_no_reference_result_judge.py` with `score_mode=minus` so each row carries `minus_score`,
    `minus_decision`, `minus_blockers`, and `minus_musical_detail_preservation_gate`;
-8. run `run_no_reference_candidate_selector.py` with `score_mode=minus`;
-9. build `no_reference_minus_listen_preview_manifest.json` through the artifact status contract.
+9. run `run_no_reference_candidate_selector.py` with `score_mode=minus`;
+10. build `no_reference_minus_listen_preview_manifest.json` through the artifact status contract.
 
 The listen-preview manifest fails closed if either result-judge evidence or selector evidence is missing
 `score_mode=minus`; legacy `both` selector JSONL cannot be promoted as a minus listen-preview result.
@@ -36,6 +39,9 @@ and cannot be published directly.
 Repair branches must also pass `evaluate_minus_repair_delta_gate.py`; a repair
 that changes issue mix but does not reduce self-judge blocker count remains
 blocked as `blocked_no_blocker_reduction`.
+Blocked delta gates should be routed through
+`plan_minus_repair_delta_router.py`, which produces a plan-only next route and
+keeps `delivery_allowed=false`.
 The final pipeline manifest records `repair_manifest_path` only when that
 post-render leakage repair branch was actually used, and
 `post_candidate_self_judge_manifest` points at the final self-judge evidence

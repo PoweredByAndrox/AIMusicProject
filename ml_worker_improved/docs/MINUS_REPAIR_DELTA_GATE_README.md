@@ -76,6 +76,12 @@ step. Accepted listen output still requires post-render minus self-judge,
 no-reference result judge, selector acceptance, musical-detail preservation, and
 the listen-preview artifact status contract.
 
+For blocked gates, pass `gate.json` to
+`tools/plan_minus_repair_delta_router.py`. The router decides whether to switch
+to leakage repair, retune detail repair, use the segment router, or mine an
+alternative model candidate. That router output is also plan-only and cannot be
+published as audio.
+
 ## Example
 
 ```bash
