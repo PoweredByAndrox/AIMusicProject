@@ -243,3 +243,117 @@ def test_full_pack_loop_iteration_plan_marks_ready_gpu_training_actions(tmp_path
     assert plan_rows[0]["expected_acceleration_mode"] == "gpu_training"
     assert plan_rows[0]["docker_commands"][0][-1] == "cuda"
 
+
+def test_full_pack_loop_iteration_plan_blocks_mac_selected_reference_gap_before_holdout(tmp_path: Path) -> None:
+    rows_path = tmp_path / "queue" / "rows.jsonl"
+    write_jsonl(
+        rows_path,
+        [
+            {
+                "schema": "short_listen_repair_queue_item.v1",
+                "queue_item_id": "mac001",
+                "route_intent": "mac_selected_candidate_reference_gap",
+                "stem_type": "minus",
+                "audio_path": "/mac/source/be-nicegreenhorn.mp3",
+                "selected_candidate_id": "it7dl003",
+                "source_audio_path": "/mac/source/be-nicegreenhorn.mp3",
+                "source_track_identity": {
+                    "track_id": "be-nicegreenhorn",
+                    "identity_status": "actual_source_verified",
+                },
+                "reference_bundle_status": "mismatched_to_source",
+                "reference_mismatch_status": "reference_bundle_mismatched_to_source",
+                "full_holdout_resolution_status": "not_evaluated",
+                "readiness_summary_json": "/host_artifacts/mac_api/it7rd001/sel/summary.json",
+                "issue_tags": ["full_holdout_not_evaluated", "reference_bundle_mismatched_to_source"],
+                "release_ready": False,
+                "can_publish_as_result": False,
+            }
+        ],
+    )
+    queue_manifest = write_json(
+        tmp_path / "queue" / "queue.json",
+        {
+            "schema": "short_listen_repair_queue_manifest.v1",
+            "queue_status": "ready_for_full_pack_loop",
+            "queue_source": "mac_candidate_readiness_summary",
+            "queue_item_count": 1,
+            "rows_jsonl": str(rows_path),
+            "failed_checks": [],
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "delivery_allowed": False,
+            "safety": {
+                "release_ready": False,
+                "training_started": False,
+                "thresholds_relaxed": False,
+                "model_registry_edited": False,
+            },
+        },
+    )
+
+    manifest = build_full_pack_loop_iteration_plan(
+        repair_queue_manifest_json=queue_manifest,
+        training_plan_json=training_plan(tmp_path),
+        output_dir=tmp_path / "plan",
+    )
+
+    assert manifest["plan_status"] == "blocked_waiting_for_mac_reference_recovery"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["action_count"] == 1
+    assert manifest["ready_action_count"] == 0
+    assert manifest["blocked_action_count"] == 1
+    assert manifest["route_intent_counts"] == {"mac_selected_candidate_reference_gap": 1}
+    row = rows(tmp_path / "plan" / "rows.jsonl")[0]
+    assert row["action_status"] == "blocked_mac_reference_recovery_required"
+    assert row["selected_candidate_id"] == "it7dl003"
+    assert row["source_track_identity"]["track_id"] == "be-nicegreenhorn"
+    assert row["reference_bundle_status"] == "mismatched_to_source"
+    assert row["reference_mismatch_status"] == "reference_bundle_mismatched_to_source"
+    assert row["expected_acceleration_mode"] == "external_only_cpu_reference_planning"
+    assert row["required_next_actions"] == [
+        "reference_path_recovery",
+        "verified_reference_corpus_expand",
+        "holdout_eval_gate",
+        "train_ready_decision_gate",
+        "full_pack_gate_rebuild",
+    ]
+    assert row["training_started"] is False
+    assert row["can_publish_as_result"] is False
+
+
+def test_full_pack_loop_iteration_plan_prioritizes_mac_reference_gap_in_mixed_queue(tmp_path: Path) -> None:
+    queue_manifest = full_pack_loop_queue(tmp_path)
+    queue = json.loads(queue_manifest.read_text(encoding="utf-8"))
+    queue_rows = rows(Path(queue["rows_jsonl"]))
+    queue_rows.append(
+        {
+            "schema": "short_listen_repair_queue_item.v1",
+            "queue_item_id": "mac001",
+            "route_intent": "mac_selected_candidate_reference_gap",
+            "stem_type": "minus",
+            "audio_path": "/mac/source/be-nicegreenhorn.mp3",
+            "selected_candidate_id": "it7dl003",
+            "source_track_identity": {"track_id": "be-nicegreenhorn"},
+            "reference_bundle_status": "mismatched_to_source",
+            "reference_mismatch_status": "reference_bundle_mismatched_to_source",
+            "release_ready": False,
+            "can_publish_as_result": False,
+        }
+    )
+    queue["rows_jsonl"] = str(write_jsonl(tmp_path / "queue" / "rows.jsonl", queue_rows))
+    queue["queue_item_count"] = len(queue_rows)
+    queue_manifest.write_text(json.dumps(queue, sort_keys=True), encoding="utf-8")
+
+    manifest = build_full_pack_loop_iteration_plan(
+        repair_queue_manifest_json=queue_manifest,
+        training_plan_json=training_plan(tmp_path),
+        output_dir=tmp_path / "plan",
+    )
+
+    assert manifest["plan_status"] == "blocked_waiting_for_mac_reference_recovery"
+    assert manifest["route_intent_counts"] == {
+        "mac_selected_candidate_reference_gap": 1,
+        "minus_repair": 1,
+        "stem_training_coverage_gap": 5,
+    }

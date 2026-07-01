@@ -193,6 +193,133 @@ def test_exact_reference_candidate_under_allowed_root_is_candidate_found(tmp_pat
     assert row["candidate_match_method"] == "manifest_reference_path"
 
 
+def test_existing_reference_json_manifest_is_not_treated_as_reference_audio(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "allowed"
+    source_audio = touch(allowed_root / "mix.wav")
+    generated_vocal = touch(allowed_root / "generated_vocals.flac")
+    reference_manifest = write_json(
+        allowed_root / "reference_vocals.json",
+        {"schema": "reference_manifest.v1", "reference_vocal": str(allowed_root / "reference_vocals.flac")},
+    )
+    manifest = source_manifest(tmp_path / "manifests" / "source.json", source_audio=source_audio, generated_vocal=generated_vocal)
+    mapping_plan, mapping_manifest, docker_verification, reference_recovery, collected, benchmark, golden = make_inputs(
+        tmp_path,
+        [mapping_row("bench-json-reference", source_manifest_path=manifest, source_audio=source_audio, generated_vocal=generated_vocal)],
+    )
+    reference_recovery.write_text(
+        json.dumps(
+            {
+                "case_id": "bench-json-reference",
+                "track_hash": "bench-json-reference",
+                "stem_type": "vocal",
+                "split": "train",
+                "source_manifest": str(manifest),
+                "recovery_status": "blocked_missing_reference",
+                "discovered_audio_inputs": [],
+                "discovered_reference_inputs": [
+                    {
+                        "type": "reference_vocal",
+                        "path": str(reference_manifest),
+                        "exists": True,
+                        "source_key": "reference_manifest",
+                    }
+                ],
+                "forbidden_actions": ["no_audio_copy"],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = build_reference_path_recovery_plan(
+        source_path_mapping_jsonl=mapping_plan,
+        source_path_mapping_manifest_json=mapping_manifest,
+        docker_mount_verification_json=docker_verification,
+        reference_recovery_plan_jsonl=reference_recovery,
+        collected_evidence_jsonl=collected,
+        hard_case_benchmark_jsonl=benchmark,
+        golden_jsonl=golden,
+        reference_search_roots=[allowed_root],
+    )
+    row = rows_by_case(result)["bench-json-reference"]
+
+    assert row["recovery_status"] == "blocked_missing_reference"
+    assert row["can_recover_reference_audio"] is False
+    assert row["discovered_reference_candidates"][0]["is_audio_candidate"] is False
+    assert row["blocked_reason"] == "no_isolated_reference_candidate_found"
+
+
+def test_foreign_reference_manifest_keeps_row_blocked_with_machine_reason(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "allowed"
+    source_audio = touch(allowed_root / "be-nicegreenhorn.mp3")
+    generated_vocal = touch(allowed_root / "generated_vocals.flac")
+    reference_manifest = write_json(
+        allowed_root / "square_oxygen_reference.json",
+        {
+            "schema": "mac_reference_bundle.v1",
+            "reference_track_identity": {"track_id": "square-oxygen"},
+            "track_name": "Square a Saw - Oxygen",
+        },
+    )
+    manifest = source_manifest(tmp_path / "manifests" / "source.json", source_audio=source_audio, generated_vocal=generated_vocal)
+    mapping = mapping_row(
+        "bench-foreign-reference",
+        source_manifest_path=manifest,
+        source_audio=source_audio,
+        generated_vocal=generated_vocal,
+        track_hash="be-nicegreenhorn",
+    )
+    mapping["source_track_identity"] = {"track_id": "be-nicegreenhorn"}
+    mapping["rejected_reference_track_identity"] = {"track_id": "square-oxygen"}
+    mapping["reference_mismatch_status"] = "reference_bundle_mismatched_to_source"
+    mapping_plan, mapping_manifest, docker_verification, reference_recovery, collected, benchmark, golden = make_inputs(tmp_path, [mapping])
+    reference_recovery.write_text(
+        json.dumps(
+            {
+                "case_id": "bench-foreign-reference",
+                "track_hash": "be-nicegreenhorn",
+                "stem_type": "vocal",
+                "split": "train",
+                "source_manifest": str(manifest),
+                "recovery_status": "blocked_missing_reference",
+                "discovered_audio_inputs": [],
+                "discovered_reference_inputs": [
+                    {
+                        "type": "reference_vocal",
+                        "path": str(reference_manifest),
+                        "exists": True,
+                        "source_key": "foreign_reference_manifest",
+                    }
+                ],
+                "rejected_reference_track_identity": {"track_id": "square-oxygen"},
+                "forbidden_actions": ["no_audio_copy"],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = build_reference_path_recovery_plan(
+        source_path_mapping_jsonl=mapping_plan,
+        source_path_mapping_manifest_json=mapping_manifest,
+        docker_mount_verification_json=docker_verification,
+        reference_recovery_plan_jsonl=reference_recovery,
+        collected_evidence_jsonl=collected,
+        hard_case_benchmark_jsonl=benchmark,
+        golden_jsonl=golden,
+        reference_search_roots=[allowed_root],
+    )
+    row = rows_by_case(result)["bench-foreign-reference"]
+
+    assert row["recovery_status"] == "blocked_missing_reference"
+    assert row["can_recover_reference_audio"] is False
+    assert row["blocked_reason"] == "reference_bundle_mismatched_to_source"
+    assert row["reference_mismatch_status"] == "reference_bundle_mismatched_to_source"
+    assert row["discovered_reference_candidates"][0]["is_audio_candidate"] is False
+
+
 def test_ambiguous_reference_candidates_are_blocked(tmp_path: Path) -> None:
     allowed_root = tmp_path / "allowed"
     source_audio = touch(allowed_root / "mix.wav")
@@ -292,6 +419,7 @@ def test_output_is_deterministic_summary_matches_and_no_audio_or_metrics_are_cre
         if line.strip()
     ]
     manifest_payload = json.loads((output_dir / "reference_path_recovery_manifest.json").read_text(encoding="utf-8"))
+    assert manifest_payload["schema"] == "reference_path_recovery_manifest.v1"
     assert len(output_rows) == first["summary"]["total_rows"]
     assert manifest_payload["total_rows"] == len(output_rows)
     assert not list(output_dir.glob("*.flac"))

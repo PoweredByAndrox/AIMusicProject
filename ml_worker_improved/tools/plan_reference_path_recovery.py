@@ -260,6 +260,7 @@ def make_candidate_record(
         "path": str(path),
         "exists": path.exists(),
         "allowed_root": path_under_allowed_root(path, allowed_roots),
+        "is_audio_candidate": is_audio_path(str(path)),
         "source_key": source_key,
         "candidate_match_method": method,
     }
@@ -396,7 +397,11 @@ def candidate_methods(candidates: list[dict[str, Any]]) -> str:
 
 
 def decide_recovery_status(candidates: list[dict[str, Any]]) -> tuple[str, str, list[dict[str, Any]]]:
-    existing = [candidate for candidate in candidates if candidate.get("exists") is True]
+    existing = [
+        candidate
+        for candidate in candidates
+        if candidate.get("exists") is True and candidate.get("is_audio_candidate") is True
+    ]
     allowed = [candidate for candidate in existing if candidate.get("allowed_root") is True]
     outside = [candidate for candidate in existing if candidate.get("allowed_root") is False]
     if len(allowed) == 1:
@@ -406,6 +411,33 @@ def decide_recovery_status(candidates: list[dict[str, Any]]) -> tuple[str, str, 
     if outside:
         return "blocked_reference_outside_allowed_roots", "reference_candidate_outside_allowed_roots", outside
     return "blocked_missing_reference", "no_isolated_reference_candidate_found", []
+
+
+def track_id(identity: Any) -> str:
+    if not isinstance(identity, dict):
+        return ""
+    return str(identity.get("track_id") or identity.get("source_track_id") or identity.get("id") or "").strip()
+
+
+def first_dict_copy(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def reference_mismatch_reason(mapping_row: dict[str, Any], reference_recovery_row: dict[str, Any] | None) -> str:
+    explicit = str(mapping_row.get("reference_mismatch_status") or "")
+    if explicit:
+        return explicit
+    source_id = track_id(mapping_row.get("source_track_identity"))
+    rejected_identity = mapping_row.get("rejected_reference_track_identity")
+    if not isinstance(rejected_identity, dict):
+        rejected_identity = (reference_recovery_row or {}).get("rejected_reference_track_identity")
+    reference_id = track_id(rejected_identity)
+    if source_id and reference_id and source_id != reference_id:
+        return "reference_bundle_mismatched_to_source"
+    return ""
 
 
 def required_next_tool_for(status: str) -> str:
@@ -455,6 +487,11 @@ def recovery_row(
     )
     candidates = dedupe_records(explicit_candidates + filesystem_candidates)
     status, blocked_reason, decisive_candidates = decide_recovery_status(candidates)
+    mismatch_reason = reference_mismatch_reason(mapping_row, reference_recovery_row)
+    if mismatch_reason:
+        status = "blocked_missing_reference"
+        blocked_reason = mismatch_reason
+        decisive_candidates = []
     if source_manifest_error and status == "blocked_missing_reference":
         blocked_reason = source_manifest_error
     if status not in RECOVERY_STATUSES:
@@ -486,6 +523,12 @@ def recovery_row(
         "split": str(mapping_row.get("split") or ""),
         "source_manifest": source_manifest,
         "current_mapping_status": str(mapping_row.get("mapping_status") or ""),
+        "source_track_identity": first_dict_copy(mapping_row.get("source_track_identity")),
+        "reference_mismatch_status": mismatch_reason,
+        "rejected_reference_track_identity": first_dict_copy(
+            mapping_row.get("rejected_reference_track_identity"),
+            (reference_recovery_row or {}).get("rejected_reference_track_identity"),
+        ),
         "discovered_source_audio_paths": source_audio_paths,
         "discovered_reference_candidates": candidates,
         "missing_reference_types": missing_reference_types,
@@ -553,8 +596,8 @@ def build_manifest(
         "golden_jsonl": str(golden_jsonl),
     }
     return {
-        "schema": "reference_path_recovery_manifest.v1",
         **summary,
+        "schema": "reference_path_recovery_manifest.v1",
         "input_files": input_files,
         "input_sha256": {
             key: sha256_file(Path(value))

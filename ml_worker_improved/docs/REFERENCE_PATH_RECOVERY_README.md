@@ -3,6 +3,11 @@
 `tools/plan_reference_path_recovery.py` consumes Phase 10E source-path mapping rows and plans
 reference path recovery for rows still blocked by missing vocal/minus reference paths.
 
+For Mac candidate readiness summaries, use
+`tools/plan_mac_reference_path_recovery.py` as a metadata-only adapter. It builds
+the standard Phase 10F input files from a blocked
+`mac_candidate_readiness_summary.v1` and then calls this planner.
+
 This phase is plan-only. It does not copy audio, read audio content, hash audio content, build a
 ground-truth bundle, run reference metrics, promote artifacts, start training, change policy,
 change thresholds, add models, add weights, or add cleanup/debleed/denoise stages.
@@ -59,6 +64,12 @@ Each output row includes:
 
 Generated, selected, listen-pack, adaptive, proxy, and candidate audio paths are not treated as
 reference paths. This prevents a failed/generated vocal stem from being promoted into a reference.
+
+Manifest-like paths such as `.json` files are also not decisive reference audio. They may remain in
+`discovered_reference_candidates` as evidence, but `reference_candidate_found` requires an existing
+audio path under an allowed root. If upstream metadata says the candidate belongs to a different
+source identity, the row remains blocked with
+`blocked_reason=reference_bundle_mismatched_to_source`.
 
 ## Allowed Roots
 

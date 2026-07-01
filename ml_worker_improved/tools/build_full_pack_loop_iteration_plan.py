@@ -263,6 +263,38 @@ def minus_repair_row(queue_item: dict[str, Any], jobs: Sequence[dict[str, Any]])
     }
 
 
+def mac_selected_candidate_reference_row(queue_item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "full_pack_loop_iteration_action.v1",
+        "queue_item_id": str(queue_item.get("queue_item_id") or ""),
+        "stem_type": normalize_stem(queue_item.get("stem_type")),
+        "route_intent": str(queue_item.get("route_intent") or ""),
+        "issue_tags": [str(tag) for tag in queue_item.get("issue_tags") or [] if str(tag)],
+        "source_audio_path": str(queue_item.get("source_audio_path") or queue_item.get("audio_path") or ""),
+        "selected_candidate_id": str(queue_item.get("selected_candidate_id") or ""),
+        "source_track_identity": dict(queue_item.get("source_track_identity") or {}) if isinstance(queue_item.get("source_track_identity"), dict) else {},
+        "reference_bundle_status": str(queue_item.get("reference_bundle_status") or "missing_for_actual_source"),
+        "reference_mismatch_status": str(queue_item.get("reference_mismatch_status") or ""),
+        "full_holdout_resolution_status": str(queue_item.get("full_holdout_resolution_status") or ""),
+        "readiness_summary_json": str(queue_item.get("readiness_summary_json") or ""),
+        "action_status": "blocked_mac_reference_recovery_required",
+        "training_job_statuses": [],
+        "required_next_actions": [
+            "reference_path_recovery",
+            "verified_reference_corpus_expand",
+            "holdout_eval_gate",
+            "train_ready_decision_gate",
+            "full_pack_gate_rebuild",
+        ],
+        "docker_commands": [],
+        "expected_acceleration_mode": "external_only_cpu_reference_planning",
+        "execution_started": False,
+        "training_started": False,
+        "release_ready": False,
+        "can_publish_as_result": False,
+    }
+
+
 def build_action_rows(queue_rows: Sequence[dict[str, Any]], jobs_by_stem: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     failed: list[str] = []
@@ -275,6 +307,8 @@ def build_action_rows(queue_rows: Sequence[dict[str, Any]], jobs_by_stem: dict[s
             rows.append(stem_training_row(queue_item, jobs))
         elif intent == "minus_repair":
             rows.append(minus_repair_row(queue_item, jobs))
+        elif intent == "mac_selected_candidate_reference_gap":
+            rows.append(mac_selected_candidate_reference_row(queue_item))
         else:
             failed.append(f"unsupported_route_intent:{intent}")
     return rows, stable_unique(failed)
@@ -287,6 +321,8 @@ def plan_status(rows: Sequence[dict[str, Any]], failed: Sequence[str]) -> str:
         if all(str(row.get("action_status") or "").startswith("ready_") for row in rows):
             return "ready_for_gpu_training_actions"
         return "partial_ready_with_blockers"
+    if any(row.get("route_intent") == "mac_selected_candidate_reference_gap" for row in rows):
+        return "blocked_waiting_for_mac_reference_recovery"
     if any(row.get("route_intent") == "minus_repair" for row in rows):
         return "blocked_waiting_for_verified_reference_corpus_and_minus_repair"
     return "blocked_waiting_for_verified_reference_corpus"
