@@ -238,7 +238,15 @@ def test_materializer_converts_persistent_unsafe_delta_segments_to_leakage_windo
         str(tmp_path / "src" / "vocals.flac"),
         str(tmp_path / "out" / "rows.jsonl"),
     ]
-    assert command[-5:] == ["--candidate-id", "it017_air", "--track-id", "it017_air", "--short-output-names"]
+    assert command[-7:] == [
+        "--candidate-id",
+        "it017_air",
+        "--track-id",
+        "it017_air",
+        "--projection-mode",
+        "segment_local",
+        "--short-output-names",
+    ]
 
     judge_rows = read_jsonl(tmp_path / "out" / "rows.jsonl")
     assert len(judge_rows) == 1
@@ -366,5 +374,10 @@ def test_cli_allows_explicit_native_runtime_and_materializes_native_command(tmp_
     assert manifest["native_runtime_allowed"] is True
     assert command_row["runtime_environment"] == "native_mac_cpu_dsp"
     assert command_row["native_runtime_allowed"] is True
-    assert command_row["native_command"][-1] == "--allow-native-runtime"
+    assert command_row["native_command"][-4:] == [
+        "--projection-mode",
+        "segment_local",
+        "--short-output-names",
+        "--allow-native-runtime",
+    ]
     assert manifest["delivery_allowed"] is False

@@ -521,6 +521,8 @@ def materialize_minus_delta_leakage_repair(
         resolved_candidate_id,
         "--track-id",
         resolved_candidate_id,
+        "--projection-mode",
+        "segment_local",
         "--short-output-names",
     ]
     native_command = [*command, "--allow-native-runtime"] if native_runtime_allowed else []

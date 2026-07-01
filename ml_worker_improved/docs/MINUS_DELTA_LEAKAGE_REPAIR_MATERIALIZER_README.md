@@ -55,7 +55,10 @@ progress.jsonl
 
 `rows.jsonl` contains a `windowed_minus_judge_row.v1` wrapper with
 `window_metrics` for the selected leakage windows. `cmds.jsonl` contains the
-candidate-only Docker command for the existing leakage repair route.
+candidate-only Docker command for the existing leakage repair route. Because
+the materializer targets segment-level delta windows, the generated repair
+command uses `--projection-mode segment_local` instead of the repair tool's
+global default.
 
 ## Delivery Contract
 
