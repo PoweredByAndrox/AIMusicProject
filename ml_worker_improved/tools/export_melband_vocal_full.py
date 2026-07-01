@@ -114,6 +114,37 @@ def _audio_file_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def choose_primary_stem(
+    *,
+    primary_stem: str | None = None,
+    stem_provenance: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    normalized_primary = normalize_model_stem_name(primary_stem)
+    if normalized_primary in {"vocals", "instrumental"}:
+        return normalized_primary
+
+    model_output_stems = [
+        stem_name
+        for stem_name in ("vocals", "instrumental")
+        if (stem_provenance or {}).get(stem_name, {}).get("model_output") is True
+        and (stem_provenance or {}).get(stem_name, {}).get("residual_companion") is not True
+    ]
+    if len(model_output_stems) == 1:
+        return model_output_stems[0]
+    return "vocals"
+
+
+def primary_stem_from_output_contract(output_contract: dict[str, Any]) -> str | None:
+    expected_model_stems = [
+        normalize_model_stem_name(stem_name)
+        for stem_name in tuple(output_contract.get("expected_model_stems") or ())
+    ]
+    expected_model_stems = [stem_name for stem_name in expected_model_stems if stem_name in {"vocals", "instrumental"}]
+    if len(expected_model_stems) == 1:
+        return expected_model_stems[0]
+    return None
+
+
 def build_full_track_stem_manifest(
     *,
     source_audio_path: Path,
@@ -135,17 +166,20 @@ def build_full_track_stem_manifest(
     stem_provenance: dict[str, dict[str, Any]] | None = None,
     residual_companion_materialized: bool = False,
     cuda_preflight: dict[str, Any] | None = None,
+    primary_stem: str | None = None,
 ) -> dict[str, Any]:
     stem_provenance = stem_provenance or {}
+    target_stem = choose_primary_stem(primary_stem=primary_stem, stem_provenance=stem_provenance)
+    target_audio_path = instrumental_flac_path if target_stem == "instrumental" else vocals_flac_path
     vocals_summary = {
         "path": str(vocals_flac_path),
-        "role": "target",
+        "role": "target" if target_stem == "vocals" else "companion",
         **_audio_file_summary(vocals_flac_path),
     }
     vocals_summary.update(stem_provenance.get("vocals", {}))
     instrumental_summary = {
         "path": str(instrumental_flac_path),
-        "role": "companion",
+        "role": "target" if target_stem == "instrumental" else "companion",
         **_audio_file_summary(instrumental_flac_path),
     }
     instrumental_summary.update(stem_provenance.get("instrumental", {}))
@@ -154,6 +188,8 @@ def build_full_track_stem_manifest(
         "source_audio_path": str(source_audio_path),
         "model_id": model_id,
         "model_name": model_id,
+        "target_stem": target_stem,
+        "target_audio_path": str(target_audio_path),
         "model": {
             "model_id": model_id,
             "name": model_display_name,
@@ -223,6 +259,7 @@ def write_full_track_stem_manifest(
     stem_provenance: dict[str, dict[str, Any]] | None = None,
     residual_companion_materialized: bool = False,
     cuda_preflight: dict[str, Any] | None = None,
+    primary_stem: str | None = None,
 ) -> Path:
     manifest = build_full_track_stem_manifest(
         source_audio_path=source_audio_path,
@@ -244,6 +281,7 @@ def write_full_track_stem_manifest(
         stem_provenance=stem_provenance,
         residual_companion_materialized=residual_companion_materialized,
         cuda_preflight=cuda_preflight,
+        primary_stem=primary_stem,
     )
     manifest_path = output_dir / "stem_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -625,6 +663,10 @@ def main() -> None:
         vocals_sr = int(resolved_stems["vocals_sample_rate"])
         instrumental_audio = resolved_stems["instrumental_audio"]
         instrumental_sr = int(resolved_stems["instrumental_sample_rate"])
+        target_stem = choose_primary_stem(
+            primary_stem=primary_stem_from_output_contract(output_contract),
+            stem_provenance=resolved_stems["stem_provenance"],
+        )
         tuned_vocals_audio = apply_light_debleed_presence(
             vocals_audio,
             instrumental_audio,
@@ -720,12 +762,14 @@ def main() -> None:
             stem_provenance=resolved_stems["stem_provenance"],
             residual_companion_materialized=bool(resolved_stems["residual_companion_materialized"]),
             cuda_preflight=cuda_preflight,
+            primary_stem=target_stem,
         )
 
         if listen_dir is not None:
             listen_dir.mkdir(parents=True, exist_ok=True)
+            target_flac_path = instrumental_flac_path if target_stem == "instrumental" else vocals_flac_path
             copy_listen_file(raw_ref_flac_path, listen_dir / "00_raw_ref.flac")
-            copy_listen_file(vocals_flac_path, listen_dir / args.listen_label)
+            copy_listen_file(target_flac_path, listen_dir / args.listen_label)
             (listen_dir / "00_README.txt").write_text(
                 "Listen only here.\n00 = full raw source reference.\nOther files = full-track Mel-Band RoFormer candidates.\n",
                 encoding="utf-8",
@@ -735,7 +779,7 @@ def main() -> None:
             if candidate_map_path.exists():
                 candidate_map = json.loads(candidate_map_path.read_text(encoding="utf-8"))
             candidate_map["00_raw_ref.flac"] = str(raw_ref_flac_path)
-            candidate_map[args.listen_label] = str(vocals_flac_path)
+            candidate_map[args.listen_label] = str(target_flac_path)
             candidate_map_path.write_text(json.dumps(candidate_map, indent=2, ensure_ascii=False), encoding="utf-8")
 
         elapsed_sec = round(time.time() - start_wall, 3)

@@ -528,6 +528,124 @@ def test_manifest_records_residual_companion_materialization(tmp_path: Path) -> 
     assert manifest["stems"]["instrumental"]["source"] == "model_output"
 
 
+def test_manifest_marks_instrumental_model_output_as_target_stem(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    vocals_path = output_dir / "vocals.flac"
+    instrumental_path = output_dir / "instrumental.flac"
+    raw_ref_path = output_dir / "raw_ref.flac"
+    output_dir.mkdir()
+    for path in (source_audio_path, vocals_path, instrumental_path, raw_ref_path):
+        _write_tiny_flac(path)
+
+    manifest = module.build_full_track_stem_manifest(
+        source_audio_path=source_audio_path,
+        vocals_flac_path=vocals_path,
+        instrumental_flac_path=instrumental_path,
+        raw_ref_flac_path=raw_ref_path,
+        repo_path=Path("/repo"),
+        model_path=Path("/becruily_instrumental.ckpt"),
+        config_template_path=Path("/becruily_instrumental.yaml"),
+        runtime_config_path=Path("/runtime.yaml"),
+        device_id=0,
+        num_overlap=2,
+        sample_rate=44100,
+        frames=44100,
+        elapsed_sec=1.0,
+        postprocess={"name": None},
+        model_id="becruily_instrumental_vocals",
+        model_display_name="Becruily MelBand RoFormer instrumental checkpoint",
+        stem_provenance={
+            "vocals": {"source": "residual_from_raw_minus_instrumental", "model_output": False},
+            "instrumental": {"source": "model_output", "model_output": True},
+        },
+        residual_companion_materialized=True,
+    )
+
+    assert manifest["target_stem"] == "instrumental"
+    assert manifest["target_audio_path"] == str(instrumental_path)
+    assert manifest["stems"]["instrumental"]["role"] == "target"
+    assert manifest["stems"]["vocals"]["role"] == "companion"
+
+
+def test_main_listen_copy_uses_instrumental_for_single_stem_instrumental_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    listen_dir = tmp_path / "listen"
+    repo_path = tmp_path / "repo"
+    model_path = tmp_path / "model.ckpt"
+    config_path = tmp_path / "config.yaml"
+    repo_path.mkdir()
+    model_path.write_text("stub checkpoint", encoding="utf-8")
+    _write_tiny_flac(source_audio_path, sample_rate=44100, frames=8)
+    config_path.write_text(
+        yaml.dump(
+            {
+                "audio": {"chunk_size": 44100},
+                "model": {"num_stems": 1},
+                "training": {"target_instrument": "Instrumental"},
+                "inference": {"num_overlap": 2},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    raw_audio = np.array([[0.7, -0.7], [0.2, -0.2]], dtype=np.float32)
+    instrumental_audio = np.array([[0.3, -0.4], [0.1, -0.1]], dtype=np.float32)
+
+    def fake_save_audio_window_as_wav(_source: Path, target: Path, *_args, **_kwargs):
+        sf.write(str(target), raw_audio, 44100, subtype="FLOAT")
+        return 44100, int(raw_audio.shape[0])
+
+    def fake_run(command: list[str], *_args, **_kwargs):
+        store_dir = Path(command[command.index("--store_dir") + 1])
+        store_dir.mkdir(parents=True, exist_ok=True)
+        sf.write(str(store_dir / "full_track_instrumental.wav"), instrumental_audio, 44100, subtype="FLOAT")
+        return module.subprocess.CompletedProcess(command, 0, stdout="fake inference\n", stderr="")
+
+    monkeypatch.setattr(module, "require_docker_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(module, "verify_cuda_inference_device", lambda _device_id: {"device_id": 0, "device_count": 1, "device_name": "test"})
+    monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "apply_light_debleed_presence", _neutral_audio)
+    monkeypatch.setattr(module, "apply_peak_note_debleed", _neutral_audio)
+    monkeypatch.setattr(module, "apply_windowed_note_notch", _neutral_audio)
+    monkeypatch.setattr(module, "apply_surgical_notches", _neutral_audio)
+    monkeypatch.setattr(module, "apply_windowed_band_subtract", _neutral_audio)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_melband_vocal_full.py",
+            str(source_audio_path),
+            str(output_dir),
+            "--repo-path",
+            str(repo_path),
+            "--model-path",
+            str(model_path),
+            "--config-path",
+            str(config_path),
+            "--listen-dir",
+            str(listen_dir),
+            "--listen-label",
+            "candidate.flac",
+            "--manifest-model-id",
+            "becruily_instrumental_vocals",
+        ],
+    )
+
+    module.main()
+
+    listen_audio, _ = sf.read(str(listen_dir / "candidate.flac"), always_2d=True)
+    assert float(np.max(np.abs(listen_audio - instrumental_audio))) < 1e-6
+    candidate_map = json.loads((listen_dir / "candidate_map.json").read_text(encoding="utf-8"))
+    assert candidate_map["candidate.flac"].endswith("instrumental.flac")
+
+
 def test_resolves_melband_outputs_case_insensitively(tmp_path: Path) -> None:
     module = _load_melband_full_module()
     model_output_dir = tmp_path / "model_output"

@@ -53,7 +53,10 @@ registry, relax thresholds, or mark anything `release_ready`.
   with `/app/vendor/becruily_instrumental` checkpoint/config paths. It is a
   reproducible minus/instrumental candidate only; it still requires downstream
   judge, selector, artifact contract, and stem QC gates before any listen-pack
-  decision.
+  decision. For single-stem instrumental checkpoints, the exporter manifest must
+  mark `instrumental` as `target_stem` and copy `instrumental.flac` into any
+  diagnostic listen label; the materialized `vocals.flac` is a residual
+  companion/debug stem, not the primary minus candidate.
 - Optional route priors from `build_no_reference_corpus_route_priors.py` can
   block routes that repeatedly failed mode-specific no-reference judging. These
   jobs stay in the matrix as `job_status=blocked_route_prior`; they are not
