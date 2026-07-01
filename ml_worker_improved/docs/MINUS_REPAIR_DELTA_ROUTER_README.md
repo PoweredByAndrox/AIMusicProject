@@ -39,6 +39,13 @@ blockers:
 The planner blocks repeating the same repair route when the delta gate reports
 zero blocker reduction.
 
+When the selected route is `judge_guided_minus_vocal_leakage_repair`, pass the
+router plan to `tools/materialize_minus_delta_leakage_repair.py`. That
+materializer converts persistent unsafe delta rows into windowed judge rows by
+joining the delta evidence with the post-repair self-judge segments. It is the
+safe bridge from plan-only routing to the existing candidate-only leakage repair
+CLI.
+
 ## Outputs
 
 The tool writes short Windows-safe artifacts:

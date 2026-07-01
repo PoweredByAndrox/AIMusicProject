@@ -21,6 +21,10 @@ The pipeline is mode-specific for `stem_type=minus`:
 7. if the delta gate blocks the repair, run
    `plan_minus_repair_delta_router.py` to choose the next candidate-only route
    and prevent repeating the same ineffective repair parameters;
+7a. if that router selects `judge_guided_minus_vocal_leakage_repair`, run
+   `materialize_minus_delta_leakage_repair.py` to convert persistent unsafe
+   delta rows plus post-repair self-judge segment timing into a safe
+   candidate-only leakage repair command;
 8. run `run_no_reference_result_judge.py` with `score_mode=minus` so each row carries `minus_score`,
    `minus_decision`, `minus_blockers`, and `minus_musical_detail_preservation_gate`;
 9. run `run_no_reference_candidate_selector.py` with `score_mode=minus`;
