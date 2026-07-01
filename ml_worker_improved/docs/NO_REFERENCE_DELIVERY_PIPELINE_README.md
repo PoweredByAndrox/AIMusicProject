@@ -34,6 +34,12 @@ The final listen-preview manifest can be listenable only when:
   preflight tolerance;
 - dense windowed judges pass for `score_mode=vocal`, `score_mode=minus`, and
   `score_mode=both`;
+- dense gate rows carry explicit selected-mode evidence: `vocal_score`,
+  `vocal_decision`, and `vocal_blockers` for vocal; `minus_score`,
+  `minus_decision`, and `minus_blockers` for minus; and
+  `pair_compatibility_score`, `pair_decision`, and `pair_blockers` for both.
+  Generic `decision=accept_candidate` or `overall_no_reference_score` alone is
+  not sufficient delivery evidence;
 - if phase alignment rescue is used, a corrected candidate is selected, the
   selected correction row has
   `requires_post_correction_judge=true` and the post-correction dense judges

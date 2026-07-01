@@ -62,7 +62,7 @@ def accepted_phase_correction_row() -> dict:
 
 
 def judge_row(mode: str, *, decision: str = "accept_candidate", candidate_id: str = "mode_specific_pair:vocal-a:minus-b") -> dict:
-    return {
+    row = {
         "track_id": "track-a",
         "candidate_id": candidate_id,
         "score_mode": mode,
@@ -76,6 +76,16 @@ def judge_row(mode: str, *, decision: str = "accept_candidate", candidate_id: st
         "minus_blockers": [] if mode == "minus" and decision == "accept_candidate" else (["severe_vocal_bleed_in_minus"] if mode == "minus" else []),
         "pair_blockers": [] if mode == "both" and decision == "accept_candidate" else (["phase_collapse"] if mode == "both" else []),
     }
+    if mode == "vocal":
+        row["vocal_score"] = 0.83 if decision == "accept_candidate" else 0.20
+        row["vocal_decision"] = decision
+    elif mode == "minus":
+        row["minus_score"] = 0.84 if decision == "accept_candidate" else 0.20
+        row["minus_decision"] = decision
+    elif mode == "both":
+        row["pair_compatibility_score"] = 0.76 if decision == "accept_candidate" else 0.20
+        row["pair_decision"] = "pair_compatible" if decision == "accept_candidate" else "blocked_pair_incompatible"
+    return row
 
 
 def write_gate_inputs(tmp_path: Path, *, minus_decision: str = "accept_candidate", include_both: bool = True) -> dict[str, Path]:
@@ -107,8 +117,11 @@ def test_gate_accepts_only_when_optimizer_and_all_dense_modes_pass(tmp_path: Pat
     assert manifest["audio_exported"] is False
     row = manifest["accepted_listen_preview_rows"][0]
     assert row["dense_delivery_gate"]["vocal"]["decision"] == "accept_candidate"
+    assert row["dense_delivery_gate"]["vocal"]["vocal_blockers"] == []
     assert row["dense_delivery_gate"]["minus"]["decision"] == "accept_candidate"
+    assert row["dense_delivery_gate"]["minus"]["minus_blockers"] == []
     assert row["dense_delivery_gate"]["both"]["decision"] == "accept_candidate"
+    assert row["dense_delivery_gate"]["both"]["pair_blockers"] == []
     assert row["can_mark_release_ready"] is False
     assert manifest["safety"]["audio_copied"] is False
     assert manifest["safety"]["audio_exported"] is False
@@ -193,6 +206,133 @@ def test_gate_blocks_missing_dense_evidence(tmp_path: Path) -> None:
     assert manifest["delivery_allowed"] is False
     assert manifest["dominant_failure_reason"] == "dense_delivery_gate_failed"
     assert "both" in manifest["skipped_rows"][0]["failed_modes"]
+
+
+def test_gate_blocks_vocal_dense_row_missing_mode_specific_fields(tmp_path: Path) -> None:
+    paths = write_gate_inputs(tmp_path)
+    vocal_row = judge_row("vocal")
+    del vocal_row["vocal_score"]
+    del vocal_row["vocal_decision"]
+    del vocal_row["vocal_blockers"]
+    paths["vocal"] = write_jsonl(tmp_path / "vocal.jsonl", [vocal_row])
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=paths["optimizer"],
+        vocal_judge_jsonl=paths["vocal"],
+        minus_judge_jsonl=paths["minus"],
+        both_judge_jsonl=paths["both"],
+        min_window_count=5,
+    )
+
+    skipped = manifest["skipped_rows"][0]
+    assert manifest["delivery_allowed"] is False
+    assert "vocal" in skipped["failed_modes"]
+    assert {
+        "missing_mode_specific_score:vocal_score",
+        "missing_mode_specific_decision:vocal_decision",
+        "missing_mode_specific_blockers:vocal_blockers",
+    }.issubset(set(skipped["failed_checks"]))
+
+
+def test_gate_blocks_minus_dense_row_missing_mode_blockers(tmp_path: Path) -> None:
+    paths = write_gate_inputs(tmp_path)
+    minus_row = judge_row("minus")
+    del minus_row["minus_blockers"]
+    paths["minus"] = write_jsonl(tmp_path / "minus.jsonl", [minus_row])
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=paths["optimizer"],
+        vocal_judge_jsonl=paths["vocal"],
+        minus_judge_jsonl=paths["minus"],
+        both_judge_jsonl=paths["both"],
+        min_window_count=5,
+    )
+
+    skipped = manifest["skipped_rows"][0]
+    assert manifest["delivery_allowed"] is False
+    assert "minus" in skipped["failed_modes"]
+    assert "missing_mode_specific_blockers:minus_blockers" in skipped["failed_checks"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "missing_key", "expected_failure"),
+    [
+        ("minus", "minus_score", "missing_mode_specific_score:minus_score"),
+        ("minus", "minus_decision", "missing_mode_specific_decision:minus_decision"),
+        ("both", "pair_compatibility_score", "missing_mode_specific_score:pair_compatibility_score"),
+        ("both", "pair_blockers", "missing_mode_specific_blockers:pair_blockers"),
+    ],
+)
+def test_gate_blocks_missing_individual_mode_specific_fields(
+    tmp_path: Path,
+    mode: str,
+    missing_key: str,
+    expected_failure: str,
+) -> None:
+    paths = write_gate_inputs(tmp_path)
+    row = judge_row(mode)
+    del row[missing_key]
+    paths[mode] = write_jsonl(tmp_path / f"{mode}.jsonl", [row])
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=paths["optimizer"],
+        vocal_judge_jsonl=paths["vocal"],
+        minus_judge_jsonl=paths["minus"],
+        both_judge_jsonl=paths["both"],
+        min_window_count=5,
+    )
+
+    skipped = manifest["skipped_rows"][0]
+    assert manifest["delivery_allowed"] is False
+    assert mode in skipped["failed_modes"]
+    assert expected_failure in skipped["failed_checks"]
+
+
+def test_gate_blocks_generic_both_accept_only_evidence(tmp_path: Path) -> None:
+    paths = write_gate_inputs(tmp_path)
+    both_row = judge_row("both")
+    del both_row["pair_compatibility_score"]
+    del both_row["pair_decision"]
+    del both_row["pair_blockers"]
+    both_row["overall_no_reference_score"] = 0.99
+    paths["both"] = write_jsonl(tmp_path / "both.jsonl", [both_row])
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=paths["optimizer"],
+        vocal_judge_jsonl=paths["vocal"],
+        minus_judge_jsonl=paths["minus"],
+        both_judge_jsonl=paths["both"],
+        min_window_count=5,
+    )
+
+    skipped = manifest["skipped_rows"][0]
+    assert manifest["delivery_allowed"] is False
+    assert "both" in skipped["failed_modes"]
+    assert {
+        "missing_mode_specific_score:pair_compatibility_score",
+        "missing_mode_specific_decision:pair_decision",
+        "missing_mode_specific_blockers:pair_blockers",
+    }.issubset(set(skipped["failed_checks"]))
+
+
+def test_gate_blocks_both_dense_row_missing_pair_decision(tmp_path: Path) -> None:
+    paths = write_gate_inputs(tmp_path)
+    both_row = judge_row("both")
+    del both_row["pair_decision"]
+    paths["both"] = write_jsonl(tmp_path / "both.jsonl", [both_row])
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=paths["optimizer"],
+        vocal_judge_jsonl=paths["vocal"],
+        minus_judge_jsonl=paths["minus"],
+        both_judge_jsonl=paths["both"],
+        min_window_count=5,
+    )
+
+    skipped = manifest["skipped_rows"][0]
+    assert manifest["delivery_allowed"] is False
+    assert "both" in skipped["failed_modes"]
+    assert "missing_mode_specific_decision:pair_decision" in skipped["failed_checks"]
 
 
 def test_gate_rejects_min_window_count_below_contract(tmp_path: Path) -> None:

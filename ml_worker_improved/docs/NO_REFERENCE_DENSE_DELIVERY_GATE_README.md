@@ -21,7 +21,18 @@ A row can become `accepted_for_listen_pack` only when:
 - every mode has `decision=accept_candidate`;
 - each mode has at least `--min-window-count` windows;
 - mode-specific blockers are empty;
-- `both` mode is pair-compatible.
+- `both` mode is pair-compatible;
+- accepted embedded gate views are mode-specific, not generic:
+  `vocal_score`, `vocal_decision=accept_candidate`, and `vocal_blockers`
+  for vocal; `minus_score`, `minus_decision=accept_candidate`, and
+  `minus_blockers` for minus; `pair_compatibility_score`,
+  `pair_decision=pair_compatible`, and `pair_blockers` for the pair.
+
+Generic `decision=accept_candidate` plus `window_count` is diagnostic-only and
+is not sufficient evidence for listen-preview promotion.
+Optimizer metadata such as `pair_compatibility_decision` and generic
+`overall_no_reference_score` also cannot substitute for dense
+`pair_decision`, `pair_compatibility_score`, and `pair_blockers`.
 
 The output remains listen preview only:
 

@@ -39,6 +39,10 @@ SAFETY_FLAGS = {
 }
 
 
+MODES = ("vocal", "minus", "both")
+MIN_DENSE_WINDOW_COUNT = 5
+
+
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -71,6 +75,81 @@ def stable_unique(values: Iterable[Any]) -> list[str]:
             seen.add(text)
             result.append(text)
     return result
+
+
+def as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if str(item)]
+    text = str(value)
+    return [text] if text else []
+
+
+def as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def dense_gate_contract(mode: str) -> tuple[str, str, str, str]:
+    if mode == "vocal":
+        return ("vocal_score", "vocal_decision", "vocal_blockers", "accept_candidate")
+    if mode == "minus":
+        return ("minus_score", "minus_decision", "minus_blockers", "accept_candidate")
+    return ("pair_compatibility_score", "pair_decision", "pair_blockers", "pair_compatible")
+
+
+def dense_gate_min_window_count(gate_manifest: dict[str, Any]) -> int:
+    min_window_count = as_int(gate_manifest.get("min_window_count") or MIN_DENSE_WINDOW_COUNT, default=MIN_DENSE_WINDOW_COUNT)
+    return max(min_window_count, MIN_DENSE_WINDOW_COUNT)
+
+
+def dense_gate_mode_failures(mode: str, gate: Any, *, min_window_count: int) -> list[str]:
+    if not isinstance(gate, dict):
+        return [f"missing_dense_delivery_gate_mode:{mode}"]
+
+    score_key, decision_key, blocker_key, accepted_decision = dense_gate_contract(mode)
+    failures: list[str] = []
+    if str(gate.get("decision") or "") != "accept_candidate":
+        failures.append(f"{mode}_decision_not_accepted")
+    if as_int(gate.get("window_count")) < min_window_count:
+        failures.append(f"{mode}_insufficient_window_count")
+    if score_key not in gate or gate.get(score_key) in (None, ""):
+        failures.append(f"missing_mode_specific_score:{score_key}")
+    if decision_key not in gate or gate.get(decision_key) in (None, ""):
+        failures.append(f"missing_mode_specific_decision:{decision_key}")
+    elif str(gate.get(decision_key) or "") != accepted_decision:
+        failures.append(f"{mode}_{decision_key}_not_accepted")
+    if blocker_key not in gate or gate.get(blocker_key) is None:
+        failures.append(f"missing_mode_specific_blockers:{blocker_key}")
+    elif as_list(gate.get(blocker_key)):
+        failures.append(f"{mode}_{blocker_key}_present")
+    return failures
+
+
+def dense_gate_evidence_failures(row: Any, *, min_window_count: int) -> list[str]:
+    if not isinstance(row, dict):
+        return ["accepted_row_must_be_object"]
+    gate = row.get("dense_delivery_gate")
+    if not isinstance(gate, dict):
+        return ["missing_dense_delivery_gate"]
+
+    failures: list[str] = []
+    for mode in MODES:
+        failures.extend(dense_gate_mode_failures(mode, gate.get(mode), min_window_count=min_window_count))
+    return stable_unique(failures)
+
+
+def dense_gate_rows_evidence_failures(rows: Sequence[Any], *, min_window_count: int) -> list[str]:
+    failures: list[str] = []
+    for index, row in enumerate(rows):
+        for failure in dense_gate_evidence_failures(row, min_window_count=min_window_count):
+            failures.append(f"row:{index}:{failure}")
+    return stable_unique(failures)
 
 
 def is_accepted_optimizer_row(row: dict[str, Any]) -> bool:
@@ -139,6 +218,7 @@ def blocked_manifest(
     *,
     reason: str,
     dense_delivery_gate_manifest_json: Path | None = None,
+    dense_delivery_gate_evidence_failures: Sequence[str] = (),
 ) -> dict[str, Any]:
     return {
         "manifest_type": "no_reference_listen_preview",
@@ -159,6 +239,7 @@ def blocked_manifest(
         "skipped_count": len(rows),
         "accepted_listen_preview_rows": [],
         "skipped_rows": sorted(skipped_optimizer_rows(rows, skip_reason=reason), key=lambda item: (item["track_id"], item["candidate_id"])),
+        "dense_delivery_gate_evidence_failures": list(dense_delivery_gate_evidence_failures),
         "can_mark_release_ready": False,
         "can_publish_as_release": False,
         "audio_copied": False,
@@ -193,14 +274,20 @@ def build_manifest(optimizer_result_jsonl: Path, dense_delivery_gate_manifest_js
         dense_promotable = False
     accepted_rows = list(gate.get("accepted_listen_preview_rows") or [])
     skipped = list(gate.get("skipped_rows") or [])
-    has_dense_evidence = all(isinstance(row, dict) and row.get("dense_delivery_gate") for row in accepted_rows)
+    dense_evidence_failures = dense_gate_rows_evidence_failures(
+        accepted_rows,
+        min_window_count=dense_gate_min_window_count(gate),
+    )
+    has_dense_evidence = bool(accepted_rows) and not dense_evidence_failures
     delivery_allowed = bool(dense_promotable and accepted_rows and not skipped and has_dense_evidence)
     if not delivery_allowed:
+        reason = "dense_delivery_gate_missing_mode_specific_evidence" if dense_evidence_failures else "dense_delivery_gate_not_promotable"
         return blocked_manifest(
             optimizer_result_jsonl,
             rows,
-            reason="dense_delivery_gate_not_promotable",
+            reason=reason,
             dense_delivery_gate_manifest_json=dense_delivery_gate_manifest_json,
+            dense_delivery_gate_evidence_failures=dense_evidence_failures,
         )
 
     return {

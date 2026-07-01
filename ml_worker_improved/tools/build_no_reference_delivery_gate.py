@@ -94,6 +94,26 @@ def blocker_keys_for_mode(mode: str) -> tuple[str, ...]:
     return ("pair_blockers",)
 
 
+def mode_gate_contract(mode: str) -> tuple[str, str, str, str]:
+    if mode == "vocal":
+        return ("vocal_score", "vocal_decision", "vocal_blockers", "accept_candidate")
+    if mode == "minus":
+        return ("minus_score", "minus_decision", "minus_blockers", "accept_candidate")
+    return ("pair_compatibility_score", "pair_decision", "pair_blockers", "pair_compatible")
+
+
+def mode_schema_failures(mode: str, row: dict[str, Any]) -> list[str]:
+    score_key, decision_key, blocker_key, _ = mode_gate_contract(mode)
+    failures: list[str] = []
+    if score_key not in row or row.get(score_key) in (None, ""):
+        failures.append(f"missing_mode_specific_score:{score_key}")
+    if decision_key not in row or row.get(decision_key) in (None, ""):
+        failures.append(f"missing_mode_specific_decision:{decision_key}")
+    if blocker_key not in row or row.get(blocker_key) is None:
+        failures.append(f"missing_mode_specific_blockers:{blocker_key}")
+    return failures
+
+
 def dense_gate_view(mode: str, row: dict[str, Any] | None, *, min_window_count: int) -> tuple[dict[str, Any], list[str]]:
     if row is None:
         return {"decision": "missing_dense_judge_row", "window_count": 0}, ["missing_dense_judge_row"]
@@ -102,6 +122,12 @@ def dense_gate_view(mode: str, row: dict[str, Any] | None, *, min_window_count: 
     decision = str(row.get("decision") or "")
     if decision != "accept_candidate":
         failures.append(f"{mode}_decision_not_accepted")
+    schema_failures = mode_schema_failures(mode, row)
+    failures.extend(schema_failures)
+    _, mode_decision_key, _, accepted_mode_decision = mode_gate_contract(mode)
+    mode_decision = str(row.get(mode_decision_key) or "")
+    if not schema_failures and mode_decision != accepted_mode_decision:
+        failures.append(f"{mode}_{mode_decision_key}_not_accepted")
     if int(row.get("window_count") or 0) < min_window_count:
         failures.append(f"{mode}_insufficient_window_count")
     for key in blocker_keys_for_mode(mode):
@@ -119,10 +145,22 @@ def dense_gate_view(mode: str, row: dict[str, Any] | None, *, min_window_count: 
         "window_seconds": float(row.get("window_seconds") or 0.0),
         "window_step_seconds": float(row.get("window_step_seconds") or 0.0),
         "reasons": as_list(row.get("reasons")),
+        "mode_schema_failures": schema_failures,
     }
-    for key in ("vocal_score", "minus_score", "pair_compatibility_score", "overall_no_reference_score"):
+    for key in blocker_keys_for_mode(mode):
         if key in row:
-            view[key] = float(row.get(key) or 0.0)
+            view[key] = as_list(row.get(key))
+    for key in (
+        "vocal_score",
+        "vocal_decision",
+        "minus_score",
+        "minus_decision",
+        "pair_compatibility_score",
+        "pair_decision",
+        "overall_no_reference_score",
+    ):
+        if key in row:
+            view[key] = float(row.get(key) or 0.0) if key.endswith("_score") else str(row.get(key) or "")
     return view, failures
 
 

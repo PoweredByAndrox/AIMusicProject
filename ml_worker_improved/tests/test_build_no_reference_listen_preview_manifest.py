@@ -46,7 +46,44 @@ def reconciliation_candidate_row(*, requires_dense: bool = True) -> dict:
     return row
 
 
-def dense_gate_manifest(path: Path, optimizer: Path) -> Path:
+def dense_delivery_gate_evidence() -> dict:
+    return {
+        "vocal": {
+            "decision": "accept_candidate",
+            "score_mode": "vocal",
+            "window_count": 12,
+            "vocal_score": 0.91,
+            "vocal_decision": "accept_candidate",
+            "vocal_blockers": [],
+        },
+        "minus": {
+            "decision": "accept_candidate",
+            "score_mode": "minus",
+            "window_count": 12,
+            "minus_score": 0.92,
+            "minus_decision": "accept_candidate",
+            "minus_blockers": [],
+        },
+        "both": {
+            "decision": "accept_candidate",
+            "score_mode": "both",
+            "window_count": 12,
+            "pair_compatibility_score": 0.76,
+            "pair_decision": "pair_compatible",
+            "pair_blockers": [],
+        },
+    }
+
+
+def legacy_generic_dense_delivery_gate_evidence() -> dict:
+    return {
+        "vocal": {"decision": "accept_candidate", "window_count": 12},
+        "minus": {"decision": "accept_candidate", "window_count": 12},
+        "both": {"decision": "accept_candidate", "window_count": 12},
+    }
+
+
+def dense_gate_manifest(path: Path, optimizer: Path, *, dense_delivery_gate: dict | None = None) -> Path:
     row = accepted_optimizer_row()
     payload = {
         "manifest_type": "no_reference_dense_delivery_gate",
@@ -78,11 +115,7 @@ def dense_gate_manifest(path: Path, optimizer: Path) -> Path:
                 "can_publish_as_release": False,
                 "audio_copied": False,
                 "audio_exported": False,
-                "dense_delivery_gate": {
-                    "vocal": {"decision": "accept_candidate", "window_count": 12},
-                    "minus": {"decision": "accept_candidate", "window_count": 12},
-                    "both": {"decision": "accept_candidate", "window_count": 12},
-                },
+                "dense_delivery_gate": dense_delivery_gate or dense_delivery_gate_evidence(),
             }
         ],
         "skipped_rows": [],
@@ -149,6 +182,36 @@ def test_dense_gate_manifest_becomes_listenable_manifest(tmp_path: Path) -> None
     assert manifest["accepted_listen_preview_rows"][0]["vocal_path"] == "/app/vocal.flac"
     assert manifest["accepted_listen_preview_rows"][0]["minus_path"] == "/app/minus.flac"
     assert "dense_delivery_gate" in manifest["accepted_listen_preview_rows"][0]
+
+
+def test_legacy_dense_gate_without_mode_specific_evidence_is_blocked(tmp_path: Path) -> None:
+    optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [accepted_optimizer_row()])
+    gate = dense_gate_manifest(
+        tmp_path / "dense_gate.json",
+        optimizer,
+        dense_delivery_gate=legacy_generic_dense_delivery_gate_evidence(),
+    )
+    manifest = build_manifest(optimizer, dense_delivery_gate_manifest_json=gate)
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "blocked_from_listen_pack"
+    assert manifest["dominant_failure_reason"] == "dense_delivery_gate_missing_mode_specific_evidence"
+    assert manifest["accepted_count"] == 0
+    assert manifest["skipped_rows"][0]["skip_reason"] == "dense_delivery_gate_missing_mode_specific_evidence"
+
+
+def test_dense_gate_with_insufficient_embedded_windows_is_blocked(tmp_path: Path) -> None:
+    optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [accepted_optimizer_row()])
+    dense_gate = dense_delivery_gate_evidence()
+    dense_gate["vocal"]["window_count"] = 1
+    gate = dense_gate_manifest(tmp_path / "dense_gate.json", optimizer, dense_delivery_gate=dense_gate)
+    manifest = build_manifest(optimizer, dense_delivery_gate_manifest_json=gate)
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "dense_delivery_gate_missing_mode_specific_evidence"
+    assert "row:0:vocal_insufficient_window_count" in manifest["dense_delivery_gate_evidence_failures"]
 
 
 def test_written_manifest_satisfies_artifact_status_contract(tmp_path: Path) -> None:

@@ -54,6 +54,14 @@ Mac SSH access contract:
 - `MacBook-Pro-Andrej.local` may resolve to link-local IPv6 and fail with permission/network errors; do not prefer it over the verified IPv4 target;
 - `192.168.0.167` is stale/unreachable unless re-verified by successful SSH.
 
+Mac artifact storage contract:
+- Mac execution is remote compute only; source-of-truth artifacts must be written into the Windows project workspace (`D:\AIMusicProject`) through a local network mount/share, not left as Mac-local result roots;
+- before any Mac route that can create audio/model/result/listen/debug artifacts, mount or verify a writable Windows project share on Mac (for example a stable `/Volumes/...` mount configured for this project) and map output roots back to `D:\AIMusicProject\artifacts`, `D:\AIMusicProject\lab_artifacts`, or `D:\AIMusicProject\artifact_rag`;
+- Mac-local paths under the Mac home directory, `/tmp`, `/var/folders`, cloned temp worktrees, or Apple-container scratch space are allowed only as short-lived staging/cache; they must be copied/synced into the Windows workspace, recorded in manifests, and removed or marked disposable before reporting progress;
+- if the Windows project share is not mounted, not writable, or path mapping is ambiguous, block production artifact generation on Mac and report the mount problem instead of producing Mac-local accepted/listen artifacts;
+- accepted/listen artifacts from Mac are valid only when their bytes, manifest, progress logs, and provenance map are present under the Windows project workspace with Windows-safe short names and sha256 evidence;
+- every Mac artifact manifest must record both the Mac mounted path and the corresponding Windows path, plus mount/probe evidence and cleanup status for any Mac-local staging bytes.
+
 Обязательный contract:
 - не устанавливать и не подтягивать project dependencies на host;
 - не чинить host PATH, Python, ffmpeg, CUDA, Node, package managers или системные библиотеки как способ выполнить project task;
