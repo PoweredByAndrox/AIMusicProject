@@ -478,7 +478,7 @@ def test_readiness_blocks_rejected_listen_feedback_without_promoting_candidate(t
     assert "human_listen_feedback_rejected" in summary["blocker_reasons"]
     assert "human_feedback_residual_vocal_leak" in summary["blocker_reasons"]
     assert "human_feedback_detail_loss" in summary["blocker_reasons"]
-    assert "run_detail_preserving_residual_vocal_cleanup" in summary["next_actions"]
+    assert "run_judge_guided_minus_vocal_leakage_repair" in summary["next_actions"]
     assert "run_judge_guided_minus_air_detail_repair" in summary["next_actions"]
     assert summary["promising_blocked_handoff"] == {
         "status": "promising_but_blocked",
@@ -502,10 +502,12 @@ def test_readiness_blocks_rejected_listen_feedback_without_promoting_candidate(t
             },
             {
                 "issue_category": "residual_vocal_leak",
-                "route": "detail_preserving_residual_vocal_cleanup",
-                "route_status": "missing_implementation",
-                "tool": "",
-                "next_action": "run_detail_preserving_residual_vocal_cleanup",
+                "route": "judge_guided_minus_vocal_leakage_repair",
+                "route_status": "documented_route",
+                "tool": "tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+                "next_action": "run_judge_guided_minus_vocal_leakage_repair",
+                "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+                "requires_post_judge": True,
             },
         ],
         "contract": {

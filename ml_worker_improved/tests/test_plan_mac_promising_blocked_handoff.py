@@ -35,7 +35,7 @@ def readiness_summary(path: Path) -> Path:
                 "pitch_guard_failed",
             ],
             "next_actions": [
-                "run_detail_preserving_residual_vocal_cleanup",
+                "run_judge_guided_minus_vocal_leakage_repair",
                 "run_judge_guided_minus_air_detail_repair",
             ],
             "objective_summary": {
@@ -60,10 +60,12 @@ def readiness_summary(path: Path) -> Path:
                     },
                     {
                         "issue_category": "residual_vocal_leak",
-                        "route": "detail_preserving_residual_vocal_cleanup",
-                        "route_status": "missing_implementation",
-                        "tool": "",
-                        "next_action": "run_detail_preserving_residual_vocal_cleanup",
+                        "route": "judge_guided_minus_vocal_leakage_repair",
+                        "route_status": "documented_route",
+                        "tool": "tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+                        "next_action": "run_judge_guided_minus_vocal_leakage_repair",
+                        "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+                        "requires_post_judge": True,
                     },
                 ],
                 "contract": {
@@ -105,8 +107,7 @@ def test_direct_script_builds_full_pack_loop_queue_from_promising_handoff(tmp_pa
     assert manifest["can_publish_as_result"] is False
     assert manifest["queue_item_count"] == 1
     assert manifest["route_status_counts"] == {
-        "documented_route": 1,
-        "missing_implementation": 1,
+        "documented_route": 2,
     }
     row = rows(output_dir / "rows.jsonl")[0]
     assert row["schema"] == "short_listen_repair_queue_item.v1"
@@ -115,10 +116,11 @@ def test_direct_script_builds_full_pack_loop_queue_from_promising_handoff(tmp_pa
     assert row["issue_categories"] == ["detail_loss", "residual_vocal_leak"]
     assert row["objective_summary"]["after_fail_regions"] == 16
     assert row["recommended_routes"][0]["route"] == "judge_guided_minus_air_detail_repair"
-    assert row["recommended_routes"][1]["route_status"] == "missing_implementation"
+    assert row["recommended_routes"][1]["route"] == "judge_guided_minus_vocal_leakage_repair"
+    assert row["recommended_routes"][1]["route_status"] == "documented_route"
     assert row["required_actions"] == [
         "run_judge_guided_minus_air_detail_repair",
-        "design_detail_preserving_residual_vocal_cleanup_route",
+        "run_judge_guided_minus_vocal_leakage_repair",
         "minus_audit_gate",
         "holdout_eval_gate",
         "train_ready_decision_gate",

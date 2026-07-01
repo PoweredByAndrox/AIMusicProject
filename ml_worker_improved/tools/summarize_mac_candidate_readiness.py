@@ -40,10 +40,12 @@ PROMISING_HANDOFF_ROUTES = {
         "next_action": "run_judge_guided_minus_air_detail_repair",
     },
     "residual_vocal_leak": {
-        "route": "detail_preserving_residual_vocal_cleanup",
-        "route_status": "missing_implementation",
-        "tool": "",
-        "next_action": "run_detail_preserving_residual_vocal_cleanup",
+        "route": "judge_guided_minus_vocal_leakage_repair",
+        "route_status": "documented_route",
+        "tool": "tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+        "next_action": "run_judge_guided_minus_vocal_leakage_repair",
+        "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+        "requires_post_judge": True,
     },
 }
 
@@ -152,7 +154,7 @@ def _listen_feedback_summary(feedback: Mapping[str, Any] | None, feedback_path: 
         next_actions.append("route_human_feedback_to_failure_taxonomy")
     if "residual_vocal_leak" in issue_categories:
         blockers.append("human_feedback_residual_vocal_leak")
-        next_actions.append("run_detail_preserving_residual_vocal_cleanup")
+        next_actions.append("run_judge_guided_minus_vocal_leakage_repair")
     if "detail_loss" in issue_categories:
         blockers.append("human_feedback_detail_loss")
         next_actions.append("run_judge_guided_minus_air_detail_repair")

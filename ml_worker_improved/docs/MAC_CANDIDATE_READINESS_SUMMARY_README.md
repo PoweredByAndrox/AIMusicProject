@@ -36,7 +36,7 @@ detail_loss / missing_detail / muffled / presence_loss -> human_feedback_detail_
 The corresponding next actions are:
 
 ```text
-run_detail_preserving_residual_vocal_cleanup
+run_judge_guided_minus_vocal_leakage_repair
 run_judge_guided_minus_air_detail_repair
 ```
 
@@ -136,6 +136,8 @@ which converts a blocked Mac readiness summary into the standard
 For promising-but-blocked human feedback, use
 `tools/plan_mac_promising_blocked_handoff.py`. It converts
 `promising_blocked_handoff` into a standard full-pack loop queue with
-`route_intent=mac_promising_blocked_handoff`, preserving both documented repair
-routes and missing-implementation route gaps while keeping `delivery_allowed`
-false.
+`route_intent=mac_promising_blocked_handoff`, preserving documented repair
+routes and any future missing-implementation route gaps while keeping
+`delivery_allowed` false. Residual vocal leak currently maps to the documented
+candidate-only `tools/apply_judge_guided_minus_vocal_leakage_repair.py` route,
+not to a delivery/listen artifact.

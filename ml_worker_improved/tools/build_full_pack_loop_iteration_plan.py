@@ -299,6 +299,17 @@ def mac_promising_blocked_handoff_row(queue_item: dict[str, Any]) -> dict[str, A
     routes = [dict(route) for route in queue_item.get("recommended_routes") or [] if isinstance(route, dict)]
     documented_count = sum(1 for route in routes if str(route.get("route_status") or "") == "documented_route")
     missing_count = sum(1 for route in routes if str(route.get("route_status") or "") == "missing_implementation")
+    action_status = "ready_for_documented_mac_promising_repair_routes" if routes and missing_count == 0 else "blocked_mac_promising_handoff_route_resolution_required"
+    expected_acceleration_mode = "external_only_cpu_dsp_repair_then_audit" if action_status.startswith("ready_") else "external_only_cpu_handoff_planning"
+    docker_commands = [
+        {
+            "route": str(route.get("route") or ""),
+            "tool": str(route.get("tool") or ""),
+            "status": "requires_runtime_paths_from_readiness_artifacts",
+        }
+        for route in routes
+        if str(route.get("route_status") or "") == "documented_route" and str(route.get("tool") or "")
+    ]
     return {
         "schema": "full_pack_loop_iteration_action.v1",
         "queue_item_id": str(queue_item.get("queue_item_id") or ""),
@@ -312,11 +323,11 @@ def mac_promising_blocked_handoff_row(queue_item: dict[str, Any]) -> dict[str, A
         "recommended_routes": routes,
         "documented_route_count": documented_count,
         "missing_implementation_route_count": missing_count,
-        "action_status": "blocked_mac_promising_handoff_route_resolution_required",
+        "action_status": action_status,
         "training_job_statuses": [],
         "required_next_actions": stable_unique([str(action) for action in queue_item.get("required_actions") or [] if str(action)]),
-        "docker_commands": [],
-        "expected_acceleration_mode": "external_only_cpu_handoff_planning",
+        "docker_commands": docker_commands if action_status.startswith("ready_") else [],
+        "expected_acceleration_mode": expected_acceleration_mode,
         "execution_started": False,
         "training_started": False,
         "release_ready": False,
@@ -348,6 +359,13 @@ def build_action_rows(queue_rows: Sequence[dict[str, Any]], jobs_by_stem: dict[s
 def plan_status(rows: Sequence[dict[str, Any]], failed: Sequence[str]) -> str:
     if failed:
         return "blocked"
+    promising_rows = [row for row in rows if row.get("route_intent") == "mac_promising_blocked_handoff"]
+    if promising_rows and any(int(row.get("missing_implementation_route_count") or 0) > 0 for row in promising_rows):
+        return "blocked_waiting_for_mac_promising_handoff_route"
+    if promising_rows and all(str(row.get("action_status") or "").startswith("ready_") for row in rows):
+        return "ready_for_documented_mac_promising_repair_routes"
+    if promising_rows and any(str(row.get("action_status") or "").startswith("ready_") for row in promising_rows):
+        return "partial_ready_with_blockers"
     if any(row.get("action_status") == "ready_for_gpu_training" for row in rows):
         if all(str(row.get("action_status") or "").startswith("ready_") for row in rows):
             return "ready_for_gpu_training_actions"

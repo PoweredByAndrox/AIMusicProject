@@ -359,7 +359,7 @@ def test_full_pack_loop_iteration_plan_prioritizes_mac_reference_gap_in_mixed_qu
     }
 
 
-def test_full_pack_loop_iteration_plan_blocks_promising_handoff_route_resolution(tmp_path: Path) -> None:
+def test_full_pack_loop_iteration_plan_routes_documented_promising_handoff_repairs(tmp_path: Path) -> None:
     rows_path = tmp_path / "queue" / "rows.jsonl"
     write_jsonl(
         rows_path,
@@ -390,15 +390,17 @@ def test_full_pack_loop_iteration_plan_blocks_promising_handoff_route_resolution
                     },
                     {
                         "issue_category": "residual_vocal_leak",
-                        "route": "detail_preserving_residual_vocal_cleanup",
-                        "route_status": "missing_implementation",
-                        "tool": "",
-                        "next_action": "run_detail_preserving_residual_vocal_cleanup",
+                        "route": "judge_guided_minus_vocal_leakage_repair",
+                        "route_status": "documented_route",
+                        "tool": "tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+                        "next_action": "run_judge_guided_minus_vocal_leakage_repair",
+                        "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+                        "requires_post_judge": True,
                     },
                 ],
                 "required_actions": [
                     "run_judge_guided_minus_air_detail_repair",
-                    "design_detail_preserving_residual_vocal_cleanup_route",
+                    "run_judge_guided_minus_vocal_leakage_repair",
                     "minus_audit_gate",
                     "holdout_eval_gate",
                     "train_ready_decision_gate",
@@ -436,26 +438,97 @@ def test_full_pack_loop_iteration_plan_blocks_promising_handoff_route_resolution
         output_dir=tmp_path / "plan",
     )
 
-    assert manifest["plan_status"] == "blocked_waiting_for_mac_promising_handoff_route"
+    assert manifest["plan_status"] == "ready_for_documented_mac_promising_repair_routes"
     assert manifest["delivery_allowed"] is False
     assert manifest["action_count"] == 1
-    assert manifest["ready_action_count"] == 0
-    assert manifest["blocked_action_count"] == 1
+    assert manifest["ready_action_count"] == 1
+    assert manifest["blocked_action_count"] == 0
     assert manifest["route_intent_counts"] == {"mac_promising_blocked_handoff": 1}
     row = rows(tmp_path / "plan" / "rows.jsonl")[0]
-    assert row["action_status"] == "blocked_mac_promising_handoff_route_resolution_required"
-    assert row["expected_acceleration_mode"] == "external_only_cpu_handoff_planning"
+    assert row["action_status"] == "ready_for_documented_mac_promising_repair_routes"
+    assert row["expected_acceleration_mode"] == "external_only_cpu_dsp_repair_then_audit"
     assert row["recommended_routes"][0]["route_status"] == "documented_route"
-    assert row["recommended_routes"][1]["route_status"] == "missing_implementation"
-    assert row["documented_route_count"] == 1
-    assert row["missing_implementation_route_count"] == 1
+    assert row["recommended_routes"][1]["route_status"] == "documented_route"
+    assert row["documented_route_count"] == 2
+    assert row["missing_implementation_route_count"] == 0
     assert row["required_next_actions"] == [
         "run_judge_guided_minus_air_detail_repair",
-        "design_detail_preserving_residual_vocal_cleanup_route",
+        "run_judge_guided_minus_vocal_leakage_repair",
         "minus_audit_gate",
         "holdout_eval_gate",
         "train_ready_decision_gate",
         "full_pack_gate_rebuild",
     ]
+    assert row["docker_commands"] == [
+        {
+            "route": "judge_guided_minus_air_detail_repair",
+            "tool": "tools/apply_judge_guided_minus_air_detail_repair.py",
+            "status": "requires_runtime_paths_from_readiness_artifacts",
+        },
+        {
+            "route": "judge_guided_minus_vocal_leakage_repair",
+            "tool": "tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+            "status": "requires_runtime_paths_from_readiness_artifacts",
+        },
+    ]
     assert row["training_started"] is False
     assert row["can_publish_as_result"] is False
+
+
+def test_full_pack_loop_iteration_plan_does_not_block_documented_promising_route_in_mixed_queue(tmp_path: Path) -> None:
+    queue_manifest = full_pack_loop_queue(tmp_path)
+    queue = json.loads(queue_manifest.read_text(encoding="utf-8"))
+    queue_rows = rows(Path(queue["rows_jsonl"]))
+    queue_rows.append(
+        {
+            "schema": "short_listen_repair_queue_item.v1",
+            "queue_item_id": "mph001",
+            "route_intent": "mac_promising_blocked_handoff",
+            "stem_type": "minus",
+            "source_audio_path": "/mac/source/t001.mp3",
+            "issue_tags": ["detail_loss", "residual_vocal_middle"],
+            "issue_categories": ["detail_loss", "residual_vocal_leak"],
+            "recommended_routes": [
+                {
+                    "issue_category": "detail_loss",
+                    "route": "judge_guided_minus_air_detail_repair",
+                    "route_status": "documented_route",
+                    "tool": "tools/apply_judge_guided_minus_air_detail_repair.py",
+                    "next_action": "run_judge_guided_minus_air_detail_repair",
+                },
+                {
+                    "issue_category": "residual_vocal_leak",
+                    "route": "judge_guided_minus_vocal_leakage_repair",
+                    "route_status": "documented_route",
+                    "tool": "tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+                    "next_action": "run_judge_guided_minus_vocal_leakage_repair",
+                    "requires_post_judge": True,
+                },
+            ],
+            "required_actions": [
+                "run_judge_guided_minus_air_detail_repair",
+                "run_judge_guided_minus_vocal_leakage_repair",
+                "minus_audit_gate",
+                "holdout_eval_gate",
+                "train_ready_decision_gate",
+                "full_pack_gate_rebuild",
+            ],
+            "release_ready": False,
+            "can_publish_as_result": False,
+        }
+    )
+    queue["rows_jsonl"] = str(write_jsonl(tmp_path / "queue" / "rows.jsonl", queue_rows))
+    queue["queue_item_count"] = len(queue_rows)
+    queue_manifest.write_text(json.dumps(queue, sort_keys=True), encoding="utf-8")
+
+    manifest = build_full_pack_loop_iteration_plan(
+        repair_queue_manifest_json=queue_manifest,
+        training_plan_json=training_plan(tmp_path),
+        output_dir=tmp_path / "plan",
+    )
+
+    assert manifest["plan_status"] == "partial_ready_with_blockers"
+    plan_rows = rows(tmp_path / "plan" / "rows.jsonl")
+    promising = next(row for row in plan_rows if row["queue_item_id"] == "mph001")
+    assert promising["action_status"] == "ready_for_documented_mac_promising_repair_routes"
+    assert promising["missing_implementation_route_count"] == 0

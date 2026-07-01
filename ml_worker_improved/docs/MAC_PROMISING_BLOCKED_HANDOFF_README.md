@@ -26,14 +26,16 @@ family:
 tools/apply_judge_guided_minus_air_detail_repair.py
 ```
 
-`residual_vocal_leak` remains an explicit missing implementation. The planner
-therefore emits:
+`residual_vocal_leak` routes to the documented judge-guided minus vocal-leakage
+repair family:
 
 ```text
-design_detail_preserving_residual_vocal_cleanup_route
+tools/apply_judge_guided_minus_vocal_leakage_repair.py
 ```
 
-instead of pretending a production cleanup route already exists.
+That route creates a candidate-only minus repair from judge/self-judge leakage
+windows and still requires post-render minus self-judge, result judge, selector,
+and listen-preview gates before any delivery wrapper can accept it.
 
 ## Outputs
 
@@ -59,8 +61,8 @@ The full-pack loop planner turns the row into:
 
 ```text
 route_intent=mac_promising_blocked_handoff
-action_status=blocked_mac_promising_handoff_route_resolution_required
-expected_acceleration_mode=external_only_cpu_handoff_planning
+action_status=ready_for_documented_mac_promising_repair_routes
+expected_acceleration_mode=external_only_cpu_dsp_repair_then_audit
 ```
 
 ## Docker-only example
