@@ -78,3 +78,37 @@ Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.0.138:8765/jobs/<job_id>
 
 These artifacts are diagnostic evidence only. They do not satisfy the
 production listen/delivery contract by themselves.
+
+## MelBand Pitch Guard
+
+`melband_roformer_vocals` can leave vocal-like material in `instrumental.flac`
+after pitch/formant damage. The `melband_pitch_guard_v1` diagnostic profile
+adds a post-pass for that defect class:
+
+```powershell
+docker compose run --rm --no-deps -T --volume D:/AIMusicProject:/repo --workdir /repo/ml_worker_improved ml-worker `
+  python tools/run_mac_melband_pitch_guard_pipeline.py `
+    --mac-api-url "http://192.168.0.138:8765" `
+    --source-audio-path "/Users/andrejviluha/win_project/testing_stuff_music/source.mp3" `
+    --api-output-subdir "mac_api/mel_guard001/api" `
+    --out "/repo/artifacts/mac_api/mel_guard001"
+```
+
+The profile:
+
+- starts a Mac API `melband_roformer_vocals` job;
+- scans `vocals.flac` against `instrumental.flac` with pitch-shifted vocal
+  probes over the whole audio, not a hardcoded timestamp;
+- blocks with `pitch_shifted_vocal_in_instrumental` when vocal content is
+  still present in the instrumental after pitch/formant-like transformation;
+- can write a mixture-consistent diagnostic repair under short paths:
+  `audio/v.flac`, `audio/i.flac`, `audio/raw.flac`, `score/pitch.json`,
+  `repair/v.flac`, `repair/i.flac`;
+- always remains diagnostic-only:
+  `delivery_allowed=false`, `listen_pack_created=false`,
+  `presentation_status=diagnostic_melband_pitch_guard_only`.
+
+`artifacts/mac_api/api_mel002/run` is the regression seed for this guard,
+including the user-reported tail region near 11-12 seconds. That timing is not
+a production special case; the detector must scan every window and only store
+the timing as evidence in `score/pitch.json`.

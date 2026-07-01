@@ -1,0 +1,21 @@
+{
+  "blocker_reasons": [
+    "no_candidate_passes_pitch_and_damage"
+  ],
+  "candidate_count": 0,
+  "candidates": [],
+  "contract": {
+    "diagnostic_only": true,
+    "no_listen_delivery": true,
+    "requires_damage_pass": true,
+    "requires_full_holdout_after_selection": true,
+    "requires_pitch_pass": true
+  },
+  "delivery_allowed": false,
+  "listen_pack_created": false,
+  "presentation_status": "pareto_selection_diagnostic_only",
+  "schema": "mac_residual_pareto_selection.v1",
+  "selected_candidate": {},
+  "selected_candidate_id": "",
+  "status": "blocked_no_pareto_candidate"
+}
