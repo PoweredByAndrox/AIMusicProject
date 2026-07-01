@@ -233,10 +233,10 @@ def test_existing_melband_run_stays_diagnostic_and_uses_short_paths(tmp_path: Pa
                 "model_id": "melband_roformer_vocals",
                 "source_audio_path": str(tmp_path / "raw_track_title_should_not_be_path.mp3"),
                 "stems": {
-                    "vocals": {"path": "/Users/andrejviluha/win_artifacts/mac_api/api_mel002/run/vocals.flac"},
-                    "instrumental": {"path": "/Users/andrejviluha/win_artifacts/mac_api/api_mel002/run/instrumental.flac"},
+                    "vocals": {"path": "/Users/andrejviluha/AIMusicProject_win/artifacts/mac_api/api_mel002/run/vocals.flac"},
+                    "instrumental": {"path": "/Users/andrejviluha/AIMusicProject_win/artifacts/mac_api/api_mel002/run/instrumental.flac"},
                 },
-                "artifacts": {"raw_ref_flac": "/Users/andrejviluha/win_artifacts/mac_api/api_mel002/run/raw_ref.flac"},
+                "artifacts": {"raw_ref_flac": "/Users/andrejviluha/AIMusicProject_win/artifacts/mac_api/api_mel002/run/raw_ref.flac"},
             }
         ),
         encoding="utf-8",

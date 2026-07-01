@@ -34,13 +34,17 @@ Current local-network contract:
 Bootstrap from Windows:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1
 powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1
 ```
 
-That script verifies the explicit-key SSH route, ensures the Windows shares and
-`MacAudioApi` access, mounts `\\<windows-ip>\AIMusicProject` on the Mac at
-`/Users/andrejviluha/AIMusicProject_win`, and runs the mount write/read/delete probe. For a
-full credential reset and remount:
+`macos-bootstrap-and-ssh.ps1` is the from-zero command: it calls the workspace
+mount bootstrap, verifies Apple `/usr/local/bin/container`, and prints the
+future SSH command. The lower-level mount script verifies the explicit-key SSH
+route, ensures the Windows shares and `MacAudioApi` access, mounts
+`\\<windows-ip>\AIMusicProject` on the Mac at
+`/Users/andrejviluha/AIMusicProject_win`, and runs the mount write/read/delete
+probe. For a full credential reset and remount:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1 -ForceCredentialReset

@@ -64,7 +64,7 @@ def test_remote_api_runner_uses_ssh_stdin_and_fails_closed() -> None:
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="ok", stderr="")
 
     result = run_macos_remote_api_command(
-        ssh_target="andrejviluha@192.168.0.167",
+        ssh_target="andrejviluha@192.168.0.138",
         ssh_key="C:/Users/PBAX/.ssh/id_ed25519_phone",
         mac_artifact_root="/Users/andrejviluha/AIMusicProject_win/artifacts",
         mac_windows_project_mount="/Users/andrejviluha/AIMusicProject_win",
@@ -135,7 +135,7 @@ def test_remote_api_runner_blocks_without_windows_project_mount_before_ssh() -> 
     result = run_macos_remote_api_command(
         ssh_target="mac",
         ssh_key="key",
-        mac_artifact_root="/Users/andrejviluha/win_artifacts",
+        mac_artifact_root="/Users/andrejviluha/AIMusicProject_win/artifacts",
         artifact_subdir="mac_api/no_mount",
         command="true",
         runner=fake_runner,

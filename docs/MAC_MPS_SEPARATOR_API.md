@@ -1,8 +1,16 @@
 # Mac MPS Separator API
 
 This is a diagnostic-only native macOS MPS runner for local separator checks on
-Apple Silicon machines. It does not replace Docker production validation and it
-cannot mark listen or delivery artifacts as accepted.
+Apple Silicon machines. It does not replace the production delivery validation
+contract and it cannot mark listen or delivery artifacts as accepted.
+
+Before starting it from Windows/Codex, bootstrap the current Mac access and
+mounted Windows workspace:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1
+powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
+```
 
 ## Contract
 
@@ -28,8 +36,8 @@ cannot mark listen or delivery artifacts as accepted.
 ```bash
 /Users/andrejviluha/aimusic_mps_venv/bin/python \
   ml_worker_improved/tools/mac_mps_separator_api.py \
-  --project-root /Users/andrejviluha/Desktop/work_git/AIMusicProject \
-  --artifacts-root /Users/andrejviluha/win_artifacts \
+  --project-root /Users/andrejviluha/AIMusicProject_win \
+  --artifacts-root /Users/andrejviluha/AIMusicProject_win/artifacts \
   --python-bin /Users/andrejviluha/aimusic_mps_venv/bin/python \
   --host 0.0.0.0 \
   --port 8765
@@ -45,7 +53,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.0.138:8765/health"
 
 ```powershell
 $body = @{
-  source_audio_path = "/Users/andrejviluha/win_project/testing_stuff_music/source.mp3"
+  source_audio_path = "/Users/andrejviluha/AIMusicProject_win/testing_stuff_music/source.mp3"
   output_subdir = "mac_api/api_full001"
   route_id = "htdemucs_6s"
 } | ConvertTo-Json -Compress
@@ -89,7 +97,7 @@ adds a post-pass for that defect class:
 docker compose run --rm --no-deps -T --volume D:/AIMusicProject:/repo --workdir /repo/ml_worker_improved ml-worker `
   python tools/run_mac_melband_pitch_guard_pipeline.py `
     --mac-api-url "http://192.168.0.138:8765" `
-    --source-audio-path "/Users/andrejviluha/win_project/testing_stuff_music/source.mp3" `
+    --source-audio-path "/Users/andrejviluha/AIMusicProject_win/testing_stuff_music/source.mp3" `
     --api-output-subdir "mac_api/mel_guard001/api" `
     --out "/repo/artifacts/mac_api/mel_guard001"
 ```

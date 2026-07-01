@@ -121,28 +121,39 @@ The supported control shape is:
 
 ```text
 Windows Codex -> SSH -> Mac command
-Mac command -> /Users/andrejviluha/win_artifacts/<short-id>/
-/Users/andrejviluha/win_artifacts -> SMB share -> D:\AIMusicProject\artifacts
+Mac command -> /Users/andrejviluha/AIMusicProject_win/<artifact-root>/<short-id>/
+/Users/andrejviluha/AIMusicProject_win -> SMB share -> D:\AIMusicProject
 ```
 
 Current verified mount contract:
 
-- Windows path: `D:\AIMusicProject\artifacts`
-- SMB share: `\\192.168.0.101\AIMusicArtifacts`
-- Mac mount: `/Users/andrejviluha/win_artifacts`
-- SSH target: `andrejviluha@192.168.0.167`
+- Windows project path: `D:\AIMusicProject`
+- SMB share: `\\<windows-ip>\AIMusicProject`
+- Mac mount: `/Users/andrejviluha/AIMusicProject_win`
+- SSH target: `andrejviluha@192.168.0.138`
+- SSH key: `%USERPROFILE%\.ssh\id_ed25519_phone`
 
 If the Mac-side SMB mount stops responding, long audio jobs must not keep
-running as blind jobs against `/Users/andrejviluha/win_artifacts`. Copy the
-required short input pack to a local Mac scratch root such as:
+running as blind jobs against `/Users/andrejviluha/AIMusicProject_win`. Copy the
+required short input pack only to a short-lived local Mac scratch root such as:
 
 ```text
 /Users/$USER/aimusic_local_artifacts/
 ```
 
-Run the Mac/MPS job locally, then copy the completed artifact root back into
-`D:\AIMusicProject\artifacts`. The copied-back artifact must still keep
-`delivery_allowed=false` unless the normal delivery contract later accepts it.
+Run the Mac/MPS job locally only as short-lived staging, then sync the completed
+artifact root back into `D:\AIMusicProject\artifacts`. The copied-back artifact
+must still keep `delivery_allowed=false` unless the normal delivery contract
+later accepts it.
+
+From-zero Windows bootstrap and connect commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1
+powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1
+powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
+powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1 -RemoteCommand '/usr/local/bin/container --version && pwd'
+```
 
 Use `ml_worker_improved/tools/run_macos_remote_api_command.py` from Windows to
 send one bounded command to the Mac and force the Mac to write:
@@ -156,9 +167,11 @@ Example:
 
 ```powershell
 py -3 ml_worker_improved/tools/run_macos_remote_api_command.py `
-  --ssh-target andrejviluha@192.168.0.167 `
+  --ssh-target andrejviluha@192.168.0.138 `
   --ssh-key "$env:USERPROFILE\.ssh\id_ed25519_phone" `
-  --mac-artifact-root /Users/andrejviluha/win_artifacts `
+  --mac-windows-project-mount /Users/andrejviluha/AIMusicProject_win `
+  --windows-project-root "D:\AIMusicProject" `
+  --mac-artifact-root /Users/andrejviluha/AIMusicProject_win/artifacts `
   --artifact-subdir mac_api/c001 `
   --command "/usr/local/bin/container run --rm docker.io/library/alpine:latest uname -a"
 ```
@@ -196,8 +209,10 @@ Project metadata tests can be verified inside Apple `container` with:
 
 ```bash
 python3 ml_worker_improved/tools/run_apple_container_project_smoke.py \
-  --project-root /Users/andrejviluha/aimusic_remote_work_it024 \
-  --output-dir /Users/andrejviluha/aimusic_local_artifacts/host_artifacts/loop/it035/acsm001 \
+  --project-root /Users/andrejviluha/AIMusicProject_win \
+  --mac-windows-project-mount /Users/andrejviluha/AIMusicProject_win \
+  --windows-project-root 'D:\AIMusicProject' \
+  --output-dir /Users/andrejviluha/AIMusicProject_win/artifacts/mac_api/acsm001 \
   --image docker.io/library/python:3.11-alpine
 ```
 

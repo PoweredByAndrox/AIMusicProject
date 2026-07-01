@@ -50,7 +50,7 @@ def test_pipeline_uses_mac_api_then_pitch_guard_and_stays_diagnostic(tmp_path: P
         json.dumps(
             {
                 "model_id": "melband_roformer_vocals",
-                "source_audio_path": "/Users/andrejviluha/win_artifacts/source/full.flac",
+                "source_audio_path": "/Users/andrejviluha/AIMusicProject_win/testing_stuff_music/source/full.flac",
                 "stems": {
                     "vocals": {"path": str(vocals_path)},
                     "instrumental": {"path": str(instrumental_path)},
@@ -83,7 +83,7 @@ def test_pipeline_uses_mac_api_then_pitch_guard_and_stays_diagnostic(tmp_path: P
 
     manifest = run_pipeline(
         mac_api_url="http://mac.local:8765",
-        source_audio_path="/Users/andrejviluha/win_artifacts/source/full.flac",
+        source_audio_path="/Users/andrejviluha/AIMusicProject_win/testing_stuff_music/source/full.flac",
         output_dir=tmp_path / "mel_guard001",
         api_output_subdir="mac_api/mel_guard001/api",
         submit_job=fake_submit,
@@ -93,7 +93,7 @@ def test_pipeline_uses_mac_api_then_pitch_guard_and_stays_diagnostic(tmp_path: P
     assert calls == [
         {
             "api_url": "http://mac.local:8765",
-            "source_audio_path": "/Users/andrejviluha/win_artifacts/source/full.flac",
+            "source_audio_path": "/Users/andrejviluha/AIMusicProject_win/testing_stuff_music/source/full.flac",
             "output_subdir": "mac_api/mel_guard001/api",
         }
     ]
