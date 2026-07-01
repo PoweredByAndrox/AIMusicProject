@@ -280,7 +280,12 @@ def ensure_target_stem_artifact(
             "path": str(target_path),
             "source": "existing_manifest_stem",
             "source_stems": [matched_name],
+            "manifest_stem_name": matched_name,
+            "canonical_target_stem": normalized_target,
+            "user_facing_role": normalized_target,
         }
+        if matched_name != normalized_target:
+            artifact["manifest_stem_alias_of"] = matched_name
     elif normalized_target == "minus":
         artifact = materialize_minus_from_non_vocal_stems(
             stems=stems,
@@ -290,11 +295,21 @@ def ensure_target_stem_artifact(
     else:
         raise RuntimeError(f"target stem is missing from candidate manifest: {normalized_target}")
 
-    stems[normalized_target] = {
+    artifact.setdefault("canonical_target_stem", normalized_target)
+    artifact.setdefault("user_facing_role", normalized_target)
+    target_entry = {
         "path": artifact["path"],
+        "role": "target",
         "source": artifact["source"],
+        "canonical_stem": normalized_target,
+        "user_facing_role": artifact["user_facing_role"],
         "source_stems": list(artifact.get("source_stems") or []),
     }
+    if artifact.get("manifest_stem_alias_of"):
+        target_entry["manifest_stem_alias_of"] = artifact["manifest_stem_alias_of"]
+    if artifact.get("manifest_stem_name"):
+        target_entry["manifest_stem_name"] = artifact["manifest_stem_name"]
+    stems[normalized_target] = target_entry
     if normalized_target == "minus" and "instrumental" not in stems:
         stems["instrumental"] = dict(stems[normalized_target])
     candidate_manifest.update(
