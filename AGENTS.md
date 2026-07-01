@@ -50,6 +50,8 @@ Mac SSH access contract:
 - current verified Mac SSH target is `andrejviluha@192.168.0.138`;
 - from Windows/Codex use the explicit key and identity-only mode:
   `ssh -i %USERPROFILE%\.ssh\id_ed25519_phone -o IdentitiesOnly=yes -o BatchMode=yes andrejviluha@192.168.0.138 ...`;
+- preferred reusable Windows command for future Mac access:
+  `powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1`;
 - do not declare Mac SSH unavailable until the explicit-key command above has been tried;
 - `MacBook-Pro-Andrej.local` may resolve to link-local IPv6 and fail with permission/network errors; do not prefer it over the verified IPv4 target;
 - `192.168.0.167` is stale/unreachable unless re-verified by successful SSH.
@@ -57,6 +59,9 @@ Mac SSH access contract:
 Mac artifact storage contract:
 - Mac execution is remote compute only; source-of-truth artifacts must be written into the Windows project workspace (`D:\AIMusicProject`) through a local network mount/share, not left as Mac-local result roots;
 - the required implementation is a Windows project folder exported on the local network and mounted on Mac at a stable project mount path; Mac route output arguments must point directly into that mounted Windows workspace for `artifacts`, `lab_artifacts`, and `artifact_rag`;
+- preferred reusable Windows bootstrap command before Mac artifact work:
+  `powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1`;
+- current local-network workspace mount contract is Windows share `AIMusicProject` -> `D:\AIMusicProject`, SMB account `MacAudioApi`, Mac mount path `/Users/andrejviluha/AIMusicProject_win`;
 - before any Mac route that can create audio/model/result/listen/debug artifacts, mount or verify a writable Windows project share on Mac (for example a stable `/Volumes/...` mount configured for this project) and map output roots back to `D:\AIMusicProject\artifacts`, `D:\AIMusicProject\lab_artifacts`, or `D:\AIMusicProject\artifact_rag`;
 - each Mac artifact-producing route must run a mount preflight that writes, reads, and removes a small probe file inside the mounted Windows project workspace, then records the Mac mount path, Windows path mapping, and probe evidence in the route progress/manifest;
 - Mac-local paths under the Mac home directory, `/tmp`, `/var/folders`, cloned temp worktrees, or Apple-container scratch space are allowed only as short-lived staging/cache; production artifact roots, listen packs, manifests, progress logs, and provenance maps must be written directly to the mounted Windows workspace, while local scratch bytes must be copied/synced into the Windows workspace, recorded in manifests, and removed or marked disposable before reporting progress;

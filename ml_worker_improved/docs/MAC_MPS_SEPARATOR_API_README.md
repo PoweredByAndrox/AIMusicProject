@@ -7,9 +7,9 @@ or release artifacts.
 Mac artifact output is fail-closed:
 
 - `--artifacts-root` must point into the mounted Windows project workspace,
-  normally `/Volumes/AIMusicProject/artifacts`;
+  normally `/Users/andrejviluha/AIMusicProject_win/artifacts`;
 - `--mac-windows-project-mount` must point at the mounted Windows project root,
-  normally `/Volumes/AIMusicProject`;
+  normally `/Users/andrejviluha/AIMusicProject_win`;
 - every job runs `mac_windows_project_mount_preflight.v1` before creating its
   output directory or starting a worker thread;
 - if the mount is missing, unwritable, outside the mounted project, or not under
@@ -22,9 +22,9 @@ Example Mac launch:
 
 ```bash
 python3 tools/mac_mps_separator_api.py \
-  --project-root /Volumes/AIMusicProject \
-  --artifacts-root /Volumes/AIMusicProject/artifacts \
-  --mac-windows-project-mount /Volumes/AIMusicProject \
+  --project-root /Users/andrejviluha/AIMusicProject_win \
+  --artifacts-root /Users/andrejviluha/AIMusicProject_win/artifacts \
+  --mac-windows-project-mount /Users/andrejviluha/AIMusicProject_win \
   --windows-project-root 'D:\AIMusicProject' \
   --python-bin /path/to/python \
   --host 127.0.0.1 \

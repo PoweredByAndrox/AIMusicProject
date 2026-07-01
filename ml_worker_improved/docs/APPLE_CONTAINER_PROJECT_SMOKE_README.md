@@ -24,10 +24,10 @@ Run on the Mac host:
 
 ```bash
 python3 tools/run_apple_container_project_smoke.py \
-  --project-root /Volumes/AIMusicProject \
-  --mac-windows-project-mount /Volumes/AIMusicProject \
+  --project-root /Users/andrejviluha/AIMusicProject_win \
+  --mac-windows-project-mount /Users/andrejviluha/AIMusicProject_win \
   --windows-project-root 'D:\AIMusicProject' \
-  --output-dir /Volumes/AIMusicProject/artifacts/mac_api/acsm001 \
+  --output-dir /Users/andrejviluha/AIMusicProject_win/artifacts/mac_api/acsm001 \
   --image docker.io/library/python:3.11-alpine \
   --timeout-sec 600
 ```
