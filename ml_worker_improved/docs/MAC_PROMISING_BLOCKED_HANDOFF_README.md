@@ -94,3 +94,10 @@ docker compose run --rm --no-deps \
 
 Both artifacts are planning evidence only and must not be presented as listen
 results.
+
+When the full-pack planner reports
+`ready_for_documented_mac_promising_repair_routes`, use
+`tools/materialize_mac_promising_repair_commands.py` to resolve concrete Docker
+commands from the readiness/source manifests. The materializer can prepare the
+vocal-leakage repair command from objective guard regions, but it blocks the
+air/detail route until windowed detail self-judge evidence exists.
