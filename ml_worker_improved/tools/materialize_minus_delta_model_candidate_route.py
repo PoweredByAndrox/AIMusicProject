@@ -31,6 +31,14 @@ SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
 MODEL_OUTPUT_DIR_NAME = "mdl"
 DEFAULT_MAX_CANDIDATES = 3
+DOCKER_VISIBLE_PATH_PREFIXES = (
+    "/app",
+    "/host_artifacts",
+    "/host_testing_stuff_music",
+    "/host_testing_flstudio_music",
+    "/host_downloads",
+    "/main_lab_artifacts",
+)
 
 FAILURE_LABEL_EXPANSIONS = {
     "persistent_unsafe_vocal_or_full_mix_blockers": (
@@ -109,6 +117,52 @@ def canonical_path(value: Any, base_dir: Path) -> Path | None:
     if path.is_absolute():
         return path
     return (base_dir / path).resolve()
+
+
+def normalize_path_text(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/")
+
+
+def is_prefixed_path(path_text: str, prefix: str) -> bool:
+    normalized_prefix = prefix.rstrip("/")
+    return path_text == normalized_prefix or path_text.startswith(f"{normalized_prefix}/")
+
+
+def docker_visible_path(value: Any) -> str | None:
+    normalized = normalize_path_text(value)
+    if not normalized:
+        return None
+    for prefix in DOCKER_VISIBLE_PATH_PREFIXES:
+        if is_prefixed_path(normalized, prefix):
+            return normalized
+    host_artifacts_marker = "/host_artifacts/"
+    if host_artifacts_marker in normalized:
+        suffix = normalized.split(host_artifacts_marker, 1)[1].strip("/")
+        return f"/host_artifacts/{suffix}" if suffix else "/host_artifacts"
+    if normalized == "host_artifacts" or normalized.endswith("/host_artifacts"):
+        return "/host_artifacts"
+    return None
+
+
+def docker_path_mapping_payload(
+    *,
+    source_audio_path: Path,
+    output_dir: Path,
+    docker_source_audio_path: str | None,
+    docker_output_dir: str | None,
+) -> dict[str, Any]:
+    failed_path_fields: list[str] = []
+    if not docker_source_audio_path:
+        failed_path_fields.append("source_audio_path")
+    if not docker_output_dir:
+        failed_path_fields.append("output_dir")
+    return {
+        "source_audio_path": str(source_audio_path),
+        "output_dir": str(output_dir),
+        "docker_source_audio_path": docker_source_audio_path or "",
+        "docker_output_dir": docker_output_dir or "",
+        "failed_path_fields": failed_path_fields,
+    }
 
 
 def nested_get(payload: dict[str, Any], keys: Sequence[str]) -> Any:
@@ -263,6 +317,7 @@ def blocked_manifest(
     native_runtime_allowed: bool = False,
     source_failure_taxonomy: Sequence[str] = (),
     expanded_labels: Sequence[str] = (),
+    docker_path_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest = {
         "schema": SCHEMA,
@@ -306,6 +361,8 @@ def blocked_manifest(
         },
         "command_args": list(command_args),
     }
+    if docker_path_mapping is not None:
+        manifest["docker_path_mapping"] = dict(docker_path_mapping)
     write_jsonl(output_dir / ROWS_NAME, [])
     write_jsonl(output_dir / COMMAND_ROWS_NAME, [])
     write_json(output_dir / MANIFEST_NAME, manifest)
@@ -402,6 +459,34 @@ def materialize_minus_delta_model_candidate_route(
             expanded_labels=expanded_labels,
         )
 
+    docker_source_audio_path = docker_visible_path(source_audio_path)
+    docker_output_dir = docker_visible_path(output_dir)
+    docker_mapping = docker_path_mapping_payload(
+        source_audio_path=source_audio_path,
+        output_dir=output_dir,
+        docker_source_audio_path=docker_source_audio_path,
+        docker_output_dir=docker_output_dir,
+    )
+    if not docker_source_audio_path or not docker_output_dir:
+        progress(progress_path, "docker_path_mapping_failed", docker_path_mapping=docker_mapping)
+        return blocked_manifest(
+            output_dir=output_dir,
+            progress_path=progress_path,
+            router_plan_json=router_plan_json,
+            source_repair_manifest=source_repair_manifest,
+            candidate_id=resolved_candidate_id,
+            selected_route=selected_route,
+            status="blocked_missing_docker_path_mapping",
+            failed_checks=["docker_path_mapping_missing"],
+            command_args=command_args or [],
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
+            source_failure_taxonomy=source_failures,
+            expanded_labels=expanded_labels,
+            docker_path_mapping=docker_mapping,
+        )
+    progress(progress_path, "docker_path_mapping_ready", docker_path_mapping=docker_mapping)
+
     registry = registry or default_model_registry()
     suggestions = registry.suggest_next_candidates(
         stem_names=("instrumental", "minus"),
@@ -437,11 +522,14 @@ def materialize_minus_delta_model_candidate_route(
     for index, suggestion in enumerate(suggestions, start=1):
         candidate_alias = f"m{index:03d}"
         route_output_dir = output_dir / MODEL_OUTPUT_DIR_NAME / candidate_alias
+        docker_route_output_dir = docker_visible_path(route_output_dir)
+        if not docker_route_output_dir:
+            raise RuntimeError(f"internal_docker_output_mapping_failed:{route_output_dir}")
         command = [
             "python",
             TOOL,
-            str(source_audio_path),
-            str(route_output_dir),
+            docker_source_audio_path,
+            docker_route_output_dir,
             "--model-id",
             suggestion.model_id,
             "--device",
@@ -469,6 +557,9 @@ def materialize_minus_delta_model_candidate_route(
                 "source_repair_manifest": str(source_repair_manifest),
                 "source_audio_path": str(source_audio_path),
                 "output_dir": str(route_output_dir),
+                "docker_source_audio_path": docker_source_audio_path,
+                "docker_output_dir": docker_route_output_dir,
+                "docker_path_mapping": docker_mapping,
                 "docker_command": command,
                 "expected_acceleration_mode": "gpu_registered_model_inference",
                 "runtime_environment": str(runtime_environment),
@@ -496,6 +587,9 @@ def materialize_minus_delta_model_candidate_route(
         "router_plan_json": str(router_plan_json),
         "source_repair_manifest": str(source_repair_manifest),
         "source_audio_path": str(source_audio_path),
+        "docker_source_audio_path": docker_source_audio_path,
+        "docker_output_dir": docker_output_dir,
+        "docker_path_mapping": docker_mapping,
         "rows_jsonl": str(output_dir / ROWS_NAME),
         "command_rows_jsonl": str(output_dir / COMMAND_ROWS_NAME),
         "summary_md": str(output_dir / SUMMARY_NAME),

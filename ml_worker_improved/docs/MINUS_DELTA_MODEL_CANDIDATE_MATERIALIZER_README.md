@@ -25,6 +25,20 @@ python /app/tools/run_registered_model_candidate.py <source_audio> <output_dir> 
   --target-stem minus
 ```
 
+`<source_audio>` and `<output_dir>` in `docker_command` must be
+container-visible paths. Host provenance remains in `source_audio_path` and
+`output_dir`, but command arguments are remapped to Docker paths such as
+`/host_artifacts/...`. If either path cannot be mapped to a known Docker-visible
+prefix, the materializer writes
+`command_plan_status=blocked_missing_docker_path_mapping` with
+`failed_checks=["docker_path_mapping_missing"]` instead of emitting a fake-ready
+command.
+
+For Mac artifact-loop runs that use `/host_artifacts/...`, the surrounding
+Docker route must mount the host artifact root at `/host_artifacts`. The
+materializer emits inside-container command arrays only; it does not add Docker
+volume flags or make host-only `/Users/...` paths visible by itself.
+
 ## Required Inputs
 
 - `--router-plan-json`: router plan whose selected route is
@@ -49,6 +63,7 @@ progress.jsonl
 
 - selected registered model ids;
 - source audio provenance;
+- Docker-visible source/output paths;
 - Docker command arrays;
 - availability checks from the model registry;
 - required downstream gates.

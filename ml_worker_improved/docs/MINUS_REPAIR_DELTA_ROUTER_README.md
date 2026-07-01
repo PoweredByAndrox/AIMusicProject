@@ -58,9 +58,12 @@ router plan and the failed repair manifest to
 does not run inference or publish audio; it mines registry-backed minus-capable
 model candidates and writes Docker commands for
 `/app/tools/run_registered_model_candidate.py --device cuda --target-stem minus`.
-Every generated model candidate remains blocked for listening until it reruns
-the instrumental self-judge gate, the minus repair delta gate, the no-reference
-result judge, and the selector.
+Those generated commands are ready only when source/output paths are
+container-visible, for example under `/host_artifacts/...`; otherwise the
+materializer blocks with `docker_path_mapping_missing`. Every generated model
+candidate remains blocked for listening until it reruns the instrumental
+self-judge gate, the minus repair delta gate, the no-reference result judge, and
+the selector.
 
 Example:
 

@@ -87,7 +87,7 @@ def router_plan(tmp_path: Path, *, selected_route: str = "no_reference_minus_can
 
 
 def source_repair_manifest(tmp_path: Path) -> Path:
-    source_audio = tmp_path / "src" / "mix.flac"
+    source_audio = tmp_path / "host_artifacts" / "src" / "mix.flac"
     source_audio.parent.mkdir(parents=True, exist_ok=True)
     source_audio.write_bytes(b"stub")
     return write_json(
@@ -140,7 +140,7 @@ def test_model_candidate_materializer_builds_registered_minus_command_plan(tmp_p
     manifest = module.materialize_minus_delta_model_candidate_route(
         router_plan_json=router,
         source_repair_manifest=repair,
-        output_dir=tmp_path / "out",
+        output_dir=tmp_path / "host_artifacts" / "out",
         registry=demo_registry(tmp_path),
         max_candidates=3,
         native_runtime_allowed=True,
@@ -160,7 +160,7 @@ def test_model_candidate_materializer_builds_registered_minus_command_plan(tmp_p
     assert manifest["gpu_inference_skipped"] is True
     assert manifest["native_runtime_allowed"] is True
 
-    command_rows = read_jsonl(tmp_path / "out" / "cmds.jsonl")
+    command_rows = read_jsonl(tmp_path / "host_artifacts" / "out" / "cmds.jsonl")
     assert len(command_rows) == 1
     row = command_rows[0]
     assert row["schema"] == "minus_delta_model_candidate_command_row.v1"
@@ -176,8 +176,8 @@ def test_model_candidate_materializer_builds_registered_minus_command_plan(tmp_p
     assert row["docker_command"] == [
         "python",
         "/app/tools/run_registered_model_candidate.py",
-        str(tmp_path / "src" / "mix.flac"),
-        str(tmp_path / "out" / "mdl" / "m001"),
+        "/host_artifacts/src/mix.flac",
+        "/host_artifacts/out/mdl/m001",
         "--model-id",
         "demo_minus_alt",
         "--device",
@@ -187,7 +187,47 @@ def test_model_candidate_materializer_builds_registered_minus_command_plan(tmp_p
     ]
     assert "persistent_unsafe_vocal_or_full_mix_blockers" in manifest["source_failure_taxonomy"]
     assert "vocal_residue_in_minus" in manifest["expanded_failure_labels"]
-    assert all(len(path.name) <= 32 for path in (tmp_path / "out").rglob("*"))
+    assert all(len(path.name) <= 32 for path in (tmp_path / "host_artifacts" / "out").rglob("*"))
+    assert row["source_audio_path"] == str(tmp_path / "host_artifacts" / "src" / "mix.flac")
+    assert row["output_dir"] == str(tmp_path / "host_artifacts" / "out" / "mdl" / "m001")
+    assert row["docker_source_audio_path"] == "/host_artifacts/src/mix.flac"
+    assert row["docker_output_dir"] == "/host_artifacts/out/mdl/m001"
+
+
+def test_model_candidate_materializer_blocks_without_docker_visible_paths(tmp_path: Path) -> None:
+    module = _load_module()
+    source_audio = tmp_path / "src" / "mix.flac"
+    source_audio.parent.mkdir(parents=True, exist_ok=True)
+    source_audio.write_bytes(b"stub")
+    repair = write_json(
+        tmp_path / "repair" / "manifest.json",
+        {
+            "mode": "judge_guided_minus_vocal_leakage_repair",
+            "delivery_status": "candidate_only",
+            "delivery_allowed": False,
+            "raw_audio_path": str(source_audio),
+        },
+    )
+
+    manifest = module.materialize_minus_delta_model_candidate_route(
+        router_plan_json=router_plan(tmp_path),
+        source_repair_manifest=repair,
+        output_dir=tmp_path / "out",
+        registry=demo_registry(tmp_path),
+    )
+
+    assert manifest["command_plan_status"] == "blocked_missing_docker_path_mapping"
+    assert manifest["ready_command_count"] == 0
+    assert manifest["blocked_command_count"] == 1
+    assert manifest["failed_checks"] == ["docker_path_mapping_missing"]
+    assert manifest["docker_path_mapping"] == {
+        "source_audio_path": str(source_audio),
+        "output_dir": str(tmp_path / "out"),
+        "docker_source_audio_path": "",
+        "docker_output_dir": "",
+        "failed_path_fields": ["source_audio_path", "output_dir"],
+    }
+    assert read_jsonl(tmp_path / "out" / "cmds.jsonl") == []
 
 
 def test_model_candidate_materializer_blocks_when_router_did_not_select_route(tmp_path: Path) -> None:
@@ -195,7 +235,7 @@ def test_model_candidate_materializer_blocks_when_router_did_not_select_route(tm
     manifest = module.materialize_minus_delta_model_candidate_route(
         router_plan_json=router_plan(tmp_path, selected_route="judge_guided_minus_vocal_leakage_repair"),
         source_repair_manifest=source_repair_manifest(tmp_path),
-        output_dir=tmp_path / "out",
+        output_dir=tmp_path / "host_artifacts" / "out",
         registry=demo_registry(tmp_path),
     )
 
@@ -204,7 +244,7 @@ def test_model_candidate_materializer_blocks_when_router_did_not_select_route(tm
     assert manifest["blocked_command_count"] == 1
     assert manifest["failed_checks"] == ["router_selected_route_not_model_candidate_router"]
     assert manifest["delivery_allowed"] is False
-    assert read_jsonl(tmp_path / "out" / "cmds.jsonl") == []
+    assert read_jsonl(tmp_path / "host_artifacts" / "out" / "cmds.jsonl") == []
 
 
 def test_model_candidate_materializer_blocks_without_source_audio(tmp_path: Path) -> None:
@@ -221,7 +261,7 @@ def test_model_candidate_materializer_blocks_without_source_audio(tmp_path: Path
     manifest = module.materialize_minus_delta_model_candidate_route(
         router_plan_json=router_plan(tmp_path),
         source_repair_manifest=repair,
-        output_dir=tmp_path / "out",
+        output_dir=tmp_path / "host_artifacts" / "out",
         registry=demo_registry(tmp_path),
     )
 
@@ -239,7 +279,7 @@ def test_model_candidate_materializer_resolves_relative_delta_gate_from_router_p
     router_payload["rows"][0]["delta_gate_manifest"] = "gate/gate.json"
     write_json(router, router_payload)
 
-    source_audio = tmp_path / "src" / "mix.flac"
+    source_audio = tmp_path / "host_artifacts" / "src" / "mix.flac"
     source_audio.parent.mkdir(parents=True, exist_ok=True)
     source_audio.write_bytes(b"stub")
     after_manifest = write_json(
@@ -272,11 +312,12 @@ def test_model_candidate_materializer_resolves_relative_delta_gate_from_router_p
     manifest = module.materialize_minus_delta_model_candidate_route(
         router_plan_json=router,
         source_repair_manifest=repair,
-        output_dir=tmp_path / "out",
+        output_dir=tmp_path / "host_artifacts" / "out",
         registry=demo_registry(tmp_path),
     )
 
     assert manifest["command_plan_status"] == "ready"
     assert manifest["source_audio_path"] == str(source_audio)
-    command_rows = read_jsonl(tmp_path / "out" / "cmds.jsonl")
+    command_rows = read_jsonl(tmp_path / "host_artifacts" / "out" / "cmds.jsonl")
     assert command_rows[0]["source_audio_path"] == str(source_audio)
+    assert command_rows[0]["docker_source_audio_path"] == "/host_artifacts/src/mix.flac"
