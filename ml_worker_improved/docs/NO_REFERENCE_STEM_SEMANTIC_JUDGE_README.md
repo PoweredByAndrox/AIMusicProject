@@ -1,8 +1,8 @@
 # No-Reference Stem Semantic Judge
 
 `tools/run_no_reference_stem_semantic_judge.py` runs a deterministic
-no-reference semantic proxy judge over accepted non-vocal stem listen-preview
-manifests.
+no-reference semantic proxy judge over non-vocal stem manifests that are either
+legacy listenable previews or explicit presemantic judge inputs.
 
 Supported stems:
 
@@ -17,6 +17,11 @@ Supported stems:
 
 - Docker execution only.
 - Reads existing listen-preview manifests and selected audio files.
+- Explicit presemantic inputs use `semantic_judge_input=true`,
+  `delivery_status=pending_semantic_judge`,
+  `delivery_allowed=false`,
+  `presentation_status=semantic_judge_input_not_for_listen_pack`, and
+  `release_status=semantic_judge_input_only`.
 - Does not run model inference.
 - Does not copy or export audio.
 - Writes JSONL, JSON summary, Markdown summary, and structured progress JSONL.
@@ -24,7 +29,8 @@ Supported stems:
 - Explicitly records `gpu_inference_skipped=true` because the judge reads
   already generated stems.
 - Accepted rows mean `stem_semantic_decision=accept_candidate` for downstream
-  selection only.
+  matrix selection only; the source presemantic manifest is still not a
+  user-presentable listen/result artifact.
 - Judge rows are not listen artifacts:
   `delivery_allowed=false`, `presentation_status=semantic_judge_not_for_listen_pack`,
   `release_status=not_release_ready`, `release_ready=false`.

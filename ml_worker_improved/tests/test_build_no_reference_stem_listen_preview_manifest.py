@@ -101,14 +101,20 @@ def test_stem_listen_preview_accepts_gpu_generated_non_vocal_stem(tmp_path: Path
         track_id="track-a",
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
-    assert manifest["presentation_status"] == "accepted_for_listen_pack"
-    assert manifest["release_status"] == "listen_preview_only"
+    assert manifest["delivery_status"] == "pending_semantic_judge"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "semantic_judge_input_not_for_listen_pack"
+    assert manifest["release_status"] == "semantic_judge_input_only"
+    assert manifest["semantic_judge_input"] is True
     assert manifest["stem_type"] == "melody"
     assert manifest["selected_audio_path"] == str(audio_path)
     assert manifest["semantic_quality_verified"] is False
+    assert manifest["semantic_quality_status"] == "not_verified_no_reference_audio_integrity_only"
     assert manifest["release_ready"] is False
+    assert manifest["selected_artifacts"]["delivery_allowed"] is False
+    assert manifest["selected_artifacts"]["presentation_status"] == "semantic_judge_input_not_for_listen_pack"
+    assert manifest["semantic_judge_input_count"] == 1
+    assert manifest["semantic_judge_input_rows"][0]["selected_audio_path"] == str(audio_path)
     assert manifest["safety"]["training_started"] is False
     assert manifest["audio_integrity_gate"]["status"] == "passed"
     assert manifest["gpu_provenance_gate"]["status"] == "passed"
@@ -132,8 +138,8 @@ def test_multistem_manifest_can_select_existing_non_manifest_target_stem(tmp_pat
         track_id="track-a",
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert manifest["delivery_status"] == "pending_semantic_judge"
+    assert manifest["delivery_allowed"] is False
     assert manifest["stem_type"] == "drums"
     assert manifest["selected_audio_path"] == str(drums_path)
     assert manifest["dominant_failure_reason"] == ""
@@ -156,7 +162,7 @@ def test_path_prefix_map_resolves_mac_local_stem_path_to_artifact_mirror(tmp_pat
 
     assert blocked["delivery_status"] == "blocked"
     assert blocked["dominant_failure_reason"] == "audio_path_missing"
-    assert manifest["delivery_status"] == "accepted"
+    assert manifest["delivery_status"] == "pending_semantic_judge"
     assert manifest["selected_audio_path"] == str(mirror_audio_path)
     assert manifest["source_selected_audio_path"] == str(mac_audio_path)
     assert manifest["selected_audio_path_resolution"]["mapped"] is True
@@ -219,8 +225,8 @@ def test_accepts_explicit_cpu_dsp_only_candidate_without_fake_gpu_proof(tmp_path
 
     manifest = build_manifest(stem_manifest_json=source_manifest, target_stem="melody")
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert manifest["delivery_status"] == "pending_semantic_judge"
+    assert manifest["delivery_allowed"] is False
     assert manifest["gpu_provenance_gate"]["status"] == "passed"
     assert manifest["gpu_provenance_gate"]["cpu_dsp_only_route"] is True
     assert manifest["gpu_provenance_gate"]["gpu_inference_required"] is False
@@ -266,10 +272,10 @@ def test_cli_writes_manifest_and_summary(tmp_path: Path) -> None:
 
     assert exit_code == 0
     payload = json.loads(output_manifest.read_text(encoding="utf-8"))
-    assert payload["delivery_status"] == "accepted"
+    assert payload["delivery_status"] == "pending_semantic_judge"
     assert "- stem_type: other" in summary_md.read_text(encoding="utf-8")
     view = status_view_from_manifest(output_manifest)
-    assert view.listenable
+    assert not view.listenable
     assert view.stem_type == "other"
 
 
@@ -300,4 +306,4 @@ def test_file_script_entrypoint_runs_with_tools_imports(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(output_manifest.read_text(encoding="utf-8"))["delivery_status"] == "accepted"
+    assert json.loads(output_manifest.read_text(encoding="utf-8"))["delivery_status"] == "pending_semantic_judge"

@@ -29,15 +29,16 @@ their dedicated mode-specific delivery contracts.
 - source manifests with fallback, hidden inference, per-track hardcode, safety
   violations, training, fine-tune, model registry edits, cleanup routes, copied
   audio, exported audio, threshold relaxation, or release readiness are blocked;
-- accepted output is only listen-preview:
-  `delivery_status=accepted`, `delivery_allowed=true`,
-  `presentation_status=accepted_for_listen_pack`,
-  `release_status=listen_preview_only`;
-- accepted output still sets `semantic_quality_verified=false` and
-  `release_ready=false`.
+- passed output is semantic-judge input only:
+  `delivery_status=pending_semantic_judge`, `delivery_allowed=false`,
+  `presentation_status=semantic_judge_input_not_for_listen_pack`,
+  `release_status=semantic_judge_input_only`, and `semantic_judge_input=true`;
+- passed output still sets `semantic_quality_verified=false` and
+  `release_ready=false`, so it is not user-presentable until a separate
+  semantic stem-quality judge clears it.
 
 This contract is not a semantic stem-quality proof and must not be presented as
-`release_ready`.
+`release_ready` or as a user listen/result artifact.
 
 ## Short-Name Stem Audio Pack
 

@@ -15,7 +15,12 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from tools.artifact_status_contract import sha256_file  # noqa: E402
+from tools.artifact_status_contract import (  # noqa: E402
+    SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS,
+    SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS,
+    SEMANTIC_JUDGE_INPUT_RELEASE_STATUS,
+    sha256_file,
+)
 from tools.path_prefix_mapping import parse_path_prefix_map, resolve_audio_path  # noqa: E402
 
 
@@ -346,10 +351,10 @@ def accepted_manifest(
 ) -> dict[str, Any]:
     return {
         "manifest_type": "no_reference_stem_listen_preview",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
-        "release_status": "listen_preview_only",
+        "delivery_status": SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS,
+        "release_status": SEMANTIC_JUDGE_INPUT_RELEASE_STATUS,
         "dominant_failure_reason": "",
         "stem_type": target_stem,
         "track_id": track_id,
@@ -363,17 +368,21 @@ def accepted_manifest(
         "gpu_provenance_gate": gpu_gate,
         "source_contract_gate": contract_gate,
         "selected_artifacts": {
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
+            "delivery_status": SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS,
+            "delivery_allowed": False,
+            "presentation_status": SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS,
             "listen_stem_flac": selected_audio_path,
             f"listen_{target_stem}_flac": selected_audio_path,
         },
+        "semantic_judge_input": True,
+        "semantic_judge_input_status": "ready",
         "semantic_quality_verified": False,
         "semantic_quality_status": "not_verified_no_reference_audio_integrity_only",
-        "accepted_count": 1,
+        "accepted_count": 0,
+        "semantic_judge_input_count": 1,
         "skipped_count": 0,
-        "accepted_listen_preview_rows": [
+        "accepted_listen_preview_rows": [],
+        "semantic_judge_input_rows": [
             {
                 "track_id": track_id,
                 "stem_type": target_stem,
@@ -474,6 +483,7 @@ def build_summary(manifest: dict[str, Any]) -> str:
         f"- release_status: {manifest.get('release_status')}",
         f"- stem_type: {manifest.get('stem_type')}",
         f"- accepted_count: {manifest.get('accepted_count')}",
+        f"- semantic_judge_input_count: {manifest.get('semantic_judge_input_count', 0)}",
         f"- skipped_count: {manifest.get('skipped_count')}",
         f"- selected_audio_path: {manifest.get('selected_audio_path')}",
         f"- dominant_failure_reason: {manifest.get('dominant_failure_reason')}",
@@ -538,6 +548,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "release_status",
                     "stem_type",
                     "accepted_count",
+                    "semantic_judge_input_count",
                     "skipped_count",
                     "dominant_failure_reason",
                 )

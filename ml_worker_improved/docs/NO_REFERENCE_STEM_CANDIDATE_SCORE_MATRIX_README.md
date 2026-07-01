@@ -1,7 +1,8 @@
 # No-Reference Stem Candidate Score Matrix
 
 `tools/build_no_reference_stem_candidate_score_matrix.py` builds a proxy score
-matrix for accepted non-vocal stem listen-preview manifests.
+matrix for non-vocal stem manifests after audio/provenance/source gates and,
+for presemantic inputs, semantic judge clearance.
 
 Supported stems:
 
@@ -15,6 +16,8 @@ and optionally `no_reference_stem_semantic_judge.jsonl`, then ranks them by
 contract-safe proxy evidence:
 
 - listen-preview status from `artifact_status_contract`;
+- explicit presemantic judge-input status
+  (`presentation_status=semantic_judge_input_not_for_listen_pack`);
 - audio integrity gate status and metrics;
 - GPU provenance gate status;
 - source contract gate status;
@@ -30,12 +33,20 @@ contract-safe proxy evidence:
 - This route blocks `vocal`, `minus`, and `both`; those stems have separate
   mode-specific contracts.
 - Accepted rows keep `release_ready=false`.
-- Without a semantic judge JSONL, rows keep `semantic_quality_verified=false`.
+- Presemantic input-only manifests are not accepted by proxy gates alone.
+- Without a semantic judge JSONL, presemantic rows keep
+  `semantic_quality_verified=false` and remain blocked from listen packs.
+- With a semantic judge JSONL, rows with `decision=accept_candidate`,
+  `semantic_quality_verified=true`, no semantic blockers, and passed
+  audio/provenance/source gates can become matrix rows with
+  `delivery_status=accepted`, `delivery_allowed=true`, and
+  `presentation_status=accepted_for_listen_pack`; the source presemantic
+  manifest remains non-presentable.
 - With a semantic judge JSONL, rows with semantic blockers are marked
   `do_not_release_semantic_judge_blocked` and cannot remain selected by proxy
   audio/GPU gates alone.
-- Output is a proxy ranking only, not a semantic quality proof and not a release
-  decision.
+- Output is a proxy ranking/listen-pack selection surface only, not a
+  release-ready decision.
 
 ## Run
 

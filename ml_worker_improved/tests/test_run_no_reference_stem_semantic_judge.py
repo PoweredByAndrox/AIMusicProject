@@ -43,13 +43,27 @@ def impulse_audio(*, duration_sec: float = 2.0, amplitude: float = 0.8, every: i
     return np.column_stack([mono, mono])
 
 
-def write_listen_manifest(path: Path, *, stem_type: str, audio_path: Path, delivery_allowed: bool = True) -> Path:
+def write_listen_manifest(
+    path: Path,
+    *,
+    stem_type: str,
+    audio_path: Path,
+    delivery_allowed: bool = False,
+    semantic_judge_input: bool = True,
+) -> Path:
+    delivery_status = "pending_semantic_judge" if semantic_judge_input else ("accepted" if delivery_allowed else "blocked")
+    presentation_status = (
+        "semantic_judge_input_not_for_listen_pack"
+        if semantic_judge_input
+        else ("accepted_for_listen_pack" if delivery_allowed else "blocked_from_listen_pack")
+    )
+    release_status = "semantic_judge_input_only" if semantic_judge_input else "listen_preview_only"
     payload = {
         "manifest_type": "no_reference_stem_listen_preview",
-        "delivery_status": "accepted" if delivery_allowed else "blocked",
+        "delivery_status": delivery_status,
         "delivery_allowed": delivery_allowed,
-        "presentation_status": "accepted_for_listen_pack" if delivery_allowed else "blocked_from_listen_pack",
-        "release_status": "listen_preview_only",
+        "presentation_status": presentation_status,
+        "release_status": release_status,
         "stem_type": stem_type,
         "track_id": "track-a",
         "model_name": "unit_model",
@@ -64,6 +78,7 @@ def write_listen_manifest(path: Path, *, stem_type: str, audio_path: Path, deliv
         },
         "source_contract_gate": {"status": "passed"},
         "semantic_quality_verified": False,
+        "semantic_judge_input": semantic_judge_input,
         "release_ready": False,
         "can_mark_release_ready": False,
         "can_publish_as_release": False,
@@ -84,7 +99,7 @@ def write_listen_manifest(path: Path, *, stem_type: str, audio_path: Path, deliv
     return path
 
 
-def test_accepts_pitched_melody_preview_without_release_claim(tmp_path: Path) -> None:
+def test_accepts_presemantic_pitched_melody_judge_input_without_listen_pack_status(tmp_path: Path) -> None:
     audio = write_audio(tmp_path / "melody.flac", sine_audio(440.0))
     manifest = write_listen_manifest(tmp_path / "melody.json", stem_type="melody", audio_path=audio)
 
@@ -98,6 +113,22 @@ def test_accepts_pitched_melody_preview_without_release_claim(tmp_path: Path) ->
     assert row["delivery_allowed"] is False
     assert row["release_ready"] is False
     assert row["can_publish_as_release"] is False
+
+
+def test_blocks_non_listenable_manifest_without_semantic_judge_input_contract(tmp_path: Path) -> None:
+    audio = write_audio(tmp_path / "melody.flac", sine_audio(440.0))
+    manifest = write_listen_manifest(
+        tmp_path / "melody.json",
+        stem_type="melody",
+        audio_path=audio,
+        delivery_allowed=False,
+        semantic_judge_input=False,
+    )
+
+    row = judge_listen_manifest(manifest)
+
+    assert row["decision"] == "blocked_hard_case"
+    assert row["stem_semantic_blockers"] == ["listen_manifest_not_accepted"]
 
 
 def test_blocks_noisy_melody_without_pitch_confidence(tmp_path: Path) -> None:

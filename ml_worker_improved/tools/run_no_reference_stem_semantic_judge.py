@@ -16,7 +16,14 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from tools.artifact_status_contract import sha256_file, status_view_from_manifest  # noqa: E402
+from tools.artifact_status_contract import (  # noqa: E402
+    SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS,
+    SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS,
+    SEMANTIC_JUDGE_INPUT_RELEASE_STATUS,
+    ArtifactStatusView,
+    sha256_file,
+    status_view_from_manifest,
+)
 from tools.run_no_reference_result_judge import (  # noqa: E402
     judge_candidate_row as judge_no_reference_candidate_row,
     resolve_path as resolve_no_reference_path,
@@ -48,6 +55,12 @@ SAFETY_FLAGS = {
     "audio_exported": False,
     "release_ready": False,
 }
+
+SEMANTIC_JUDGE_INPUT_GATE_KEYS = (
+    "audio_integrity_gate",
+    "gpu_provenance_gate",
+    "source_contract_gate",
+)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -112,6 +125,31 @@ def safety_violation(safety: dict[str, bool]) -> str:
         if safety.get(key) is True:
             return key
     return ""
+
+
+def gate_passed(payload: dict[str, Any], gate_name: str) -> bool:
+    gate = nested_dict(payload, gate_name)
+    return str(gate.get("status") or "") == "passed"
+
+
+def is_semantic_judge_input_manifest(payload: dict[str, Any], view: ArtifactStatusView) -> bool:
+    if payload.get("semantic_judge_input") is not True:
+        return False
+    if str(payload.get("manifest_type") or "") != "no_reference_stem_listen_preview":
+        return False
+    if view.delivery_allowed:
+        return False
+    if view.delivery_status != SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS:
+        return False
+    if view.presentation_status != SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS:
+        return False
+    if view.release_status != SEMANTIC_JUDGE_INPUT_RELEASE_STATUS:
+        return False
+    if payload.get("semantic_quality_verified") is True:
+        return False
+    if any(payload.get(key) is True for key in ("release_ready", "can_mark_release_ready", "can_publish_as_release")):
+        return False
+    return all(gate_passed(payload, gate_name) for gate_name in SEMANTIC_JUDGE_INPUT_GATE_KEYS)
 
 
 def read_audio_mono(path: Path) -> tuple[np.ndarray, int, int]:
@@ -476,7 +514,7 @@ def judge_listen_manifest(listen_manifest_json: Path) -> dict[str, Any]:
             reason=f"source_safety_violation:{safety_reason}",
             safety=safety,
         )
-    if not view.listenable:
+    if not view.listenable and not is_semantic_judge_input_manifest(payload, view):
         return blocked_row(
             listen_manifest_json=listen_manifest_json,
             payload=payload,

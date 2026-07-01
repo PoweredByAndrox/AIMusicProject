@@ -10,6 +10,9 @@ from typing import Any, Iterable
 LISTENABLE_PRESENTATION_STATUSES = {"accepted_for_listen_pack"}
 DELIVERABLE_RELEASE_STATUSES = {"release_ready"}
 ACCEPTED_DELIVERY_STATUSES = {"accepted"}
+SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS = "pending_semantic_judge"
+SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS = "semantic_judge_input_not_for_listen_pack"
+SEMANTIC_JUDGE_INPUT_RELEASE_STATUS = "semantic_judge_input_only"
 BLOCKED_STATUSES = {
     "blocked",
     "blocked_for_listening",

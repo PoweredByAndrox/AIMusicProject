@@ -11,7 +11,13 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from tools.artifact_status_contract import sha256_file, status_view_from_manifest  # noqa: E402
+from tools.artifact_status_contract import (  # noqa: E402
+    SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS,
+    SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS,
+    SEMANTIC_JUDGE_INPUT_RELEASE_STATUS,
+    sha256_file,
+    status_view_from_manifest,
+)
 
 
 MATRIX_JSON_NAME = "no_reference_stem_candidate_score_matrix.json"
@@ -199,7 +205,7 @@ def selection_score(payload: dict[str, Any], *, eligible: bool, semantic_score: 
 def next_action(
     *,
     stem_type: str,
-    listenable: bool,
+    candidate_ready: bool,
     audio_ok: bool,
     acceleration_ok: bool,
     source_ok: bool,
@@ -211,13 +217,28 @@ def next_action(
         return "do_not_release_unsupported_stem_type"
     if safety_reason:
         return "do_not_release_source_safety_violation"
-    if not listenable:
-        return "do_not_release_generate_better_stem_candidate"
     if not (audio_ok and acceleration_ok and source_ok and path_ok):
         return "do_not_release_missing_audio_gpu_or_source_gate"
     if semantic_blocked:
         return "do_not_release_semantic_judge_blocked"
+    if not candidate_ready:
+        return "do_not_release_generate_better_stem_candidate"
     return "accepted_for_listen_pack_not_release"
+
+
+def semantic_judge_input_status(payload: dict[str, Any], view_delivery_allowed: bool) -> bool:
+    return (
+        payload.get("semantic_judge_input") is True
+        and str(payload.get("manifest_type") or "") == "no_reference_stem_listen_preview"
+        and not view_delivery_allowed
+        and str(payload.get("delivery_status") or "") == SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS
+        and str(payload.get("presentation_status") or "") == SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS
+        and str(payload.get("release_status") or "") == SEMANTIC_JUDGE_INPUT_RELEASE_STATUS
+        and payload.get("semantic_quality_verified") is not True
+        and payload.get("release_ready") is not True
+        and payload.get("can_mark_release_ready") is not True
+        and payload.get("can_publish_as_release") is not True
+    )
 
 
 def matrix_row(path: Path, semantic_rows: dict[tuple[str, str], dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -231,8 +252,11 @@ def matrix_row(path: Path, semantic_rows: dict[tuple[str, str], dict[str, Any]] 
     semantic_blockers = (semantic_row or {}).get("stem_semantic_blockers") if semantic_row else []
     if not isinstance(semantic_blockers, list):
         semantic_blockers = [str(semantic_blockers)]
+    semantic_blockers = [str(item) for item in semantic_blockers if str(item)]
     semantic_verified = bool((semantic_row or {}).get("semantic_quality_verified") is True)
-    semantic_blocked = bool(semantic_row and semantic_decision != "accept_candidate")
+    semantic_blocked = bool(semantic_row and (semantic_decision != "accept_candidate" or semantic_blockers))
+    semantic_accepted = bool(semantic_decision == "accept_candidate" and semantic_verified and not semantic_blockers)
+    presemantic_input = semantic_judge_input_status(payload, view.delivery_allowed)
     audio_ok = gate_passed(payload, "audio_integrity_gate")
     gpu_ok = has_gpu_proof(payload)
     acceleration_ok = has_acceleration_provenance(payload)
@@ -242,7 +266,7 @@ def matrix_row(path: Path, semantic_rows: dict[tuple[str, str], dict[str, Any]] 
     safety_reason = safety_violation(safety)
     action = next_action(
         stem_type=stem_type,
-        listenable=view.listenable,
+        candidate_ready=bool(view.listenable or (presemantic_input and semantic_accepted)),
         audio_ok=audio_ok,
         acceleration_ok=acceleration_ok,
         source_ok=source_ok,
@@ -252,6 +276,10 @@ def matrix_row(path: Path, semantic_rows: dict[tuple[str, str], dict[str, Any]] 
     )
     eligible = action == "accepted_for_listen_pack_not_release"
     audio_gate = nested_dict(payload, "audio_integrity_gate")
+    delivery_status = "accepted" if eligible else view.delivery_status
+    delivery_allowed = bool(eligible)
+    presentation_status = "accepted_for_listen_pack" if eligible else view.presentation_status
+    release_status = "listen_preview_only" if eligible else view.release_status
     return {
         "matrix_type": "no_reference_stem_candidate_score_matrix",
         "score_mode": "stem",
@@ -259,10 +287,15 @@ def matrix_row(path: Path, semantic_rows: dict[tuple[str, str], dict[str, Any]] 
         "track_id": str(payload.get("track_id") or ""),
         "model_name": str(payload.get("model_name") or ""),
         "selected_audio_path": selected_audio_path,
-        "delivery_status": view.delivery_status,
-        "delivery_allowed": bool(view.delivery_allowed and eligible),
-        "presentation_status": view.presentation_status,
-        "release_status": view.release_status,
+        "delivery_status": delivery_status,
+        "delivery_allowed": delivery_allowed,
+        "presentation_status": presentation_status,
+        "release_status": release_status,
+        "source_delivery_status": view.delivery_status,
+        "source_delivery_allowed": view.delivery_allowed,
+        "source_presentation_status": view.presentation_status,
+        "source_release_status": view.release_status,
+        "semantic_judge_input": presemantic_input,
         "release_ready": False,
         "can_mark_release_ready": False,
         "can_publish_as_release": False,

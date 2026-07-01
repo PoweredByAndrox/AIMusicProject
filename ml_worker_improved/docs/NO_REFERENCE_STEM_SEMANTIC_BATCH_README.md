@@ -11,8 +11,11 @@ copy, or export audio.
 ## Contract
 
 - Docker execution only.
-- Discovers listen-preview manifests under one or more `--listen-manifest-root`
-  paths.
+- Discovers presemantic stem manifests under one or more
+  `--listen-manifest-root` paths. These inputs may be
+  `semantic_judge_input=true` with
+  `presentation_status=semantic_judge_input_not_for_listen_pack`; they are
+  judge-consumable but not user-presentable listen/result artifacts.
 - With `--input-pack-json`, materializes only short JSON views under `src/`
   and reads the existing audio referenced by the pack.
 - Groups manifests by `track_id`.

@@ -26,9 +26,11 @@ def write_listen_manifest(
     *,
     stem_type: str,
     audio_path: Path,
-    delivery_status: str = "accepted",
-    delivery_allowed: bool = True,
-    presentation_status: str = "accepted_for_listen_pack",
+    delivery_status: str = "pending_semantic_judge",
+    delivery_allowed: bool = False,
+    presentation_status: str = "semantic_judge_input_not_for_listen_pack",
+    release_status: str = "semantic_judge_input_only",
+    semantic_judge_input: bool = True,
     audio_gate_status: str = "passed",
     gpu_gate_status: str = "passed",
     source_gate_status: str = "passed",
@@ -58,7 +60,7 @@ def write_listen_manifest(
         "delivery_status": delivery_status,
         "delivery_allowed": delivery_allowed,
         "presentation_status": presentation_status,
-        "release_status": "listen_preview_only",
+        "release_status": release_status,
         "stem_type": stem_type,
         "track_id": "track-a",
         "model_name": "htdemucs_6s",
@@ -83,6 +85,7 @@ def write_listen_manifest(
         },
         "source_contract_gate": {"status": source_gate_status},
         "semantic_quality_verified": False,
+        "semantic_judge_input": semantic_judge_input,
         "release_ready": False,
         "can_mark_release_ready": False,
         "can_publish_as_release": False,
@@ -101,13 +104,13 @@ def write_semantic_judge_jsonl(path: Path, rows: list[dict]) -> Path:
     return path
 
 
-def test_stem_matrix_ranks_accepted_non_vocal_preview_above_blocked_preview(tmp_path: Path) -> None:
-    accepted_audio = write_audio(tmp_path / "melody.flac", amplitude=0.08)
+def test_stem_matrix_keeps_presemantic_preview_blocked_without_judge_pass(tmp_path: Path) -> None:
+    presemantic_audio = write_audio(tmp_path / "melody.flac", amplitude=0.08)
     blocked_audio = write_audio(tmp_path / "other.flac", amplitude=0.001)
-    accepted = write_listen_manifest(
-        tmp_path / "accepted.json",
+    presemantic = write_listen_manifest(
+        tmp_path / "presemantic.json",
         stem_type="melody",
-        audio_path=accepted_audio,
+        audio_path=presemantic_audio,
         rms=0.08,
         peak=0.7,
     )
@@ -118,22 +121,23 @@ def test_stem_matrix_ranks_accepted_non_vocal_preview_above_blocked_preview(tmp_
         delivery_status="blocked",
         delivery_allowed=False,
         presentation_status="blocked_from_listen_pack",
+        release_status="listen_preview_only",
+        semantic_judge_input=False,
         audio_gate_status="blocked",
         rms=0.00001,
         peak=0.001,
     )
 
-    matrix = build_stem_candidate_score_matrix([accepted, blocked])
+    matrix = build_stem_candidate_score_matrix([presemantic, blocked])
     rows = matrix["ranked_candidates"]
+    by_stem = {str(row["stem_type"]): row for row in rows}
 
-    assert rows[0]["stem_type"] == "melody"
-    assert rows[0]["next_action"] == "accepted_for_listen_pack_not_release"
-    assert rows[0]["delivery_allowed"] is True
-    assert rows[0]["release_ready"] is False
-    assert rows[0]["semantic_quality_verified"] is False
-    assert rows[1]["stem_type"] == "other"
-    assert rows[1]["next_action"] == "do_not_release_generate_better_stem_candidate"
-    assert matrix["summary"]["accepted_listen_preview_count"] == 1
+    assert by_stem["melody"]["next_action"] == "do_not_release_generate_better_stem_candidate"
+    assert by_stem["melody"]["delivery_allowed"] is False
+    assert by_stem["melody"]["release_ready"] is False
+    assert by_stem["melody"]["semantic_quality_verified"] is False
+    assert by_stem["other"]["next_action"] == "do_not_release_missing_audio_gpu_or_source_gate"
+    assert matrix["summary"]["accepted_listen_preview_count"] == 0
     assert matrix["summary"]["release_ready"] is False
 
 
@@ -195,6 +199,32 @@ def test_stem_matrix_uses_semantic_judge_to_block_candidate(tmp_path: Path) -> N
     assert matrix["summary"]["semantic_judge_blocked_count"] == 1
 
 
+def test_stem_matrix_treats_accept_decision_with_blockers_as_semantic_blocked(tmp_path: Path) -> None:
+    audio = write_audio(tmp_path / "melody.flac")
+    manifest = write_listen_manifest(tmp_path / "melody.json", stem_type="melody", audio_path=audio)
+    semantic_judge = write_semantic_judge_jsonl(
+        tmp_path / "semantic.jsonl",
+        [
+            {
+                "stem_type": "melody",
+                "selected_audio_path": str(audio),
+                "decision": "accept_candidate",
+                "stem_semantic_score": 0.82,
+                "stem_semantic_blockers": ["melody_low_pitch_confidence"],
+                "semantic_quality_verified": True,
+            }
+        ],
+    )
+
+    matrix = build_stem_candidate_score_matrix([manifest], semantic_judge_jsonl=semantic_judge)
+    row = matrix["ranked_candidates"][0]
+
+    assert row["delivery_allowed"] is False
+    assert row["next_action"] == "do_not_release_semantic_judge_blocked"
+    assert row["semantic_quality_verified"] is True
+    assert row["stem_semantic_blockers"] == ["melody_low_pitch_confidence"]
+
+
 def test_stem_matrix_accepts_candidate_with_semantic_judge_pass(tmp_path: Path) -> None:
     audio = write_audio(tmp_path / "bass.flac")
     manifest = write_listen_manifest(tmp_path / "bass.json", stem_type="bass", audio_path=audio)
@@ -216,6 +246,9 @@ def test_stem_matrix_accepts_candidate_with_semantic_judge_pass(tmp_path: Path) 
     row = matrix["ranked_candidates"][0]
 
     assert row["delivery_allowed"] is True
+    assert row["delivery_status"] == "accepted"
+    assert row["presentation_status"] == "accepted_for_listen_pack"
+    assert row["release_status"] == "listen_preview_only"
     assert row["semantic_quality_verified"] is True
     assert row["stem_semantic_score"] == 0.88
     assert row["next_action"] == "accepted_for_listen_pack_not_release"
