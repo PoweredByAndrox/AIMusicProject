@@ -16,6 +16,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.artifact_status_contract import sha256_file  # noqa: E402
+from tools.path_prefix_mapping import parse_path_prefix_map, resolve_audio_path  # noqa: E402
 
 
 ALLOWED_STEMS = {"melody", "drums", "bass", "other"}
@@ -288,6 +289,7 @@ def blocked_manifest(
     audio_gate: dict[str, Any],
     gpu_gate: dict[str, Any],
     contract_gate: dict[str, Any],
+    path_resolution: dict[str, Any],
     safety: dict[str, bool],
 ) -> dict[str, Any]:
     return {
@@ -303,6 +305,8 @@ def blocked_manifest(
         "source_audio_path": str(source_manifest.get("audio_path") or ""),
         "selected_audio_path": selected_audio_path,
         "selected_stem_path": selected_audio_path,
+        "source_selected_audio_path": str(path_resolution.get("original_path") or selected_audio_path),
+        "selected_audio_path_resolution": path_resolution,
         "audio_integrity_gate": audio_gate,
         "gpu_provenance_gate": gpu_gate,
         "source_contract_gate": contract_gate,
@@ -337,6 +341,7 @@ def accepted_manifest(
     audio_gate: dict[str, Any],
     gpu_gate: dict[str, Any],
     contract_gate: dict[str, Any],
+    path_resolution: dict[str, Any],
     safety: dict[str, bool],
 ) -> dict[str, Any]:
     return {
@@ -352,6 +357,8 @@ def accepted_manifest(
         "source_audio_path": str(source_manifest.get("audio_path") or ""),
         "selected_audio_path": selected_audio_path,
         "selected_stem_path": selected_audio_path,
+        "source_selected_audio_path": str(path_resolution.get("original_path") or selected_audio_path),
+        "selected_audio_path_resolution": path_resolution,
         "audio_integrity_gate": audio_gate,
         "gpu_provenance_gate": gpu_gate,
         "source_contract_gate": contract_gate,
@@ -372,6 +379,8 @@ def accepted_manifest(
                 "stem_type": target_stem,
                 "stem_path": selected_audio_path,
                 "selected_audio_path": selected_audio_path,
+                "source_selected_audio_path": str(path_resolution.get("original_path") or selected_audio_path),
+                "selected_audio_path_resolution": path_resolution,
                 "audio_integrity_gate": audio_gate,
                 "gpu_provenance_gate": gpu_gate,
                 "semantic_quality_verified": False,
@@ -397,11 +406,13 @@ def build_manifest(
     min_rms: float = 1e-4,
     min_peak: float = 1e-4,
     max_peak: float = 1.01,
+    path_prefix_map: Sequence[tuple[str, str]] = (),
 ) -> dict[str, Any]:
     source_manifest = read_json(stem_manifest_json)
     manifest_stem = manifest_target_stem(source_manifest)
     selected_stem = normalize_stem(target_stem or manifest_stem)
-    selected_audio_path = target_audio_path(source_manifest, selected_stem)
+    source_selected_audio_path = target_audio_path(source_manifest, selected_stem)
+    selected_audio_path, path_resolution = resolve_audio_path(source_selected_audio_path, path_prefix_map)
     safety = safety_from_source(source_manifest)
     selected_track_id = str(track_id or source_manifest.get("track_id") or "")
 
@@ -436,6 +447,7 @@ def build_manifest(
             audio_gate=audio_gate,
             gpu_gate=gpu_gate,
             contract_gate=contract_gate,
+            path_resolution=path_resolution,
             safety=safety,
         )
     return accepted_manifest(
@@ -447,6 +459,7 @@ def build_manifest(
         audio_gate=audio_gate,
         gpu_gate=gpu_gate,
         contract_gate=contract_gate,
+        path_resolution=path_resolution,
         safety=safety,
     )
 
@@ -492,6 +505,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--min-rms", type=float, default=1e-4)
     parser.add_argument("--min-peak", type=float, default=1e-4)
     parser.add_argument("--max-peak", type=float, default=1.01)
+    parser.add_argument(
+        "--path-prefix-map",
+        action="append",
+        default=[],
+        metavar="FROM=TO",
+        help="Map source manifest audio paths into the local artifact mirror before gating.",
+    )
     args = parser.parse_args(argv)
 
     manifest = build_manifest(
@@ -502,6 +522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_rms=args.min_rms,
         min_peak=args.min_peak,
         max_peak=args.max_peak,
+        path_prefix_map=parse_path_prefix_map(args.path_prefix_map),
     )
     write_json(args.output_manifest_json, manifest)
     args.summary_md.parent.mkdir(parents=True, exist_ok=True)

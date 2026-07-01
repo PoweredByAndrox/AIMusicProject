@@ -140,6 +140,31 @@ def test_multistem_manifest_can_select_existing_non_manifest_target_stem(tmp_pat
     assert manifest["audio_integrity_gate"]["status"] == "passed"
 
 
+def test_path_prefix_map_resolves_mac_local_stem_path_to_artifact_mirror(tmp_path: Path) -> None:
+    mirror_dir = tmp_path / "artifacts" / "mac_api" / "altm002" / "bci"
+    mirror_audio_path = write_audio(mirror_dir / "bass.flac")
+    mac_source_dir = "/Users/andrejviluha/aimusic_local_artifacts/mac_api/altm002/bci"
+    mac_audio_path = Path(f"{mac_source_dir}/bass.flac")
+    source_manifest = write_source_manifest(tmp_path / "stem_manifest.json", target_stem="bass", audio_path=mac_audio_path)
+
+    blocked = build_manifest(stem_manifest_json=source_manifest, target_stem="bass")
+    manifest = build_manifest(
+        stem_manifest_json=source_manifest,
+        target_stem="bass",
+        path_prefix_map=[(mac_source_dir, str(mirror_dir))],
+    )
+
+    assert blocked["delivery_status"] == "blocked"
+    assert blocked["dominant_failure_reason"] == "audio_path_missing"
+    assert manifest["delivery_status"] == "accepted"
+    assert manifest["selected_audio_path"] == str(mirror_audio_path)
+    assert manifest["source_selected_audio_path"] == str(mac_audio_path)
+    assert manifest["selected_audio_path_resolution"]["mapped"] is True
+    assert manifest["selected_audio_path_resolution"]["original_path"] == str(mac_audio_path)
+    assert manifest["selected_audio_path_resolution"]["resolved_path"] == str(mirror_audio_path)
+    assert manifest["audio_integrity_gate"]["path"] == str(mirror_audio_path)
+
+
 def test_blocks_unsupported_vocal_minus_or_pair_stems(tmp_path: Path) -> None:
     audio_path = write_audio(tmp_path / "vocals.flac")
     source_manifest = write_source_manifest(tmp_path / "stem_manifest.json", target_stem="vocals", audio_path=audio_path)

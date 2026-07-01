@@ -66,6 +66,12 @@ stem=/app/path/file.flac`. The packer still requires the registered
 `audio_override_applied=true`, preserves the original `source_manifest_audio_path`,
 and keeps the override path in manifest provenance instead of the filename.
 
+If the registered manifest was produced on a remote Mac and still contains
+Mac-local source paths, use `--path-prefix-map FROM=TO` instead of per-stem
+overrides. The packer resolves the source path into the mounted/local artifact
+mirror before checking or copying audio, while `source_manifest_audio_path` keeps
+the original path and `source_audio_path_resolution` records the mapping.
+
 The generated pack uses short metadata names:
 
 - `pack.json`
@@ -403,6 +409,7 @@ docker compose run --rm --no-deps ml-worker python tools/build_stem_manifest_aud
   --stem-manifest-json /app/lab_artifacts/src/noe/stem_manifest.json \
   --output-dir /app/lab_artifacts/lp_ex/s6 \
   --track-id noe \
+  --path-prefix-map /Users/andrejviluha/aimusic_local_artifacts=/app/artifacts \
   --stem vocal \
   --stem minus \
   --stem drums \

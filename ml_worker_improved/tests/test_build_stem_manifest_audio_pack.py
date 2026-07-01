@@ -121,6 +121,37 @@ def test_stem_manifest_audio_pack_can_use_explicit_stem_audio_override(tmp_path:
     assert manifest["can_publish_as_result"] is False
 
 
+def test_stem_manifest_audio_pack_maps_mac_local_paths_to_artifact_mirror(tmp_path: Path) -> None:
+    source_manifest = _source_manifest(tmp_path)
+    mirror_dir = tmp_path / "artifacts" / "mac_api" / "altm002" / "bci"
+    vocal_path = _write_audio(mirror_dir / "vocals.flac")
+    minus_path = _write_audio(mirror_dir / "instrumental.flac", amplitude=0.08)
+    mac_source_dir = "/Users/andrejviluha/aimusic_local_artifacts/mac_api/altm002/bci"
+    payload = json.loads(source_manifest.read_text(encoding="utf-8"))
+    payload["stems"]["vocals"]["path"] = f"{mac_source_dir}/vocals.flac"
+    payload["stems"]["minus"]["path"] = f"{mac_source_dir}/instrumental.flac"
+    source_manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    manifest = build_stem_manifest_audio_pack(
+        stem_manifest_json=source_manifest,
+        output_dir=tmp_path / "pack",
+        track_id="track-a",
+        stems=("vocal", "minus"),
+        path_prefix_map=[(mac_source_dir, str(mirror_dir))],
+    )
+
+    assert manifest["delivery_status"] == "accepted"
+    assert manifest["stem_count"] == 2
+    assert manifest["path_prefix_map"] == [{"from": mac_source_dir, "to": str(mirror_dir)}]
+    stems = {row["stem_type"]: row for row in manifest["stems"]}
+    assert stems["vocal"]["source_manifest_audio_path"] == f"{mac_source_dir}/vocals.flac"
+    assert stems["vocal"]["source_audio_path"] == str(vocal_path)
+    assert stems["vocal"]["source_audio_path_resolution"]["mapped"] is True
+    assert stems["minus"]["source_manifest_audio_path"] == f"{mac_source_dir}/instrumental.flac"
+    assert stems["minus"]["source_audio_path"] == str(minus_path)
+    assert stems["minus"]["source_audio_path_resolution"]["resolved_path"] == str(minus_path)
+
+
 def test_stem_manifest_audio_pack_blocks_release_ready_source(tmp_path: Path) -> None:
     manifest = build_stem_manifest_audio_pack(
         stem_manifest_json=_source_manifest(tmp_path, release_ready=True),

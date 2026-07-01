@@ -26,6 +26,7 @@ from full_pack_stem_contract import (  # noqa: E402
     required_stem_missing_checks,
     required_stems_from_cli,
 )
+from path_prefix_mapping import parse_path_prefix_map, resolve_audio_path  # noqa: E402
 
 
 START_TIME = time.monotonic()
@@ -200,6 +201,7 @@ def build_stem_manifest_audio_pack(
     track_id: str,
     stems: Sequence[str] = DEFAULT_STEMS,
     override_stem_paths: dict[str, Path] | None = None,
+    path_prefix_map: Sequence[tuple[str, str]] = (),
     require_full_pack_stems: bool = False,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -232,7 +234,14 @@ def build_stem_manifest_audio_pack(
                 failed_checks.append(f"source_stem_missing:{stem_type}")
                 continue
             source_manifest_path = Path(str(payload.get("path") or ""))
-            source_path = overrides.get(stem_type, source_manifest_path)
+            mapped_path_text, path_resolution = resolve_audio_path(str(source_manifest_path), path_prefix_map)
+            source_path = overrides.get(stem_type, Path(mapped_path_text))
+            if stem_type in overrides:
+                path_resolution = {
+                    **path_resolution,
+                    "override_applied": True,
+                    "override_path": str(source_path),
+                }
             if not source_path.exists() or not source_path.is_file():
                 failed_checks.append(f"source_stem_audio_missing:{stem_type}")
                 continue
@@ -252,6 +261,7 @@ def build_stem_manifest_audio_pack(
                     "source_audio_path": str(source_path),
                     "source_manifest_audio_path": str(source_manifest_path),
                     "audio_override_applied": stem_type in overrides,
+                    "source_audio_path_resolution": path_resolution,
                     "listen_audio_path": str(listen_path),
                     "artifact_filename": artifact_filename,
                     "artifact_relative_path": relative_artifact_path(listen_path, output_dir),
@@ -300,6 +310,7 @@ def build_stem_manifest_audio_pack(
         "present_stems": present_stems,
         "missing_required_stems": missing_stems,
         "source_audio_overrides": {stem: str(path) for stem, path in sorted(overrides.items())},
+        "path_prefix_map": [{"from": source, "to": target} for source, target in path_prefix_map],
         "stem_count": len(selected) if accepted else 0,
         "stems": selected if accepted else [],
         "failed_checks": failed_checks,
@@ -349,6 +360,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Explicit existing audio override in stem=/path form, for example minus=/app/run/normalized/minus.flac.",
     )
+    parser.add_argument(
+        "--path-prefix-map",
+        action="append",
+        default=[],
+        metavar="FROM=TO",
+        help="Map source manifest stem paths into the local artifact mirror before copying.",
+    )
     return parser.parse_args(argv)
 
 
@@ -361,6 +379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         track_id=str(args.track_id),
         stems=tuple(str(item) for item in args.stem) or DEFAULT_STEMS,
         override_stem_paths=dict(parse_override_stem_path(str(item)) for item in args.override_stem_path),
+        path_prefix_map=parse_path_prefix_map(args.path_prefix_map),
         require_full_pack_stems=bool(args.require_full_pack_stems),
         command_args=list(argv if argv is not None else sys.argv[1:]),
     )
