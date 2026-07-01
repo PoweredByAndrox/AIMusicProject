@@ -132,3 +132,10 @@ full_pack_gate_rebuild
 The next metadata-only handoff is `tools/plan_mac_reference_path_recovery.py`,
 which converts a blocked Mac readiness summary into the standard
 `reference_path_recovery_plan.jsonl` format.
+
+For promising-but-blocked human feedback, use
+`tools/plan_mac_promising_blocked_handoff.py`. It converts
+`promising_blocked_handoff` into a standard full-pack loop queue with
+`route_intent=mac_promising_blocked_handoff`, preserving both documented repair
+routes and missing-implementation route gaps while keeping `delivery_allowed`
+false.

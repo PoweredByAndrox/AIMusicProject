@@ -295,6 +295,35 @@ def mac_selected_candidate_reference_row(queue_item: dict[str, Any]) -> dict[str
     }
 
 
+def mac_promising_blocked_handoff_row(queue_item: dict[str, Any]) -> dict[str, Any]:
+    routes = [dict(route) for route in queue_item.get("recommended_routes") or [] if isinstance(route, dict)]
+    documented_count = sum(1 for route in routes if str(route.get("route_status") or "") == "documented_route")
+    missing_count = sum(1 for route in routes if str(route.get("route_status") or "") == "missing_implementation")
+    return {
+        "schema": "full_pack_loop_iteration_action.v1",
+        "queue_item_id": str(queue_item.get("queue_item_id") or ""),
+        "stem_type": normalize_stem(queue_item.get("stem_type")),
+        "route_intent": str(queue_item.get("route_intent") or ""),
+        "issue_tags": [str(tag) for tag in queue_item.get("issue_tags") or [] if str(tag)],
+        "issue_categories": [str(category) for category in queue_item.get("issue_categories") or [] if str(category)],
+        "source_audio_path": str(queue_item.get("source_audio_path") or queue_item.get("audio_path") or ""),
+        "readiness_summary_json": str(queue_item.get("readiness_summary_json") or ""),
+        "objective_summary": dict(queue_item.get("objective_summary") or {}) if isinstance(queue_item.get("objective_summary"), dict) else {},
+        "recommended_routes": routes,
+        "documented_route_count": documented_count,
+        "missing_implementation_route_count": missing_count,
+        "action_status": "blocked_mac_promising_handoff_route_resolution_required",
+        "training_job_statuses": [],
+        "required_next_actions": stable_unique([str(action) for action in queue_item.get("required_actions") or [] if str(action)]),
+        "docker_commands": [],
+        "expected_acceleration_mode": "external_only_cpu_handoff_planning",
+        "execution_started": False,
+        "training_started": False,
+        "release_ready": False,
+        "can_publish_as_result": False,
+    }
+
+
 def build_action_rows(queue_rows: Sequence[dict[str, Any]], jobs_by_stem: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     failed: list[str] = []
@@ -309,6 +338,8 @@ def build_action_rows(queue_rows: Sequence[dict[str, Any]], jobs_by_stem: dict[s
             rows.append(minus_repair_row(queue_item, jobs))
         elif intent == "mac_selected_candidate_reference_gap":
             rows.append(mac_selected_candidate_reference_row(queue_item))
+        elif intent == "mac_promising_blocked_handoff":
+            rows.append(mac_promising_blocked_handoff_row(queue_item))
         else:
             failed.append(f"unsupported_route_intent:{intent}")
     return rows, stable_unique(failed)
@@ -323,6 +354,8 @@ def plan_status(rows: Sequence[dict[str, Any]], failed: Sequence[str]) -> str:
         return "partial_ready_with_blockers"
     if any(row.get("route_intent") == "mac_selected_candidate_reference_gap" for row in rows):
         return "blocked_waiting_for_mac_reference_recovery"
+    if any(row.get("route_intent") == "mac_promising_blocked_handoff" for row in rows):
+        return "blocked_waiting_for_mac_promising_handoff_route"
     if any(row.get("route_intent") == "minus_repair" for row in rows):
         return "blocked_waiting_for_verified_reference_corpus_and_minus_repair"
     return "blocked_waiting_for_verified_reference_corpus"

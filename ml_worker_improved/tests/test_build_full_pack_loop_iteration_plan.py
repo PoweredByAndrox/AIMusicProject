@@ -357,3 +357,105 @@ def test_full_pack_loop_iteration_plan_prioritizes_mac_reference_gap_in_mixed_qu
         "minus_repair": 1,
         "stem_training_coverage_gap": 5,
     }
+
+
+def test_full_pack_loop_iteration_plan_blocks_promising_handoff_route_resolution(tmp_path: Path) -> None:
+    rows_path = tmp_path / "queue" / "rows.jsonl"
+    write_jsonl(
+        rows_path,
+        [
+            {
+                "schema": "short_listen_repair_queue_item.v1",
+                "queue_item_id": "mph001",
+                "route_intent": "mac_promising_blocked_handoff",
+                "stem_type": "minus",
+                "audio_path": "/mac/source/t001.mp3",
+                "source_audio_path": "/mac/source/t001.mp3",
+                "readiness_summary_json": "/host_artifacts/loop/it013/rd/summary.json",
+                "issue_tags": ["detail_loss", "residual_vocal_middle"],
+                "issue_categories": ["detail_loss", "residual_vocal_leak"],
+                "objective_summary": {
+                    "before_fail_regions": 16,
+                    "after_fail_regions": 16,
+                    "region_delta": 0,
+                    "pitch_guard_verdict": "fail",
+                },
+                "recommended_routes": [
+                    {
+                        "issue_category": "detail_loss",
+                        "route": "judge_guided_minus_air_detail_repair",
+                        "route_status": "documented_route",
+                        "tool": "tools/apply_judge_guided_minus_air_detail_repair.py",
+                        "next_action": "run_judge_guided_minus_air_detail_repair",
+                    },
+                    {
+                        "issue_category": "residual_vocal_leak",
+                        "route": "detail_preserving_residual_vocal_cleanup",
+                        "route_status": "missing_implementation",
+                        "tool": "",
+                        "next_action": "run_detail_preserving_residual_vocal_cleanup",
+                    },
+                ],
+                "required_actions": [
+                    "run_judge_guided_minus_air_detail_repair",
+                    "design_detail_preserving_residual_vocal_cleanup_route",
+                    "minus_audit_gate",
+                    "holdout_eval_gate",
+                    "train_ready_decision_gate",
+                    "full_pack_gate_rebuild",
+                ],
+                "release_ready": False,
+                "can_publish_as_result": False,
+            }
+        ],
+    )
+    queue_manifest = write_json(
+        tmp_path / "queue" / "queue.json",
+        {
+            "schema": "short_listen_repair_queue_manifest.v1",
+            "queue_status": "ready_for_full_pack_loop",
+            "queue_source": "mac_promising_blocked_handoff",
+            "queue_item_count": 1,
+            "rows_jsonl": str(rows_path),
+            "failed_checks": [],
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "delivery_allowed": False,
+            "safety": {
+                "release_ready": False,
+                "training_started": False,
+                "thresholds_relaxed": False,
+                "model_registry_edited": False,
+            },
+        },
+    )
+
+    manifest = build_full_pack_loop_iteration_plan(
+        repair_queue_manifest_json=queue_manifest,
+        training_plan_json=training_plan(tmp_path),
+        output_dir=tmp_path / "plan",
+    )
+
+    assert manifest["plan_status"] == "blocked_waiting_for_mac_promising_handoff_route"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["action_count"] == 1
+    assert manifest["ready_action_count"] == 0
+    assert manifest["blocked_action_count"] == 1
+    assert manifest["route_intent_counts"] == {"mac_promising_blocked_handoff": 1}
+    row = rows(tmp_path / "plan" / "rows.jsonl")[0]
+    assert row["action_status"] == "blocked_mac_promising_handoff_route_resolution_required"
+    assert row["expected_acceleration_mode"] == "external_only_cpu_handoff_planning"
+    assert row["recommended_routes"][0]["route_status"] == "documented_route"
+    assert row["recommended_routes"][1]["route_status"] == "missing_implementation"
+    assert row["documented_route_count"] == 1
+    assert row["missing_implementation_route_count"] == 1
+    assert row["required_next_actions"] == [
+        "run_judge_guided_minus_air_detail_repair",
+        "design_detail_preserving_residual_vocal_cleanup_route",
+        "minus_audit_gate",
+        "holdout_eval_gate",
+        "train_ready_decision_gate",
+        "full_pack_gate_rebuild",
+    ]
+    assert row["training_started"] is False
+    assert row["can_publish_as_result"] is False
