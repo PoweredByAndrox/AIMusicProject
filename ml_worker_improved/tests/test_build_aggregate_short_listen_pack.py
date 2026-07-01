@@ -236,6 +236,130 @@ def test_aggregate_short_listen_pack_inherits_required_stems_from_source_manifes
     assert not (tmp_path / "out" / "audio").exists()
 
 
+def test_aggregate_short_listen_pack_blocks_required_unverified_stem(tmp_path: Path) -> None:
+    audio = _write_audio(tmp_path / "source" / "d001.flac")
+    source_manifest = _write_json(
+        tmp_path / "source" / "pack.json",
+        {
+            "schema": "stem_listen_pack.v1",
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "required_stems": ["drums"],
+            "accepted_listen_preview_rows": [
+                {
+                    "listen_audio_path": str(audio),
+                    "artifact_relative_path": "d001.flac",
+                    "stem_type": "drums",
+                    "track_alias": "t001",
+                    "quality_status": "listen_preview_only",
+                    "semantic_quality_verified": False,
+                    "release_ready": False,
+                    "can_publish_as_result": False,
+                }
+            ],
+        },
+    )
+
+    manifest = build_aggregate_short_listen_pack(
+        sources=[("drm", source_manifest)],
+        output_dir=tmp_path / "out",
+        pack_id="lp001",
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["items"] == []
+    assert "required_stem_quality_not_verified:drums" in manifest["failed_checks"]
+    assert not (tmp_path / "out" / "audio").exists()
+
+
+def test_aggregate_short_listen_pack_blocks_mixed_required_unverified_stem_rows(tmp_path: Path) -> None:
+    verified_audio = _write_audio(tmp_path / "source" / "d001.flac")
+    unverified_audio = _write_audio(tmp_path / "source" / "d002.flac")
+    source_manifest = _write_json(
+        tmp_path / "source" / "pack.json",
+        {
+            "schema": "stem_listen_pack.v1",
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "required_stems": ["drums"],
+            "accepted_listen_preview_rows": [
+                {
+                    "listen_audio_path": str(verified_audio),
+                    "artifact_relative_path": "d001.flac",
+                    "stem_type": "drums",
+                    "track_alias": "t001",
+                    "quality_status": "listen_preview_only",
+                    "semantic_quality_verified": True,
+                    "release_ready": False,
+                    "can_publish_as_result": False,
+                },
+                {
+                    "listen_audio_path": str(unverified_audio),
+                    "artifact_relative_path": "d002.flac",
+                    "stem_type": "drums",
+                    "track_alias": "t001",
+                    "quality_status": "listen_preview_only",
+                    "semantic_quality_verified": False,
+                    "release_ready": False,
+                    "can_publish_as_result": False,
+                },
+            ],
+        },
+    )
+
+    manifest = build_aggregate_short_listen_pack(
+        sources=[("drm", source_manifest)],
+        output_dir=tmp_path / "out",
+        pack_id="lp001",
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["items"] == []
+    assert "required_stem_quality_not_verified:drums" in manifest["failed_checks"]
+
+
+def test_aggregate_short_listen_pack_preserves_unrequired_instrument_preview(tmp_path: Path) -> None:
+    audio = _write_audio(tmp_path / "source" / "d001.flac")
+    source_manifest = _write_json(
+        tmp_path / "source" / "pack.json",
+        {
+            "schema": "stem_listen_pack.v1",
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "accepted_listen_preview_rows": [
+                {
+                    "listen_audio_path": str(audio),
+                    "artifact_relative_path": "d001.flac",
+                    "stem_type": "drums",
+                    "track_alias": "t001",
+                    "quality_status": "listen_preview_only",
+                    "semantic_quality_verified": False,
+                    "release_ready": False,
+                    "can_publish_as_result": False,
+                }
+            ],
+        },
+    )
+
+    manifest = build_aggregate_short_listen_pack(
+        sources=[("drm", source_manifest)],
+        output_dir=tmp_path / "out",
+        pack_id="lp001",
+    )
+
+    assert manifest["delivery_status"] == "accepted"
+    assert manifest["delivery_allowed"] is True
+    assert manifest["item_count"] == 1
+    assert manifest["required_stems"] == []
+
+
 def test_aggregate_short_listen_pack_blocks_release_ready_source(tmp_path: Path) -> None:
     manifest = build_aggregate_short_listen_pack(
         sources=[("voc", _source_pack(tmp_path, release_ready=True))],

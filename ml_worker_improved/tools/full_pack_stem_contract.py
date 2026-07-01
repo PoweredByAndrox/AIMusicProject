@@ -6,6 +6,7 @@ from typing import Any, Iterable, Sequence
 
 
 REQUIRED_FULL_PACK_STEMS = ("vocal", "minus", "drums", "bass", "other", "guitar", "piano")
+SEMANTIC_EVIDENCE_REQUIRED_STEMS = ("drums", "bass", "other", "guitar", "piano", "melody")
 
 
 def normalize_stem_type(value: Any) -> str:
@@ -60,6 +61,32 @@ def missing_required_stems(required_stems: Sequence[str] | None, present_stems: 
 
 def required_stem_missing_checks(missing_stems: Sequence[str], *, prefix: str = "required_stem_missing") -> list[str]:
     return [f"{prefix}:{stem}" for stem in missing_stems]
+
+
+def item_has_semantic_quality_evidence(item: dict[str, Any]) -> bool:
+    quality_status = str(item.get("quality_status") or "")
+    return item.get("semantic_quality_verified") is True and not quality_status.endswith("not_semantic_verified")
+
+
+def required_stem_quality_missing_checks(
+    items: Iterable[dict[str, Any]],
+    required_stems: Sequence[str] | None,
+    *,
+    prefix: str = "required_stem_quality_not_verified",
+) -> list[str]:
+    rows = [item for item in items if isinstance(item, dict)]
+    required = set(normalize_stem_list(required_stems))
+    if not required:
+        return []
+    missing: list[str] = []
+    evidence_required = set(SEMANTIC_EVIDENCE_REQUIRED_STEMS)
+    for item in rows:
+        stem = stem_type_from_item(item)
+        if stem not in required or stem not in evidence_required:
+            continue
+        if not item_has_semantic_quality_evidence(item) and stem not in missing:
+            missing.append(stem)
+    return [f"{prefix}:{stem}" for stem in missing]
 
 
 def pack_items_for_stem_contract(pack: dict[str, Any]) -> list[dict[str, Any]]:

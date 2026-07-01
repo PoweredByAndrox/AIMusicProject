@@ -24,6 +24,7 @@ from tools.full_pack_stem_contract import (  # noqa: E402
     missing_required_stems,
     normalize_stem_list,
     present_stems_from_items,
+    required_stem_quality_missing_checks,
     required_stem_missing_checks,
     required_stems_from_cli,
 )
@@ -341,6 +342,7 @@ def validate_aggregate_short_listen_pack(
     present_stems = present_stems_from_items(items, contract_required_stems)
     missing_stems = missing_required_stems(contract_required_stems, present_stems)
     failed.extend(required_stem_missing_checks(missing_stems))
+    failed.extend(required_stem_quality_missing_checks(items, contract_required_stems))
 
     coverage_path = resolve_artifact_path(pack_root, pack.get("coverage_json"), "coverage.json")
     coverage: dict[str, Any] = {}

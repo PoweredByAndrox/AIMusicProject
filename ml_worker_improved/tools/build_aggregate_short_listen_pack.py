@@ -29,6 +29,7 @@ from tools.full_pack_stem_contract import (  # noqa: E402
     missing_required_stems,
     normalize_stem_list,
     present_stems_from_items,
+    required_stem_quality_missing_checks,
     required_stem_missing_checks,
     required_stems_from_cli,
 )
@@ -400,6 +401,7 @@ def build_aggregate_short_listen_pack(
     present_stems = present_stems_from_items(selected, normalized_required_stems)
     missing_stems = missing_required_stems(normalized_required_stems, present_stems)
     failed_checks.extend(required_stem_missing_checks(missing_stems))
+    failed_checks.extend(required_stem_quality_missing_checks(selected, normalized_required_stems))
     failed_checks = sorted(set(failed_checks))
     accepted = bool(selected) and not failed_checks
     if not accepted:

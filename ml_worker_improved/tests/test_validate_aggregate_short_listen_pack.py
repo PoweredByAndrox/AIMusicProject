@@ -187,6 +187,80 @@ def test_validate_aggregate_short_listen_pack_reads_required_stems_from_pack_man
     assert "required_stem_missing:minus" in manifest["failed_checks"]
 
 
+def test_validate_aggregate_short_listen_pack_blocks_required_unverified_stem(tmp_path: Path) -> None:
+    pack = _valid_pack(tmp_path)
+    payload = json.loads(pack.read_text(encoding="utf-8"))
+    payload["required_stems"] = ["drums"]
+    payload["items"][0]["stem_type"] = "drums"
+    payload["items"][0]["semantic_quality_verified"] = False
+    payload["items"][0]["quality_status"] = "listen_preview_only"
+    payload["present_stems"] = ["drums"]
+    payload["missing_required_stems"] = []
+    pack.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    selected_path = tmp_path / "pack" / "selected.jsonl"
+    selected_path.write_text(json.dumps(payload["items"][0], sort_keys=True) + "\n", encoding="utf-8")
+    coverage_path = tmp_path / "pack" / "coverage.json"
+    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    coverage["stem_groups"][0]["stem_types"] = ["drums"]
+    coverage["stem_groups"][0]["semantic_quality_verified"] = False
+    coverage_path.write_text(json.dumps(coverage, sort_keys=True), encoding="utf-8")
+
+    manifest = validate_aggregate_short_listen_pack(
+        pack_manifest_json=pack,
+        output_dir=tmp_path / "validation",
+    )
+
+    assert manifest["validation_status"] == "failed"
+    assert "required_stem_quality_not_verified:drums" in manifest["failed_checks"]
+
+
+def test_validate_aggregate_short_listen_pack_blocks_mixed_required_unverified_stem_rows(tmp_path: Path) -> None:
+    pack = _valid_pack(tmp_path)
+    payload = json.loads(pack.read_text(encoding="utf-8"))
+    second_audio = _write_audio(tmp_path / "pack" / "audio" / "voc" / "v002.flac")
+    first_item = dict(payload["items"][0])
+    first_item["stem_type"] = "drums"
+    first_item["semantic_quality_verified"] = True
+    first_item["quality_status"] = "listen_preview_only"
+    second_item = dict(first_item)
+    second_item["audio_path"] = "audio/voc/v002.flac"
+    second_item["source_audio_path"] = str(second_audio)
+    second_item["semantic_quality_verified"] = False
+    second_item["sha256"] = _sha256(second_audio)
+    payload["required_stems"] = ["drums"]
+    payload["items"] = [first_item, second_item]
+    payload["item_count"] = 2
+    payload["present_stems"] = ["drums"]
+    payload["missing_required_stems"] = []
+    pack.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    selected_path = tmp_path / "pack" / "selected.jsonl"
+    selected_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in payload["items"]) + "\n",
+        encoding="utf-8",
+    )
+    coverage_path = tmp_path / "pack" / "coverage.json"
+    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    coverage["stem_groups"][0]["item_count"] = 2
+    coverage["stem_groups"][0]["stem_types"] = ["drums"]
+    coverage["stem_groups"][0]["files"] = ["audio/voc/v001.flac", "audio/voc/v002.flac"]
+    coverage["stem_groups"][0]["semantic_quality_verified"] = True
+    coverage_path.write_text(json.dumps(coverage, sort_keys=True), encoding="utf-8")
+    (tmp_path / "pack" / "README.md").write_text(
+        "# lp_test\n\n- `pack.json`\n- `coverage.json`\n- `selected.jsonl`\n- `progress.jsonl`\n- `audio/voc/v001.flac`\n- `audio/voc/v002.flac`\n",
+        encoding="utf-8",
+    )
+
+    manifest = validate_aggregate_short_listen_pack(
+        pack_manifest_json=pack,
+        output_dir=tmp_path / "validation",
+    )
+
+    assert manifest["validation_status"] == "failed"
+    assert "required_stem_quality_not_verified:drums" in manifest["failed_checks"]
+
+
 def test_validate_aggregate_short_listen_pack_blocks_long_output_segment(tmp_path: Path) -> None:
     pack = _valid_pack(tmp_path)
     payload = json.loads(pack.read_text(encoding="utf-8"))

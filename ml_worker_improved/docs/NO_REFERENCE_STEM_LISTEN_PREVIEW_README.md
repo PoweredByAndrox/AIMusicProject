@@ -109,6 +109,13 @@ only existing audio from source manifests, writes `pack.json`, `coverage.json`,
 source manifest or row is release-ready, publishable, threshold-relaxed, missing
 audio, or uses a non-short alias/path segment.
 
+If a source manifest or CLI argument declares required instrument stems, aggregate
+packaging also fails closed until those present required stems carry machine
+semantic-quality evidence. Unverified required instrument rows are blocked with
+`required_stem_quality_not_verified:<stem>` by both the builder and validator.
+The partial vocal/minus preview flow stays preview-only unless a caller declares
+full required-stem coverage.
+
 The aggregate pack also accepts an accepted no-reference vocal/minus master
 manifest that exposes `accepted_listen_preview_rows` with `selected_audio_path`.
 Those rows are copied without modification using short stem filenames such as
