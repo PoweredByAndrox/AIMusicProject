@@ -13,7 +13,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from docker_runtime import require_docker_runtime  # noqa: E402
+from docker_runtime import cli_runtime_contract, require_docker_runtime  # noqa: E402
 from artifact_name_policy import indexed_audio_filename  # noqa: E402
 
 import numpy as np
@@ -490,6 +490,8 @@ def build_manifest(
     frames: int,
     selected_windows: Sequence[dict[str, Any]],
     repair_metrics: dict[str, Any],
+    runtime_environment: str = "docker",
+    native_runtime_allowed: bool = False,
 ) -> dict[str, Any]:
     candidate_row = {
         "track_id": str(track_id),
@@ -551,6 +553,18 @@ def build_manifest(
             "selected_windows": list(selected_windows),
             "metrics": dict(repair_metrics),
         },
+        "execution_contract": {
+            "route_name": "judge_guided_minus_vocal_leakage_repair",
+            "docker_runtime_required": not bool(native_runtime_allowed),
+            "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+            "runtime_environment": str(runtime_environment),
+            "native_runtime_allowed": bool(native_runtime_allowed),
+            "gpu_inference_skipped": True,
+            "gpu_inference_skip_reason": "route consumes precomputed audio and judge rows",
+            "per_track_hardcode_allowed": False,
+            "fallback_used": False,
+            "proxy_only_scoring": True,
+        },
         "safety": {
             "reference_required": False,
             "human_csv_required": False,
@@ -584,6 +598,8 @@ def build_blocked_no_match_manifest(
     candidate_row_jsonl: Path,
     manifest_path: Path,
     short_output_names: bool,
+    runtime_environment: str = "docker",
+    native_runtime_allowed: bool = False,
 ) -> dict[str, Any]:
     manifest = {
         "schema_version": 1,
@@ -627,6 +643,18 @@ def build_blocked_no_match_manifest(
                 "projection_mode": "",
                 "window_projection_count": 0,
             },
+        },
+        "execution_contract": {
+            "route_name": "judge_guided_minus_vocal_leakage_repair",
+            "docker_runtime_required": not bool(native_runtime_allowed),
+            "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+            "runtime_environment": str(runtime_environment),
+            "native_runtime_allowed": bool(native_runtime_allowed),
+            "gpu_inference_skipped": True,
+            "gpu_inference_skip_reason": "route consumes precomputed audio and judge rows",
+            "per_track_hardcode_allowed": False,
+            "fallback_used": False,
+            "proxy_only_scoring": True,
         },
         "failed_checks": ["no_matching_repair_windows"],
         "safety": {
@@ -692,6 +720,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--band-high-hz", type=float, default=8000.0)
     parser.add_argument("--projection-mode", choices=("global", "segment_local"), default="global")
     parser.add_argument("--short-output-names", action="store_true")
+    parser.add_argument(
+        "--allow-native-runtime",
+        action="store_true",
+        help="Explicitly allow native Mac CPU-DSP diagnostic execution outside Docker.",
+    )
     return parser.parse_args(argv)
 
 
@@ -731,6 +764,8 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
             candidate_row_jsonl=candidate_row_jsonl,
             manifest_path=manifest_path,
             short_output_names=short_output_names,
+            runtime_environment=str(getattr(args, "runtime_environment", "docker")),
+            native_runtime_allowed=bool(getattr(args, "native_runtime_allowed", False)),
         )
         write_jsonl(candidate_row_jsonl, [])
         write_json(manifest_path, manifest)
@@ -821,6 +856,8 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
         frames=int(repaired.shape[0]),
         selected_windows=selected_windows,
         repair_metrics=repair_metrics,
+        runtime_environment=str(getattr(args, "runtime_environment", "docker")),
+        native_runtime_allowed=bool(getattr(args, "native_runtime_allowed", False)),
     )
     manifest["manifest_path"] = str(manifest_path)
     manifest["short_output_names"] = short_output_names
@@ -845,11 +882,15 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    runtime = cli_runtime_contract(allow_native_runtime=bool(args.allow_native_runtime))
     require_docker_runtime(
         tool_name="apply_judge_guided_minus_vocal_leakage_repair.py",
         entrypoint_path="/app/tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+        allow_native_macos_diagnostic=bool(args.allow_native_runtime),
     )
-    args = parse_args(argv)
+    args.runtime_environment = str(runtime["runtime_environment"])
+    args.native_runtime_allowed = bool(runtime["native_runtime_allowed"])
     manifest = build_judge_guided_minus_vocal_leakage_repair(args)
     print(
         json.dumps(

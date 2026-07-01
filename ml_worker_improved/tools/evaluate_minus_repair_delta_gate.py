@@ -11,7 +11,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from docker_runtime import require_docker_runtime  # noqa: E402
+from docker_runtime import cli_runtime_contract, require_docker_runtime  # noqa: E402
 
 
 SCHEMA = "minus_repair_delta_gate.v1"
@@ -254,6 +254,8 @@ def evaluate_minus_repair_delta_gate(
     candidate_id: str,
     repair_manifest: Path | None = None,
     command_args: list[str] | None = None,
+    runtime_environment: str = "docker",
+    native_runtime_allowed: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
@@ -354,6 +356,8 @@ def evaluate_minus_repair_delta_gate(
         "requires_no_reference_result_judge": True,
         "requires_selector_acceptance": True,
         "expected_acceleration_mode": "external_only_cpu_metadata_gate",
+        "runtime_environment": str(runtime_environment),
+        "native_runtime_allowed": bool(native_runtime_allowed),
         "gpu_inference_skipped": True,
         "gpu_inference_skip_reason": "delta gate compares existing self-judge manifests and JSONL rows only",
         "artifact_name_policy": {
@@ -402,15 +406,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--candidate-id", required=True)
     parser.add_argument("--short-output-names", action="store_true")
+    parser.add_argument(
+        "--allow-native-runtime",
+        action="store_true",
+        help="Explicitly allow native Mac CPU-DSP diagnostic execution outside Docker.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    runtime = cli_runtime_contract(allow_native_runtime=bool(args.allow_native_runtime))
     require_docker_runtime(
         tool_name="evaluate_minus_repair_delta_gate.py",
         entrypoint_path="/app/tools/evaluate_minus_repair_delta_gate.py",
+        allow_native_macos_diagnostic=bool(args.allow_native_runtime),
     )
-    args = parse_args(argv)
     manifest = evaluate_minus_repair_delta_gate(
         before_self_judge_manifest=args.before_self_judge_manifest,
         after_self_judge_manifest=args.after_self_judge_manifest,
@@ -418,6 +429,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         candidate_id=args.candidate_id,
         command_args=list(argv if argv is not None else sys.argv[1:]),
+        runtime_environment=str(runtime["runtime_environment"]),
+        native_runtime_allowed=bool(runtime["native_runtime_allowed"]),
     )
     print(
         json.dumps(

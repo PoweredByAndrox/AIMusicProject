@@ -403,6 +403,8 @@ class JudgeGuidedMinusVocalLeakageRepairTests(unittest.TestCase):
         self.assertEqual(manifest["release_status"], "not_release_ready")
         self.assertFalse(manifest["safety"]["thresholds_relaxed"])
         self.assertFalse(manifest["safety"]["training_started"])
+        self.assertEqual(manifest["execution_contract"]["runtime_environment"], "docker")
+        self.assertFalse(manifest["execution_contract"]["native_runtime_allowed"])
         self.assertEqual(manifest["candidate_id"], "base_minus__judge_guided_leakage_repair")
         self.assertEqual(manifest["candidate_row_jsonl"], "/app/out/candidate_pair.jsonl")
         self.assertEqual(
@@ -546,6 +548,78 @@ class JudgeGuidedMinusVocalLeakageRepairTests(unittest.TestCase):
             self.assertTrue((output_dir / "summary.md").exists())
             self.assertFalse((output_dir / "m001.flac").exists())
             self.assertEqual((output_dir / "rows.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_cli_allows_explicit_native_runtime_and_records_blocked_contract(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            judge_path = root / "wj.jsonl"
+            judge_path.write_text(
+                json.dumps(
+                    {
+                        "candidate_id": "base",
+                        "minus_path": str(root / "base.flac"),
+                        "window_metrics": [
+                            {
+                                "start_sec": 0.0,
+                                "duration_sec": 1.0,
+                                "vocal_leakage_in_minus_score": 0.4,
+                                "reasons": ["silence_hallucination"],
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_dir = root / "out"
+            calls: list[dict] = []
+
+            def fake_require_docker_runtime(**kwargs):
+                calls.append(kwargs)
+
+            original_guard = module.require_docker_runtime
+            original_contract = module.cli_runtime_contract
+            module.require_docker_runtime = fake_require_docker_runtime
+            module.cli_runtime_contract = lambda *, allow_native_runtime: {
+                "runtime_environment": "native_mac_cpu_dsp",
+                "native_runtime_allowed": bool(allow_native_runtime),
+            }
+            try:
+                exit_code = module.main(
+                    [
+                        str(root / "mix.flac"),
+                        str(root / "base.flac"),
+                        str(root / "vocals.flac"),
+                        str(judge_path),
+                        str(output_dir),
+                        "--candidate-id",
+                        "base",
+                        "--short-output-names",
+                        "--allow-native-runtime",
+                    ]
+                )
+            finally:
+                module.require_docker_runtime = original_guard
+                module.cli_runtime_contract = original_contract
+
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(
+                calls,
+                [
+                    {
+                        "tool_name": "apply_judge_guided_minus_vocal_leakage_repair.py",
+                        "entrypoint_path": "/app/tools/apply_judge_guided_minus_vocal_leakage_repair.py",
+                        "allow_native_macos_diagnostic": True,
+                    }
+                ],
+            )
+            self.assertEqual(manifest["execution_contract"]["runtime_environment"], "native_mac_cpu_dsp")
+            self.assertTrue(manifest["execution_contract"]["native_runtime_allowed"])
+            self.assertFalse(manifest["delivery_allowed"])
 
 
 if __name__ == "__main__":

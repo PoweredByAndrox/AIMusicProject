@@ -12,7 +12,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from artifact_name_policy import indexed_audio_filename  # noqa: E402
-from docker_runtime import require_docker_runtime  # noqa: E402
+from docker_runtime import cli_runtime_contract, require_docker_runtime  # noqa: E402
 from apply_judge_guided_minus_vocal_leakage_repair import (  # noqa: E402
     align_channels_and_length,
     as_list,
@@ -305,6 +305,8 @@ def build_manifest(
     frames: int,
     selected_windows: Sequence[dict[str, Any]],
     repair_metrics: dict[str, Any],
+    runtime_environment: str = "docker",
+    native_runtime_allowed: bool = False,
 ) -> dict[str, Any]:
     candidate_row = {
         "track_id": str(track_id),
@@ -371,8 +373,10 @@ def build_manifest(
         },
         "execution_contract": {
             "route_name": "judge_guided_minus_air_detail_repair",
-            "docker_runtime_required": True,
+            "docker_runtime_required": not bool(native_runtime_allowed),
             "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+            "runtime_environment": str(runtime_environment),
+            "native_runtime_allowed": bool(native_runtime_allowed),
             "gpu_inference_skipped": True,
             "gpu_inference_skip_reason": "route consumes precomputed audio and self-judge rows",
             "per_track_hardcode_allowed": False,
@@ -436,6 +440,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--body-low-hz", type=float, default=120.0)
     parser.add_argument("--body-high-hz", type=float, default=1800.0)
     parser.add_argument("--short-output-names", action="store_true")
+    parser.add_argument(
+        "--allow-native-runtime",
+        action="store_true",
+        help="Explicitly allow native Mac CPU-DSP diagnostic execution outside Docker.",
+    )
     return parser.parse_args(argv)
 
 
@@ -517,6 +526,8 @@ def build_judge_guided_minus_air_detail_repair(args: argparse.Namespace) -> dict
         frames=int(repaired.shape[0]),
         selected_windows=selected_windows,
         repair_metrics=repair_metrics,
+        runtime_environment=str(getattr(args, "runtime_environment", "docker")),
+        native_runtime_allowed=bool(getattr(args, "native_runtime_allowed", False)),
     )
     manifest["manifest_path"] = str(manifest_path)
     manifest["short_output_names"] = short_output_names
@@ -541,11 +552,15 @@ def build_judge_guided_minus_air_detail_repair(args: argparse.Namespace) -> dict
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    runtime = cli_runtime_contract(allow_native_runtime=bool(args.allow_native_runtime))
     require_docker_runtime(
         tool_name="apply_judge_guided_minus_air_detail_repair.py",
         entrypoint_path="/app/tools/apply_judge_guided_minus_air_detail_repair.py",
+        allow_native_macos_diagnostic=bool(args.allow_native_runtime),
     )
-    args = parse_args(argv)
+    args.runtime_environment = str(runtime["runtime_environment"])
+    args.native_runtime_allowed = bool(runtime["native_runtime_allowed"])
     manifest = build_judge_guided_minus_air_detail_repair(args)
     print(
         json.dumps(

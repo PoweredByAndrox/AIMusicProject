@@ -251,6 +251,66 @@ class JudgeGuidedMinusAirDetailRepairTests(unittest.TestCase):
             manifest["candidate_row"]["candidate_family"],
             "judge_guided_minus_air_detail_repair",
         )
+        self.assertEqual(manifest["execution_contract"]["runtime_environment"], "docker")
+        self.assertFalse(manifest["execution_contract"]["native_runtime_allowed"])
+
+    def test_cli_allows_explicit_native_runtime_and_records_contract(self) -> None:
+        module = _load_module()
+        captured: dict = {}
+        calls: list[dict] = []
+
+        def fake_require_docker_runtime(**kwargs):
+            calls.append(kwargs)
+
+        def fake_build(args):
+            captured["runtime_environment"] = args.runtime_environment
+            captured["native_runtime_allowed"] = args.native_runtime_allowed
+            return {
+                "manifest_path": str(Path(args.output_dir) / "manifest.json"),
+                "artifacts": {"minus_air_detail_repair_flac": str(Path(args.output_dir) / "m001.flac")},
+                "candidate_row_jsonl": str(Path(args.output_dir) / "rows.jsonl"),
+                "repair": {"selected_window_count": 0},
+                "delivery_status": "candidate_only",
+                "delivery_allowed": False,
+            }
+
+        original_guard = module.require_docker_runtime
+        original_build = module.build_judge_guided_minus_air_detail_repair
+        original_contract = module.cli_runtime_contract
+        module.require_docker_runtime = fake_require_docker_runtime
+        module.build_judge_guided_minus_air_detail_repair = fake_build
+        module.cli_runtime_contract = lambda *, allow_native_runtime: {
+            "runtime_environment": "native_mac_cpu_dsp",
+            "native_runtime_allowed": bool(allow_native_runtime),
+        }
+        try:
+            exit_code = module.main(
+                [
+                    "/tmp/raw.flac",
+                    "/tmp/base.flac",
+                    "/tmp/rows.jsonl",
+                    "/tmp/out",
+                    "--allow-native-runtime",
+                ]
+            )
+        finally:
+            module.require_docker_runtime = original_guard
+            module.build_judge_guided_minus_air_detail_repair = original_build
+            module.cli_runtime_contract = original_contract
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(captured["runtime_environment"], "native_mac_cpu_dsp")
+        self.assertTrue(captured["native_runtime_allowed"])
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "tool_name": "apply_judge_guided_minus_air_detail_repair.py",
+                    "entrypoint_path": "/app/tools/apply_judge_guided_minus_air_detail_repair.py",
+                    "allow_native_macos_diagnostic": True,
+                }
+            ],
+        )
 
     def test_air_detail_repair_supports_short_output_names(self) -> None:
         sample_rate = 44100

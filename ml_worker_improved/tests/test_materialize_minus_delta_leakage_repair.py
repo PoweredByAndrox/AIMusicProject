@@ -319,3 +319,52 @@ def test_materializer_blocks_without_persistent_unsafe_delta_windows(tmp_path: P
     assert manifest["selected_window_count"] == 0
     assert manifest["failed_checks"] == ["persistent_unsafe_delta_windows_missing"]
     assert manifest["delivery_allowed"] is False
+
+
+def test_cli_allows_explicit_native_runtime_and_materializes_native_command(tmp_path: Path) -> None:
+    module = _load_module()
+    router_manifest, repair_manifest = fixture_router(tmp_path)
+    calls: list[dict] = []
+
+    def fake_require_docker_runtime(**kwargs):
+        calls.append(kwargs)
+
+    original_guard = module.require_docker_runtime
+    original_contract = module.cli_runtime_contract
+    module.require_docker_runtime = fake_require_docker_runtime
+    module.cli_runtime_contract = lambda *, allow_native_runtime: {
+        "runtime_environment": "native_mac_cpu_dsp",
+        "native_runtime_allowed": bool(allow_native_runtime),
+    }
+    try:
+        exit_code = module.main(
+            [
+                "--router-plan-json",
+                str(router_manifest),
+                "--source-repair-manifest",
+                str(repair_manifest),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--allow-native-runtime",
+            ]
+        )
+    finally:
+        module.require_docker_runtime = original_guard
+        module.cli_runtime_contract = original_contract
+
+    manifest = read_json(tmp_path / "out" / "plan.json")
+    command_row = read_jsonl(tmp_path / "out" / "cmds.jsonl")[0]
+    assert exit_code == 0
+    assert calls == [
+        {
+            "tool_name": "materialize_minus_delta_leakage_repair.py",
+            "entrypoint_path": "/app/tools/materialize_minus_delta_leakage_repair.py",
+            "allow_native_macos_diagnostic": True,
+        }
+    ]
+    assert manifest["runtime_environment"] == "native_mac_cpu_dsp"
+    assert manifest["native_runtime_allowed"] is True
+    assert command_row["runtime_environment"] == "native_mac_cpu_dsp"
+    assert command_row["native_runtime_allowed"] is True
+    assert command_row["native_command"][-1] == "--allow-native-runtime"
+    assert manifest["delivery_allowed"] is False

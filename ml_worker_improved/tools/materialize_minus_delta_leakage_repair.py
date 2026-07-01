@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from docker_runtime import require_docker_runtime
+from docker_runtime import cli_runtime_contract, require_docker_runtime
 
 
 SCHEMA = "minus_delta_leakage_repair_command_plan.v1"
@@ -237,6 +237,8 @@ def blocked_manifest(
     failed_checks: Sequence[str],
     command_args: Sequence[str],
     blocked_repeat_routes: Sequence[str] = (),
+    runtime_environment: str = "docker",
+    native_runtime_allowed: bool = False,
 ) -> dict[str, Any]:
     manifest = {
         "schema": SCHEMA,
@@ -265,6 +267,8 @@ def blocked_manifest(
         "can_mark_release_ready": False,
         "requires_post_judge": True,
         "expected_acceleration_mode": "external_only_cpu_metadata_planning",
+        "runtime_environment": str(runtime_environment),
+        "native_runtime_allowed": bool(native_runtime_allowed),
         "gpu_inference_skipped": True,
         "gpu_inference_skip_reason": "materializer reads existing router, delta, and self-judge JSON evidence only",
         "artifact_name_policy": {
@@ -290,6 +294,8 @@ def materialize_minus_delta_leakage_repair(
     output_dir: Path,
     candidate_id: str | None = None,
     command_args: Sequence[str] | None = None,
+    runtime_environment: str = "docker",
+    native_runtime_allowed: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
@@ -322,6 +328,8 @@ def materialize_minus_delta_leakage_repair(
             failed_checks=["router_selected_route_not_leakage_repair"],
             command_args=command_args or [],
             blocked_repeat_routes=blocked_repeat_routes,
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
         )
 
     delta_gate_path = maybe_path(router_row.get("delta_gate_manifest") or router_manifest.get("delta_gate_manifest"), router_plan_json.parent)
@@ -337,6 +345,8 @@ def materialize_minus_delta_leakage_repair(
             failed_checks=["delta_gate_manifest_missing"],
             command_args=command_args or [],
             blocked_repeat_routes=blocked_repeat_routes,
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
         )
     delta_gate = read_json(delta_gate_path)
     delta_rows_path = maybe_path(delta_gate.get("rows_jsonl"), delta_gate_path.parent)
@@ -358,6 +368,8 @@ def materialize_minus_delta_leakage_repair(
             failed_checks=missing,
             command_args=command_args or [],
             blocked_repeat_routes=blocked_repeat_routes,
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
         )
 
     delta_rows = list(iter_jsonl(delta_rows_path))
@@ -375,6 +387,8 @@ def materialize_minus_delta_leakage_repair(
             failed_checks=["persistent_unsafe_delta_windows_missing"],
             command_args=command_args or [],
             blocked_repeat_routes=blocked_repeat_routes,
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
         )
 
     after_manifest = read_json(after_manifest_path)
@@ -391,6 +405,8 @@ def materialize_minus_delta_leakage_repair(
             failed_checks=["after_segments_jsonl_missing"],
             command_args=command_args or [],
             blocked_repeat_routes=blocked_repeat_routes,
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
         )
     after_rows = list(iter_jsonl(after_rows_path))
     after_by_segment = {str(row.get("segment_id") or ""): row for row in after_rows}
@@ -425,6 +441,8 @@ def materialize_minus_delta_leakage_repair(
             failed_checks=failed,
             command_args=command_args or [],
             blocked_repeat_routes=blocked_repeat_routes,
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
         )
 
     source_repair = read_json(source_repair_manifest)
@@ -466,6 +484,8 @@ def materialize_minus_delta_leakage_repair(
             failed_checks=missing_inputs,
             command_args=command_args or [],
             blocked_repeat_routes=blocked_repeat_routes,
+            runtime_environment=runtime_environment,
+            native_runtime_allowed=native_runtime_allowed,
         )
     assert raw_ref_path is not None
     assert minus_path is not None
@@ -503,6 +523,7 @@ def materialize_minus_delta_leakage_repair(
         resolved_candidate_id,
         "--short-output-names",
     ]
+    native_command = [*command, "--allow-native-runtime"] if native_runtime_allowed else []
     command_row = {
         "schema": "minus_delta_leakage_repair_command_row.v1",
         "route": ROUTE,
@@ -522,8 +543,11 @@ def materialize_minus_delta_leakage_repair(
         "primary_vocals_path": str(vocal_path),
         "output_dir": str(route_output_dir),
         "docker_command": command,
+        "native_command": native_command,
         "selected_window_count": len(windows),
         "expected_acceleration_mode": "external_only_cpu_dsp_repair",
+        "runtime_environment": str(runtime_environment),
+        "native_runtime_allowed": bool(native_runtime_allowed),
         "requires_post_judge": True,
         "delivery_allowed": False,
         "can_publish_as_result": False,
@@ -560,6 +584,8 @@ def materialize_minus_delta_leakage_repair(
         "requires_post_judge": True,
         "requires_delta_gate": True,
         "expected_acceleration_mode": "external_only_cpu_metadata_planning",
+        "runtime_environment": str(runtime_environment),
+        "native_runtime_allowed": bool(native_runtime_allowed),
         "gpu_inference_skipped": True,
         "gpu_inference_skip_reason": "materializer reads existing router, delta, and self-judge JSON evidence only",
         "artifact_name_policy": {
@@ -585,15 +611,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--candidate-id")
     parser.add_argument("--short-output-names", action="store_true")
+    parser.add_argument(
+        "--allow-native-runtime",
+        action="store_true",
+        help="Explicitly allow native Mac CPU-DSP diagnostic execution outside Docker.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    runtime = cli_runtime_contract(allow_native_runtime=bool(args.allow_native_runtime))
     require_docker_runtime(
         tool_name="materialize_minus_delta_leakage_repair.py",
         entrypoint_path="/app/tools/materialize_minus_delta_leakage_repair.py",
+        allow_native_macos_diagnostic=bool(args.allow_native_runtime),
     )
-    args = parse_args(argv)
     command_args = list(argv if argv is not None else sys.argv[1:])
     manifest = materialize_minus_delta_leakage_repair(
         router_plan_json=args.router_plan_json,
@@ -601,6 +634,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         candidate_id=args.candidate_id,
         command_args=command_args,
+        runtime_environment=str(runtime["runtime_environment"]),
+        native_runtime_allowed=bool(runtime["native_runtime_allowed"]),
     )
     print(
         json.dumps(

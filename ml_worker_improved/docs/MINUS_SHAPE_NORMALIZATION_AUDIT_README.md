@@ -56,6 +56,25 @@ Mac-hosted precomputed audio. The default CLI still blocks non-Docker runtime.
 The matrix remains fail-closed and must not be treated as a listen/result
 artifact.
 
+The same explicit native Mac diagnostic contract is available on the
+judge-guided minus repair planning tools:
+
+```bash
+python tools/apply_judge_guided_minus_vocal_leakage_repair.py ... \
+  --short-output-names \
+  --allow-native-runtime
+
+python tools/evaluate_minus_repair_delta_gate.py ... \
+  --allow-native-runtime
+
+python tools/plan_minus_repair_delta_router.py ... \
+  --allow-native-runtime
+```
+
+These repair routes still write candidate-only or plan-only artifacts. A repair
+candidate must pass post-repair self-judge, result judge, selector, and listen
+preview manifest gates before it can be presented as a result.
+
 Safety contract:
 
 - `delivery_allowed=false`

@@ -215,3 +215,59 @@ def test_delta_gate_blocks_missing_segments_jsonl(tmp_path: Path) -> None:
     assert manifest["gate_status"] == "blocked_missing_evidence"
     assert "before_segments_jsonl_missing" in manifest["failure_taxonomy"]
     assert manifest["delivery_allowed"] is False
+
+
+def test_cli_allows_explicit_native_runtime_and_records_contract(tmp_path: Path) -> None:
+    module = _load_module()
+    before = self_judge_manifest(
+        tmp_path,
+        "before",
+        [row("segment_0000", blocker=True, issues=["vocal_projection_proxy"])],
+    )
+    after = self_judge_manifest(
+        tmp_path,
+        "after",
+        [row("segment_0000", blocker=True, issues=["vocal_projection_proxy"])],
+    )
+    calls: list[dict] = []
+
+    def fake_require_docker_runtime(**kwargs):
+        calls.append(kwargs)
+
+    original_guard = module.require_docker_runtime
+    original_contract = module.cli_runtime_contract
+    module.require_docker_runtime = fake_require_docker_runtime
+    module.cli_runtime_contract = lambda *, allow_native_runtime: {
+        "runtime_environment": "native_mac_cpu_dsp",
+        "native_runtime_allowed": bool(allow_native_runtime),
+    }
+    try:
+        exit_code = module.main(
+            [
+                "--before-self-judge-manifest",
+                str(before),
+                "--after-self-judge-manifest",
+                str(after),
+                "--output-dir",
+                str(tmp_path / "gate"),
+                "--candidate-id",
+                "it026-candidate",
+                "--allow-native-runtime",
+            ]
+        )
+    finally:
+        module.require_docker_runtime = original_guard
+        module.cli_runtime_contract = original_contract
+
+    manifest = read_json(tmp_path / "gate" / "gate.json")
+    assert exit_code == 0
+    assert calls == [
+        {
+            "tool_name": "evaluate_minus_repair_delta_gate.py",
+            "entrypoint_path": "/app/tools/evaluate_minus_repair_delta_gate.py",
+            "allow_native_macos_diagnostic": True,
+        }
+    ]
+    assert manifest["runtime_environment"] == "native_mac_cpu_dsp"
+    assert manifest["native_runtime_allowed"] is True
+    assert manifest["delivery_allowed"] is False

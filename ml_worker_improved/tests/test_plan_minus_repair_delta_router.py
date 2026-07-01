@@ -174,3 +174,52 @@ def test_router_halts_when_delta_rows_are_missing(tmp_path: Path) -> None:
     assert manifest["selected_next_action"] == "halt_missing_evidence"
     assert "delta_rows_jsonl_missing" in manifest["failure_taxonomy"]
     assert manifest["delivery_allowed"] is False
+
+
+def test_cli_allows_explicit_native_runtime_and_records_contract(tmp_path: Path) -> None:
+    module = _load_module()
+    gate = delta_gate(
+        tmp_path,
+        gate_status="blocked_no_blocker_reduction",
+        rows=[segment("segment_0000", after_issues=["vocal_projection_proxy"])],
+    )
+    calls: list[dict] = []
+
+    def fake_require_docker_runtime(**kwargs):
+        calls.append(kwargs)
+
+    original_guard = module.require_docker_runtime
+    original_contract = module.cli_runtime_contract
+    module.require_docker_runtime = fake_require_docker_runtime
+    module.cli_runtime_contract = lambda *, allow_native_runtime: {
+        "runtime_environment": "native_mac_cpu_dsp",
+        "native_runtime_allowed": bool(allow_native_runtime),
+    }
+    try:
+        exit_code = module.main(
+            [
+                "--delta-gate-manifest",
+                str(gate),
+                "--output-dir",
+                str(tmp_path / "router"),
+                "--source-route",
+                "judge_guided_minus_air_detail_repair",
+                "--allow-native-runtime",
+            ]
+        )
+    finally:
+        module.require_docker_runtime = original_guard
+        module.cli_runtime_contract = original_contract
+
+    manifest = read_json(tmp_path / "router" / "plan.json")
+    assert exit_code == 0
+    assert calls == [
+        {
+            "tool_name": "plan_minus_repair_delta_router.py",
+            "entrypoint_path": "/app/tools/plan_minus_repair_delta_router.py",
+            "allow_native_macos_diagnostic": True,
+        }
+    ]
+    assert manifest["runtime_environment"] == "native_mac_cpu_dsp"
+    assert manifest["native_runtime_allowed"] is True
+    assert manifest["delivery_allowed"] is False
