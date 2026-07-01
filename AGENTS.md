@@ -46,6 +46,14 @@ Mac-specific override:
 - если Apple `container` runtime недоступен на Mac, явно фиксировать blocker и не подменять результат host-run или другим container runtime;
 - Mac audio accelerator path остаётся native PyTorch MPS, пока отдельный Apple-container GPU/audio proof не подтверждён source-of-truth artifact.
 
+Mac SSH access contract:
+- current verified Mac SSH target is `andrejviluha@192.168.0.138`;
+- from Windows/Codex use the explicit key and identity-only mode:
+  `ssh -i %USERPROFILE%\.ssh\id_ed25519_phone -o IdentitiesOnly=yes -o BatchMode=yes andrejviluha@192.168.0.138 ...`;
+- do not declare Mac SSH unavailable until the explicit-key command above has been tried;
+- `MacBook-Pro-Andrej.local` may resolve to link-local IPv6 and fail with permission/network errors; do not prefer it over the verified IPv4 target;
+- `192.168.0.167` is stale/unreachable unless re-verified by successful SSH.
+
 Обязательный contract:
 - не устанавливать и не подтягивать project dependencies на host;
 - не чинить host PATH, Python, ffmpeg, CUDA, Node, package managers или системные библиотеки как способ выполнить project task;
