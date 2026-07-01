@@ -39,6 +39,8 @@ SAFETY_FLAGS = {
     "release_ready": False,
 }
 BLOCKER_ROUTE = {
+    "pitch_guard_full_region_stalled": "train_separator_attribution_objective",
+    "scalar_score_only_pitch_guard_progress": "train_separator_attribution_objective",
     "severe_phase_collapse": "generate_phase_safe_variants",
     "severe_phase_comb_filtering": "generate_phase_safe_variants",
     "severe_vocal_bleed_in_minus": "generate_minus_focused_variants",
@@ -48,6 +50,7 @@ BLOCKER_ROUTE = {
     "pair_compatibility_not_reached": "segment_blend_needed",
 }
 ROUTE_PRIORITY = (
+    "train_separator_attribution_objective",
     "generate_phase_safe_variants",
     "generate_minus_focused_variants",
     "generate_artifact_safe_variants",
@@ -92,6 +95,73 @@ def candidate_minus_count(candidate_pool_rows: Iterable[dict[str, Any]]) -> int:
     )
 
 
+def _first_number(row: dict[str, Any], keys: Iterable[str]) -> float | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    return None
+
+
+def pitch_guard_stall_blocker(row: dict[str, Any]) -> str | None:
+    before_regions = _first_number(
+        row,
+        (
+            "pitch_guard_before_region_count",
+            "before_region_count",
+            "before_fail_regions",
+            "before_total_fail_regions",
+        ),
+    )
+    after_regions = _first_number(
+        row,
+        (
+            "pitch_guard_after_region_count",
+            "after_region_count",
+            "after_fail_regions",
+            "after_total_fail_regions",
+            "pitch_guard_after_repair_region_count",
+            "after_repair_region_count",
+        ),
+    )
+    if before_regions is None or after_regions is None:
+        return None
+    if before_regions <= 0 or after_regions <= 0:
+        return None
+    if int(round(before_regions)) != int(round(after_regions)):
+        return None
+
+    before_score = _first_number(
+        row,
+        (
+            "pitch_guard_before_best_score",
+            "before_best_score",
+            "before_top_score",
+            "score_before_best",
+        ),
+    )
+    after_score = _first_number(
+        row,
+        (
+            "pitch_guard_after_best_score",
+            "after_best_score",
+            "after_top_score",
+            "score_after_best",
+            "after_repair_top_score",
+        ),
+    )
+    if before_score is not None and after_score is not None and after_score < before_score:
+        return "scalar_score_only_pitch_guard_progress"
+    return "pitch_guard_full_region_stalled"
+
+
 def blockers_from_minus_rows(rows: Iterable[dict[str, Any]]) -> list[tuple[str, str]]:
     blockers: list[tuple[str, str]] = []
     for row in rows:
@@ -112,6 +182,9 @@ def blockers_from_minus_rows(rows: Iterable[dict[str, Any]]) -> list[tuple[str, 
             text = str(value)
             if text in BLOCKER_ROUTE:
                 blockers.append((text, candidate_id))
+        stall_blocker = pitch_guard_stall_blocker(row)
+        if stall_blocker is not None:
+            blockers.append((stall_blocker, candidate_id))
     return blockers
 
 
@@ -147,7 +220,7 @@ def build_rows(
     candidate_rows = read_jsonl(run_dir / "candidate_pool.jsonl")
     minus_count = candidate_minus_count(candidate_rows)
     minus_families = candidate_minus_families(candidate_rows)
-    detected = blockers_from_minus_rows(minus_rows)
+    detected = blockers_from_minus_rows(candidate_rows + minus_rows)
     if str(manifest.get("failure_reason") or "") == "missing_safe_mode_candidate" or "missing_safe_mode_candidate" in set(manifest.get("safety_blockers") or []):
         detected.append(("missing_safe_mode_candidate", ""))
     if minus_count > 0 and len(minus_families) <= 1:

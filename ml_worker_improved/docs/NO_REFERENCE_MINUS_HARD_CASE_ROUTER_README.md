@@ -46,6 +46,8 @@ Each JSONL row records:
 - `severe_vocal_bleed_in_minus`
 - `severe_phase_collapse`
 - `severe_phase_comb_filtering`
+- `pitch_guard_full_region_stalled`
+- `scalar_score_only_pitch_guard_progress`
 - `missing_safe_mode_candidate`
 - `only_one_minus_family`
 - `low_minus_candidate_diversity`
@@ -53,6 +55,7 @@ Each JSONL row records:
 
 ## Routes
 
+- `train_separator_attribution_objective`
 - `generate_minus_focused_variants`
 - `generate_phase_safe_variants`
 - `generate_artifact_safe_variants`
@@ -62,6 +65,18 @@ Each JSONL row records:
 The router only recommends routes backed by existing registry configs. If the
 registry cannot run a recommended route, it reports the route as unavailable
 instead of faking a candidate.
+
+`train_separator_attribution_objective` is a diagnostic planning route for
+cases where pitch-guard evidence shows scalar-score improvement but the full
+failing region count stays blocked. It does not start training, publish audio,
+or bypass the normal `release_ready=false` safety contract.
+
+The router can derive these pitch-guard blockers from `candidate_pool.jsonl` or
+`minus_windowed_judge.jsonl` row metrics even when an upstream writer has not
+emitted an explicit blocker string. If before/after pitch-guard region counts
+are equal and non-zero, the row is treated as `pitch_guard_full_region_stalled`;
+if the best scalar score also decreased, it is treated as
+`scalar_score_only_pitch_guard_progress`.
 
 ## CLI
 

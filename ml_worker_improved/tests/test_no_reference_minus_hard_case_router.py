@@ -133,6 +133,139 @@ def test_router_recommends_phase_safe_route_for_phase_collapse(tmp_path: Path) -
     assert result["available_route_configs"] == ["phase-supported"]
 
 
+def test_router_prioritizes_separator_objective_when_pitch_regions_stall(tmp_path: Path) -> None:
+    run_dir = make_hard_case_run(
+        tmp_path,
+        blockers=[
+            "severe_vocal_bleed_in_minus",
+            "scalar_score_only_pitch_guard_progress",
+        ],
+    )
+
+    result = run_minus_hard_case_router(
+        run_dir=run_dir,
+        output_jsonl=run_dir / "minus_hard_case_router.jsonl",
+        summary_md=run_dir / "minus_hard_case_router_summary.md",
+        registry_configs=[unit_config("minus-focused")],
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "minus_hard_case_router.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    scalar_row = next(row for row in rows if row["blocker_type"] == "scalar_score_only_pitch_guard_progress")
+    assert scalar_row["recommended_route"] == "train_separator_attribution_objective"
+    assert result["recommended_route"] == "train_separator_attribution_objective"
+    assert result["can_run_without_new_models"] is False
+    assert result["release_ready"] is False
+
+
+def test_router_derives_scalar_only_pitch_guard_progress_from_region_metrics(tmp_path: Path) -> None:
+    run_dir = make_hard_case_run(tmp_path, blockers=[])
+    write_jsonl(
+        run_dir / "minus_windowed_judge.jsonl",
+        [
+            {
+                "track_id": "track-002",
+                "candidate_id": "pair-a",
+                "candidate_config_id": "local_registered__htdemucs_ft__both__shared",
+                "candidate_family": "balanced_pair_default",
+                "minus_decision": "blocked_hard_case",
+                "pitch_guard_before_region_count": 16,
+                "pitch_guard_after_region_count": 16,
+                "pitch_guard_before_best_score": 0.702988,
+                "pitch_guard_after_best_score": 0.63693,
+            }
+        ],
+    )
+
+    result = run_minus_hard_case_router(
+        run_dir=run_dir,
+        output_jsonl=run_dir / "minus_hard_case_router.jsonl",
+        summary_md=run_dir / "minus_hard_case_router_summary.md",
+        registry_configs=[unit_config("minus-focused")],
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "minus_hard_case_router.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(row["blocker_type"] == "scalar_score_only_pitch_guard_progress" for row in rows)
+    assert result["recommended_route"] == "train_separator_attribution_objective"
+    assert result["release_ready"] is False
+
+
+def test_router_derives_full_region_stall_without_score_delta(tmp_path: Path) -> None:
+    run_dir = make_hard_case_run(tmp_path, blockers=[])
+    write_jsonl(
+        run_dir / "minus_windowed_judge.jsonl",
+        [
+            {
+                "track_id": "track-002",
+                "candidate_id": "pair-a",
+                "candidate_config_id": "local_registered__htdemucs_ft__both__shared",
+                "candidate_family": "balanced_pair_default",
+                "minus_decision": "blocked_hard_case",
+                "before_region_count": 16,
+                "after_region_count": 16,
+            }
+        ],
+    )
+
+    result = run_minus_hard_case_router(
+        run_dir=run_dir,
+        output_jsonl=run_dir / "minus_hard_case_router.jsonl",
+        summary_md=run_dir / "minus_hard_case_router_summary.md",
+        registry_configs=[unit_config("minus-focused")],
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "minus_hard_case_router.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(row["blocker_type"] == "pitch_guard_full_region_stalled" for row in rows)
+    assert result["recommended_route"] == "train_separator_attribution_objective"
+    assert result["release_ready"] is False
+
+
+def test_router_derives_pitch_stall_from_candidate_pool_metrics(tmp_path: Path) -> None:
+    run_dir = make_hard_case_run(tmp_path, blockers=[])
+    write_jsonl(run_dir / "minus_windowed_judge.jsonl", [])
+    write_jsonl(
+        run_dir / "candidate_pool.jsonl",
+        [
+            {
+                "track_id": "track-002",
+                "candidate_id": "pair-a",
+                "candidate_config_id": "local_registered__htdemucs_ft__both__shared",
+                "candidate_family": "balanced_pair_default",
+                "can_use_for_minus": True,
+                "minus_path": "/tmp/minus-a.wav",
+                "instrumental_path": "/tmp/minus-a.wav",
+                "pitch_guard_before_region_count": 16,
+                "pitch_guard_after_region_count": 16,
+                "pitch_guard_before_best_score": 0.702988,
+                "pitch_guard_after_best_score": 0.63693,
+            }
+        ],
+    )
+
+    result = run_minus_hard_case_router(
+        run_dir=run_dir,
+        output_jsonl=run_dir / "minus_hard_case_router.jsonl",
+        summary_md=run_dir / "minus_hard_case_router_summary.md",
+        registry_configs=[unit_config("minus-focused")],
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "minus_hard_case_router.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(row["blocker_type"] == "scalar_score_only_pitch_guard_progress" for row in rows)
+    assert result["recommended_route"] == "train_separator_attribution_objective"
+    assert result["release_ready"] is False
+
+
 def test_router_reports_unsupported_route_unavailable(tmp_path: Path) -> None:
     run_dir = make_hard_case_run(tmp_path, blockers=["severe_phase_collapse"])
 
