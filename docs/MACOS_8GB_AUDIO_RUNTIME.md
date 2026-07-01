@@ -149,10 +149,10 @@ later accepts it.
 From-zero Windows bootstrap and connect commands:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1
-powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1
-powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
-powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1 -RemoteCommand '/usr/local/bin/container --version && pwd'
+powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -WindowsProjectRoot "D:\AIMusicProject" -WindowsShareName AIMusicProject -WindowsArtifactShareName AIMusicArtifacts -SmbUser MacAudioApi -MacMountPath /Users/andrejviluha/AIMusicProject_win
+powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -WindowsProjectRoot "D:\AIMusicProject" -WindowsShareName AIMusicProject -WindowsArtifactShareName AIMusicArtifacts -SmbUser MacAudioApi -MacMountPath /Users/andrejviluha/AIMusicProject_win
+powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -MacProjectRoot /Users/andrejviluha/AIMusicProject_win
+powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -MacProjectRoot /Users/andrejviluha/AIMusicProject_win -RemoteCommand '/usr/local/bin/container --version && pwd'
 ```
 
 Use `ml_worker_improved/tools/run_macos_remote_api_command.py` from Windows to

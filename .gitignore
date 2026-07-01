@@ -48,6 +48,7 @@ __pycache__/
 
 # Local AI tool caches and vendored dependencies
 /.codegraph/
+/.fastcontext/
 /.playwright-mcp/
 /.cursor/mcp/**/node_modules/
 /.cursor/mcp/**/dist/

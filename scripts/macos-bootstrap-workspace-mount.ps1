@@ -172,6 +172,35 @@ function ConvertTo-RemoteSingleQuoted {
     return "'" + $Value.Replace("'", "'""'""'") + "'"
 }
 
+function ConvertTo-DisplayPowerShellArg {
+    param([string]$Value)
+    if ($null -eq $Value) {
+        return "''"
+    }
+    if ($Value -match '^[A-Za-z0-9_./:\\-]+$') {
+        return $Value
+    }
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Format-DisplayPowerShellCommand {
+    param(
+        [string]$ScriptPath,
+        [string[]]$Arguments
+    )
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add("powershell")
+    $parts.Add("-ExecutionPolicy")
+    $parts.Add("Bypass")
+    $parts.Add("-File")
+    $parts.Add((ConvertTo-DisplayPowerShellArg -Value $ScriptPath))
+    foreach ($argument in $Arguments) {
+        $parts.Add((ConvertTo-DisplayPowerShellArg -Value $argument))
+    }
+    return ($parts -join " ")
+}
+
 function Invoke-MacShellScript {
     param(
         [string]$ScriptText,
@@ -278,7 +307,12 @@ if (-not $ForceCredentialReset) {
     if ($probeRc -eq 0) {
         Write-Step "Existing mount is writable; no SMB credential reset needed"
         Write-Host "Future connect command:"
-        Write-Host "powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1"
+        Write-Host (Format-DisplayPowerShellCommand -ScriptPath "scripts\macos-ssh.ps1" -Arguments @(
+                "-MacHost", $MacHost,
+                "-MacUser", $MacUser,
+                "-SshKey", $sshKeyPath,
+                "-MacProjectRoot", $MacMountPath
+            ))
         exit 0
     }
 }
@@ -369,4 +403,9 @@ Write-Step "Bootstrap completed"
 Write-Host "Mac mount path: $MacMountPath"
 Write-Host "Windows project root: $projectRoot"
 Write-Host "Future connect command:"
-Write-Host "powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1"
+Write-Host (Format-DisplayPowerShellCommand -ScriptPath "scripts\macos-ssh.ps1" -Arguments @(
+        "-MacHost", $MacHost,
+        "-MacUser", $MacUser,
+        "-SshKey", $sshKeyPath,
+        "-MacProjectRoot", $MacMountPath
+    ))

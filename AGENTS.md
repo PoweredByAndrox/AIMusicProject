@@ -51,9 +51,9 @@ Mac SSH access contract:
 - from Windows/Codex use the explicit key and identity-only mode:
   `ssh -i %USERPROFILE%\.ssh\id_ed25519_phone -o IdentitiesOnly=yes -o BatchMode=yes andrejviluha@192.168.0.138 ...`;
 - preferred reusable Windows command for future Mac access:
-  `powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1`;
+  `powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -MacProjectRoot /Users/andrejviluha/AIMusicProject_win`;
 - preferred from-zero Windows command for Mac bootstrap plus future access:
-  `powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1`;
+  `powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -WindowsProjectRoot "D:\AIMusicProject" -WindowsShareName AIMusicProject -WindowsArtifactShareName AIMusicArtifacts -SmbUser MacAudioApi -MacMountPath /Users/andrejviluha/AIMusicProject_win`;
 - do not declare Mac SSH unavailable until the explicit-key command above has been tried;
 - `MacBook-Pro-Andrej.local` may resolve to link-local IPv6 and fail with permission/network errors; do not prefer it over the verified IPv4 target;
 - `192.168.0.167` is stale/unreachable unless re-verified by successful SSH.
@@ -62,9 +62,9 @@ Mac artifact storage contract:
 - Mac execution is remote compute only; source-of-truth artifacts must be written into the Windows project workspace (`D:\AIMusicProject`) through a local network mount/share, not left as Mac-local result roots;
 - the required implementation is a Windows project folder exported on the local network and mounted on Mac at a stable project mount path; Mac route output arguments must point directly into that mounted Windows workspace for `artifacts`, `lab_artifacts`, and `artifact_rag`;
 - preferred reusable Windows bootstrap command before Mac artifact work:
-  `powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1`;
+  `powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -WindowsProjectRoot "D:\AIMusicProject" -WindowsShareName AIMusicProject -WindowsArtifactShareName AIMusicArtifacts -SmbUser MacAudioApi -MacMountPath /Users/andrejviluha/AIMusicProject_win`;
 - low-level mount-only bootstrap command:
-  `powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1`;
+  `powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-workspace-mount.ps1 -MacHost 192.168.0.138 -MacUser andrejviluha -SshKey "$env:USERPROFILE\.ssh\id_ed25519_phone" -WindowsProjectRoot "D:\AIMusicProject" -WindowsShareName AIMusicProject -WindowsArtifactShareName AIMusicArtifacts -SmbUser MacAudioApi -MacMountPath /Users/andrejviluha/AIMusicProject_win`;
 - current local-network workspace mount contract is Windows share `AIMusicProject` -> `D:\AIMusicProject`, SMB account `MacAudioApi`, Mac mount path `/Users/andrejviluha/AIMusicProject_win`;
 - before any Mac route that can create audio/model/result/listen/debug artifacts, mount or verify a writable Windows project share on Mac (for example a stable `/Volumes/...` mount configured for this project) and map output roots back to `D:\AIMusicProject\artifacts`, `D:\AIMusicProject\lab_artifacts`, or `D:\AIMusicProject\artifact_rag`;
 - each Mac artifact-producing route must run a mount preflight that writes, reads, and removes a small probe file inside the mounted Windows project workspace, then records the Mac mount path, Windows path mapping, and probe evidence in the route progress/manifest;

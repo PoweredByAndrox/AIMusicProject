@@ -49,6 +49,35 @@ function Invoke-PowerShellScript {
     }
 }
 
+function ConvertTo-DisplayPowerShellArg {
+    param([string]$Value)
+    if ($null -eq $Value) {
+        return "''"
+    }
+    if ($Value -match '^[A-Za-z0-9_./:\\-]+$') {
+        return $Value
+    }
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Format-DisplayPowerShellCommand {
+    param(
+        [string]$ScriptPath,
+        [string[]]$Arguments
+    )
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add("powershell")
+    $parts.Add("-ExecutionPolicy")
+    $parts.Add("Bypass")
+    $parts.Add("-File")
+    $parts.Add((ConvertTo-DisplayPowerShellArg -Value $ScriptPath))
+    foreach ($argument in $Arguments) {
+        $parts.Add((ConvertTo-DisplayPowerShellArg -Value $argument))
+    }
+    return ($parts -join " ")
+}
+
 Assert-CommandAvailable -Name "powershell"
 
 $scriptRoot = Split-Path -Parent $PSCommandPath
@@ -109,12 +138,43 @@ if (-not $SkipAppleContainerCheck) {
 }
 
 Write-Host "Mac bootstrap is ready."
-Write-Host "From-zero command:"
-Write-Host "powershell -ExecutionPolicy Bypass -File scripts\macos-bootstrap-and-ssh.ps1"
-Write-Host "Future connect command:"
-Write-Host "powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1"
-Write-Host "Future remote command example:"
-Write-Host "powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1 -RemoteCommand '/usr/local/bin/container --version && pwd'"
+Write-Host "From-zero full command:"
+Write-Host (Format-DisplayPowerShellCommand -ScriptPath "scripts\macos-bootstrap-and-ssh.ps1" -Arguments @(
+        "-MacHost", $MacHost,
+        "-MacUser", $MacUser,
+        "-SshKey", $SshKey,
+        "-WindowsProjectRoot", $WindowsProjectRoot,
+        "-WindowsShareName", $WindowsShareName,
+        "-WindowsArtifactShareName", $WindowsArtifactShareName,
+        "-SmbUser", $SmbUser,
+        "-MacMountPath", $MacMountPath
+    ))
+Write-Host "Mount-only full command:"
+Write-Host (Format-DisplayPowerShellCommand -ScriptPath "scripts\macos-bootstrap-workspace-mount.ps1" -Arguments @(
+        "-MacHost", $MacHost,
+        "-MacUser", $MacUser,
+        "-SshKey", $SshKey,
+        "-WindowsProjectRoot", $WindowsProjectRoot,
+        "-WindowsShareName", $WindowsShareName,
+        "-WindowsArtifactShareName", $WindowsArtifactShareName,
+        "-SmbUser", $SmbUser,
+        "-MacMountPath", $MacMountPath
+    ))
+Write-Host "Future connect full command:"
+Write-Host (Format-DisplayPowerShellCommand -ScriptPath "scripts\macos-ssh.ps1" -Arguments @(
+        "-MacHost", $MacHost,
+        "-MacUser", $MacUser,
+        "-SshKey", $SshKey,
+        "-MacProjectRoot", $MacMountPath
+    ))
+Write-Host "Future remote Apple-container check:"
+Write-Host (Format-DisplayPowerShellCommand -ScriptPath "scripts\macos-ssh.ps1" -Arguments @(
+        "-MacHost", $MacHost,
+        "-MacUser", $MacUser,
+        "-SshKey", $SshKey,
+        "-MacProjectRoot", $MacMountPath,
+        "-RemoteCommand", "/usr/local/bin/container --version && pwd"
+    ))
 
 if (-not [string]::IsNullOrWhiteSpace($RemoteCommand)) {
     $remoteArgs = [System.Collections.Generic.List[string]]::new()
