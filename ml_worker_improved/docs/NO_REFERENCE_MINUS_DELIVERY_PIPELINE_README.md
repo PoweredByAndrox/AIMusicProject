@@ -14,10 +14,14 @@ The pipeline is mode-specific for `stem_type=minus`:
    (`vocal_projection_proxy` or `vocal_stem_corr_proxy`), run the existing
    `judge_guided_minus_vocal_leakage_repair` route, then run self-judge again
    on the repaired candidate;
-6. run `run_no_reference_result_judge.py` with `score_mode=minus` so each row carries `minus_score`,
+6. run `evaluate_minus_repair_delta_gate.py` for any repair branch that has
+   pre/post self-judge evidence; the repair remains blocked unless
+   `blocker_count` strictly decreases and unsafe vocal/full-mix proxy issues do
+   not increase;
+7. run `run_no_reference_result_judge.py` with `score_mode=minus` so each row carries `minus_score`,
    `minus_decision`, `minus_blockers`, and `minus_musical_detail_preservation_gate`;
-7. run `run_no_reference_candidate_selector.py` with `score_mode=minus`;
-8. build `no_reference_minus_listen_preview_manifest.json` through the artifact status contract.
+8. run `run_no_reference_candidate_selector.py` with `score_mode=minus`;
+9. build `no_reference_minus_listen_preview_manifest.json` through the artifact status contract.
 
 The listen-preview manifest fails closed if either result-judge evidence or selector evidence is missing
 `score_mode=minus`; legacy `both` selector JSONL cannot be promoted as a minus listen-preview result.
@@ -29,6 +33,9 @@ candidate-only manifest only after the same post-render self-judge, minus
 result-judge, selector, musical-detail gate, candidate-id, and audio-path
 evidence all match. The repair manifest itself remains blocked/candidate-only
 and cannot be published directly.
+Repair branches must also pass `evaluate_minus_repair_delta_gate.py`; a repair
+that changes issue mix but does not reduce self-judge blocker count remains
+blocked as `blocked_no_blocker_reduction`.
 The final pipeline manifest records `repair_manifest_path` only when that
 post-render leakage repair branch was actually used, and
 `post_candidate_self_judge_manifest` points at the final self-judge evidence
