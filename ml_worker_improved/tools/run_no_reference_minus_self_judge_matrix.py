@@ -186,6 +186,8 @@ def build_summary(
     source_count: int,
     filtered_out_candidates: int,
     max_candidates: int,
+    runtime_environment: str,
+    native_runtime_allowed: bool,
 ) -> dict[str, Any]:
     status_counts = Counter(str(row.get("self_judge_status") or "unknown") for row in rows)
     return {
@@ -200,6 +202,8 @@ def build_summary(
         "status_counts": dict(sorted(status_counts.items())),
         "track_ids": sorted({str(row.get("track_id") or "") for row in rows if row.get("track_id")}),
         "expected_acceleration_mode": EXPECTED_ACCELERATION_MODE,
+        "runtime_environment": runtime_environment,
+        "native_runtime_allowed": native_runtime_allowed,
         "gpu_inference_required": False,
         "gpu_inference_skipped": True,
         "delivery_allowed": False,
@@ -247,6 +251,8 @@ def build_summary_md(summary: dict[str, Any]) -> str:
         f"- blocked_candidates: {summary.get('blocked_candidates')}",
         f"- blocked_missing_audio: {summary.get('blocked_missing_audio')}",
         f"- expected_acceleration_mode: {summary.get('expected_acceleration_mode')}",
+        f"- runtime_environment: {summary.get('runtime_environment')}",
+        f"- native_runtime_allowed: {str(summary.get('native_runtime_allowed') is True).lower()}",
         f"- gpu_inference_skipped: {str(summary.get('gpu_inference_skipped') is True).lower()}",
         f"- delivery_allowed: {str(summary.get('delivery_allowed') is True).lower()}",
         f"- release_ready: {str(summary.get('release_ready') is True).lower()}",
@@ -268,6 +274,8 @@ def run_self_judge_matrix(
     minus_path_contains: str | None = None,
     segment_sec: float = 6.0,
     max_candidates: int = 0,
+    runtime_environment: str = "docker",
+    native_runtime_allowed: bool = False,
     judge_runner: JudgeRunner = judge_instrumental,
 ) -> dict[str, Any]:
     start = time.monotonic()
@@ -293,6 +301,8 @@ def run_self_judge_matrix(
         track_id_filter=str(track_id or ""),
         minus_path_contains_filter=str(minus_path_contains or ""),
         expected_acceleration_mode=EXPECTED_ACCELERATION_MODE,
+        runtime_environment=runtime_environment,
+        native_runtime_allowed=native_runtime_allowed,
         gpu_inference_skipped=True,
         gpu_inference_skip_reason="self_judge_consumes_precomputed_audio",
     )
@@ -364,6 +374,8 @@ def run_self_judge_matrix(
         source_count=len(source_rows),
         filtered_out_candidates=filtered_out_candidates,
         max_candidates=max_candidates,
+        runtime_environment=runtime_environment,
+        native_runtime_allowed=native_runtime_allowed,
     )
     manifest = build_manifest(output_root, rows, summary)
     write_jsonl(output_root / MATRIX_JSONL, rows)
@@ -392,9 +404,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--minus-path-contains")
     parser.add_argument("--segment-sec", type=float, default=6.0)
     parser.add_argument("--max-candidates", type=int, default=0)
+    parser.add_argument(
+        "--allow-native-runtime",
+        action="store_true",
+        help=(
+            "Explicitly allow native CPU-DSP diagnostic execution outside Docker. "
+            "Default remains Docker-only."
+        ),
+    )
     args = parser.parse_args(argv)
-    if not running_inside_docker():
-        raise SystemExit("Docker runtime required for no-reference minus self-judge matrix execution")
+    inside_docker = running_inside_docker()
+    if not inside_docker and not args.allow_native_runtime:
+        raise SystemExit(
+            "Docker runtime required for no-reference minus self-judge matrix execution; "
+            "use --allow-native-runtime only for explicit CPU-DSP diagnostic Mac execution"
+        )
     result = run_self_judge_matrix(
         candidate_jsonl=args.candidate_jsonl,
         output_root=args.output_root,
@@ -402,6 +426,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         minus_path_contains=str(args.minus_path_contains) if args.minus_path_contains else None,
         segment_sec=float(args.segment_sec),
         max_candidates=int(args.max_candidates),
+        runtime_environment="docker" if inside_docker else "native_mac_cpu_dsp",
+        native_runtime_allowed=not inside_docker and bool(args.allow_native_runtime),
     )
     print(json.dumps(result["summary"], ensure_ascii=False, sort_keys=True))
     return 0

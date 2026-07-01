@@ -42,6 +42,20 @@ python tools/run_no_reference_windowed_judge.py \
   --score-mode minus
 ```
 
+For Mac-only CPU/DSP downstream gating, run the self-judge matrix explicitly:
+
+```bash
+python tools/run_no_reference_minus_self_judge_matrix.py \
+  --candidate-jsonl /path/to/shape_audit/raw_rejudge_candidates.jsonl \
+  --output-root /path/to/self_judge_matrix \
+  --allow-native-runtime
+```
+
+`--allow-native-runtime` is only for explicit diagnostic CPU/DSP execution on
+Mac-hosted precomputed audio. The default CLI still blocks non-Docker runtime.
+The matrix remains fail-closed and must not be treated as a listen/result
+artifact.
+
 Safety contract:
 
 - `delivery_allowed=false`

@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from tools import run_no_reference_minus_self_judge_matrix as matrix
@@ -160,6 +162,64 @@ def test_self_judge_matrix_writes_outputs_and_safety_flags(tmp_path: Path) -> No
     assert result["manifest"]["fine_tune_started"] is False
     assert result["manifest"]["models_changed"] is False
     assert result["manifest"]["thresholds_relaxed"] is False
+
+
+def test_main_blocks_host_runtime_without_explicit_native_flag(tmp_path: Path, monkeypatch) -> None:
+    calls = {"count": 0}
+
+    def forbidden_run_self_judge_matrix(**kwargs):
+        calls["count"] += 1
+        raise AssertionError("host runtime must fail before matrix execution")
+
+    monkeypatch.setattr(matrix, "running_inside_docker", lambda: False)
+    monkeypatch.setattr(matrix, "run_self_judge_matrix", forbidden_run_self_judge_matrix)
+
+    with pytest.raises(SystemExit) as exc:
+        matrix.main(
+            [
+                "--candidate-jsonl",
+                str(tmp_path / "candidates.jsonl"),
+                "--output-root",
+                str(tmp_path / "matrix"),
+            ]
+        )
+
+    assert "Docker runtime required" in str(exc.value)
+    assert calls["count"] == 0
+
+
+def test_main_allows_explicit_native_runtime_and_records_contract(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_run_self_judge_matrix(**kwargs):
+        captured.update(kwargs)
+        return {
+            "summary": {
+                "eligible_candidates": 0,
+                "blocked_candidates": 0,
+                "runtime_environment": kwargs["runtime_environment"],
+                "native_runtime_allowed": kwargs["native_runtime_allowed"],
+            }
+        }
+
+    monkeypatch.setattr(matrix, "running_inside_docker", lambda: False)
+    monkeypatch.setattr(matrix, "run_self_judge_matrix", fake_run_self_judge_matrix)
+
+    assert (
+        matrix.main(
+            [
+                "--candidate-jsonl",
+                str(tmp_path / "candidates.jsonl"),
+                "--output-root",
+                str(tmp_path / "matrix"),
+                "--allow-native-runtime",
+            ]
+        )
+        == 0
+    )
+
+    assert captured["runtime_environment"] == "native_mac_cpu_dsp"
+    assert captured["native_runtime_allowed"] is True
 
 
 def test_self_judge_matrix_uses_short_alias_dirs_for_nested_artifacts(tmp_path: Path) -> None:
