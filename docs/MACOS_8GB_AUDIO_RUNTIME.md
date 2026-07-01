@@ -8,10 +8,11 @@ runtime contract is different from the current CUDA Docker path.
 - Existing production separator routes are audio routes: Demucs, MDX/MDX23C,
   BS-RoFormer, MelBand/Mel-RoFormer, SCNet, and registered project adapters.
 - Text vLLM/Qwen is not an audio separator and must not replace those routes.
-- Docker Desktop, Docker VMM, Apple container tooling, and Docker Model Runner
-  may improve container orchestration or local LLM/controller workflows, but
-  they do not by themselves prove that Demucs/MDX/MelBand/SCNet can use the
-  Apple GPU inside a Linux container.
+- Apple `container` tooling is the approved Mac container orchestration route.
+  Docker Desktop, Docker daemon, Docker VMM, and Docker Model Runner are not Mac
+  project execution routes unless the user explicitly requests a separate
+  non-audio controller experiment. None of these tools by itself proves that
+  Demucs/MDX/MelBand/SCNet can use the Apple GPU inside a Linux container.
 - The macOS audio GPU candidate path is native PyTorch MPS. It is production
   blocked unless `torch.backends.mps.is_available()` is true on the Mac and the
   actual separator route is explicitly adapted to `device=mps`.
@@ -39,16 +40,20 @@ Use this only after the Mac preflight reports:
 This mode is for a single-model, single-route audio probe first. It is not a
 full `model_split_v2` route zoo on an 8GB machine.
 
-### `docker_orchestration_only`
+### `apple_container_orchestration_only`
 
-Docker on macOS can run project orchestration, manifests, CPU diagnostics, and
-non-audio helpers. It must not be treated as GPU audio separation until a
-specific container proves PyTorch MPS or another real audio accelerator path.
+Mac container orchestration must use Apple `container` CLI
+(`/usr/local/bin/container`), not Docker Desktop, Docker daemon, Docker VMM, or
+`docker compose`. Apple `container` can run project orchestration, manifests,
+CPU diagnostics, and non-audio helpers. It must not be treated as GPU audio
+separation until a specific container proves PyTorch MPS or another real audio
+accelerator path.
 
 ### `docker_model_runner_controller_only`
 
-Docker Model Runner can be useful for a text LLM/controller experiment. It is
-not a Demucs/MDX/MelBand/SCNet runtime.
+Docker Model Runner is not part of the Mac project execution route unless the
+user explicitly asks for a separate non-audio controller experiment. It is not a
+Demucs/MDX/MelBand/SCNet runtime.
 
 ## 8GB constraints
 
@@ -148,8 +153,9 @@ py -3 ml_worker_improved/tools/run_macos_remote_api_command.py `
 
 The runner is diagnostic-only. It never writes listen packs and always keeps
 `delivery_allowed=false`. This is a control-plane SSH launcher; it is not an
-audio/model runtime and it does not relax the Docker-only contract for project
-tests or audio inference.
+audio/model runtime and it does not relax the container-only contract for project
+tests or audio inference. On Mac, that container route is Apple `container`, not
+Docker Desktop or Docker daemon.
 
 ## Apple container status
 

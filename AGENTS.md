@@ -34,18 +34,25 @@ RALPH-AI delivery contract:
 - если качество недостаточно, улучшать общую архитектуру/метрики/router/scoring/tests/docs, а не добавлять ручной фикс под один файл.
 
 ==================================================
-ALWAYS-APPLY DOCKER EXECUTION RULE
+ALWAYS-APPLY CONTAINER EXECUTION RULE
 ==================================================
 
-Любая project execution работа должна выполняться через Docker, а не через host environment.
+Любая project execution работа должна выполняться через project-approved container route, а не через host environment.
+
+Mac-specific override:
+- для Mac target запрещено использовать Docker Desktop, Docker daemon, `docker compose` или Docker VMM как project execution/runtime route;
+- для Mac target использовать Apple `container` CLI (`/usr/local/bin/container`) и уже реализованный Mac API / Apple-container route; текущий verified smoke artifact: `artifacts/mac_api/container_smoke.json`;
+- если Mac project task требует container runtime, запускать его через Apple `container` route либо обновлять этот route/contract, а не пытаться поднимать Docker daemon;
+- если Apple `container` runtime недоступен на Mac, явно фиксировать blocker и не подменять результат host-run или другим container runtime;
+- Mac audio accelerator path остаётся native PyTorch MPS, пока отдельный Apple-container GPU/audio proof не подтверждён source-of-truth artifact.
 
 Обязательный contract:
 - не устанавливать и не подтягивать project dependencies на host;
 - не чинить host PATH, Python, ffmpeg, CUDA, Node, package managers или системные библиотеки как способ выполнить project task;
-- все project scripts, tests, builds, audio/ML inference, ffmpeg decode/encode, metrics, benchmark, artifact generation и validation запускать внутри Docker/container routes;
-- host shell допустим только для легкой read-only инспекции, проверки наличия файлов, просмотра маленьких фрагментов, управления Docker-командами и редактирования файлов в workspace;
-- если проверка или task требует runtime dependency, использовать существующий Docker image/service либо обновлять Docker config/image contract, а не host;
-- если Docker недоступен, явно сообщить blocker и не подменять Docker-run host-run результатом;
+- все project scripts, tests, builds, audio/ML inference, ffmpeg decode/encode, metrics, benchmark, artifact generation и validation запускать внутри project-approved container routes: Docker для non-Mac CUDA/Linux routes, Apple `container` для Mac target;
+- host shell допустим только для легкой read-only инспекции, проверки наличия файлов, просмотра маленьких фрагментов, управления container-командами и редактирования файлов в workspace;
+- если проверка или task требует runtime dependency, использовать существующий project-approved container image/service либо обновлять container config/image contract, а не host;
+- если required container runtime недоступен, явно сообщить blocker и не подменять container-run host-run результатом;
 - WSL не использовать для project execution, если пользователь явно не попросил обратное;
 - результаты, полученные на host для project runtime команд, считать diagnostic-only и не использовать как production validation.
 
