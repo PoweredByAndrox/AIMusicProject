@@ -7,7 +7,9 @@ The manifest can become `accepted_for_listen_pack` only when all evidence agrees
 - the minus segment-switch candidate was rendered as preview/candidate only;
 - post-render `instrumental_self_judge_gate.py` reports `overall.status=proxy_pass`;
 - post-render self-judge has `blocker_count=0`;
-- no-reference result judge reports `decision=accept_candidate`;
+- no-reference result judge reports `decision=accept_candidate` and explicit
+  minus evidence: `minus_score`, `minus_decision=accept_candidate`,
+  `minus_blockers=[]`, and `window_count >= 5`;
 - no-reference result judge includes `minus_musical_detail_preservation_gate` with `status=proxy_pass`,
   no blockers, and finite required metrics for instrumental integrity, transient preservation,
   spectral balance, phase/stereo stability, and mixture consistency;
@@ -25,6 +27,7 @@ Accepted output is still listen-preview only:
 - `can_mark_release_ready=false`
 
 This does not relax the existing pair dense delivery gate. Pair/vocal delivery still requires its own compatible evidence.
+Generic `decision=accept_candidate` or `overall_no_reference_score` is diagnostic context only and cannot substitute for explicit minus evidence.
 
 If the musical-detail gate is missing or blocked, the manifest is blocked with
 `minus_detail_preservation_gate_missing`, `minus_detail_preservation_gate_blockers`,

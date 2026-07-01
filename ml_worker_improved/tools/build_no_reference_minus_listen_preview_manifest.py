@@ -45,6 +45,7 @@ DETAIL_GATE_REQUIRED_METRICS = (
     "phase_stereo_stability",
     "mixture_consistency_score",
 )
+STEM_MIN_WINDOW_COUNT = 5
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -170,6 +171,29 @@ def finite_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and math.isfinite(float(value))
 
 
+def as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def result_judge_minus_contract_failure(row: dict[str, Any]) -> str:
+    if "minus_score" not in row or row.get("minus_score") in (None, ""):
+        return "result_judge_missing_minus_score"
+    if "minus_decision" not in row or row.get("minus_decision") in (None, ""):
+        return "result_judge_missing_minus_decision"
+    if str(row.get("minus_decision") or "") != "accept_candidate":
+        return "result_judge_not_minus_accepted"
+    if "minus_blockers" not in row or row.get("minus_blockers") is None:
+        return "result_judge_missing_minus_blockers"
+    if as_list(row.get("minus_blockers")):
+        return "result_judge_minus_blockers"
+    if as_int(row.get("window_count")) < STEM_MIN_WINDOW_COUNT:
+        return "result_judge_insufficient_window_count"
+    return ""
+
+
 def detail_preservation_gate(result_judge_row: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(result_judge_row, dict):
         return None
@@ -250,10 +274,9 @@ def failure_reason(
         return "result_judge_not_minus_mode"
     if str(result_judge_row.get("decision") or "") != "accept_candidate":
         return "result_judge_not_accepted"
-    if str(result_judge_row.get("minus_decision") or "accept_candidate") != "accept_candidate":
-        return "result_judge_not_minus_accepted"
-    if as_list(result_judge_row.get("minus_blockers")):
-        return "result_judge_minus_blockers"
+    minus_contract_reason = result_judge_minus_contract_failure(result_judge_row)
+    if minus_contract_reason:
+        return minus_contract_reason
     expected_candidate_id = candidate_id_from_candidate(candidate_manifest)
     if str(result_judge_row.get("candidate_id") or "") != expected_candidate_id:
         return "result_judge_candidate_mismatch"
@@ -376,9 +399,10 @@ def accepted_manifest(
                 "stem_type": "minus",
                 "score_mode": "minus",
                 "minus_path": minus_path,
-                "minus_score": float(
-                    result_judge_row.get("minus_score") or result_judge_row.get("overall_no_reference_score") or 0.0
-                ),
+                "minus_score": float(result_judge_row.get("minus_score") or 0.0),
+                "minus_decision": str(result_judge_row.get("minus_decision") or ""),
+                "minus_blockers": as_list(result_judge_row.get("minus_blockers")),
+                "window_count": as_int(result_judge_row.get("window_count")),
                 "overall_no_reference_score": float(result_judge_row.get("overall_no_reference_score") or 0.0),
                 "confidence": float(result_judge_row.get("confidence") or selector_row.get("confidence") or 0.0),
                 "reasons": stable_unique(

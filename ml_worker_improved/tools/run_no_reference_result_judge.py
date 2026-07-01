@@ -349,6 +349,7 @@ def judge_audio(mix: np.ndarray, vocal: np.ndarray, instrumental: np.ndarray, sa
 
     return {
         "mixture_consistency_score": mixture_consistency_score,
+        "window_count": int(len(mix_windows)),
         "vocal_leakage_in_minus_score": vocal_leakage_in_minus_score,
         "vocal_leakage_proxy_mode": "residual_or_reliable_vocal_proxy",
         "vocal_proxy_energy_ratio": minus_leakage["vocal_proxy_energy_ratio"],

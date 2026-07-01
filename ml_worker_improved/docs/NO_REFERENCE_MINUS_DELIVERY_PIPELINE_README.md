@@ -25,13 +25,16 @@ The pipeline is mode-specific for `stem_type=minus`:
    `materialize_minus_delta_leakage_repair.py` to convert persistent unsafe
    delta rows plus post-repair self-judge segment timing into a safe
    candidate-only leakage repair command;
-8. run `run_no_reference_result_judge.py` with `score_mode=minus` so each row carries `minus_score`,
-   `minus_decision`, `minus_blockers`, and `minus_musical_detail_preservation_gate`;
+8. run `run_no_reference_result_judge.py` with `score_mode=minus` so each row carries
+   explicit minus evidence: `minus_score`, `minus_decision=accept_candidate`,
+   `minus_blockers=[]`, `window_count >= 5`, and
+   `minus_musical_detail_preservation_gate`;
 9. run `run_no_reference_candidate_selector.py` with `score_mode=minus`;
 10. build `no_reference_minus_listen_preview_manifest.json` through the artifact status contract.
 
 The listen-preview manifest fails closed if either result-judge evidence or selector evidence is missing
 `score_mode=minus`; legacy `both` selector JSONL cannot be promoted as a minus listen-preview result.
+Generic `decision=accept_candidate` or `overall_no_reference_score` is diagnostic context only and cannot substitute for explicit minus evidence.
 It also fails closed if the result judge does not provide a passing musical-detail preservation gate.
 That gate is a no-reference proxy guard for music holes, transient loss, spectral damage, phase/stereo
 instability, and weak mixture consistency; it is not SDR/SI-SDR and does not mark release readiness.

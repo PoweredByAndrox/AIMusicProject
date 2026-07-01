@@ -25,6 +25,7 @@ from tools.run_no_reference_candidate_selector import write_outputs as write_sel
 PIPELINE_MANIFEST_NAME = "no_reference_vocal_delivery_pipeline_manifest.json"
 PIPELINE_SUMMARY_NAME = "no_reference_vocal_delivery_pipeline_summary.md"
 ACCEPTED_SELECTOR_DECISIONS = {"accept_candidate", "select_alternative_candidate"}
+STEM_MIN_WINDOW_COUNT = 5
 
 START_TIME = time.monotonic()
 
@@ -100,8 +101,15 @@ def row_float(row: dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
+def row_int(row: dict[str, Any], key: str, default: int = 0) -> int:
+    try:
+        return int(row.get(key))
+    except (TypeError, ValueError):
+        return default
+
+
 def vocal_score_from_row(row: dict[str, Any]) -> float:
-    return row_float(row, "vocal_score", "overall_no_reference_score")
+    return row_float(row, "vocal_score")
 
 
 def confidence_from_row(row: dict[str, Any]) -> float:
@@ -109,15 +117,17 @@ def confidence_from_row(row: dict[str, Any]) -> float:
 
 
 def vocal_acceptance_decision(row: dict[str, Any]) -> str:
-    vocal_decision = str(row.get("vocal_decision") or "")
-    return vocal_decision or str(row.get("decision") or "")
+    return str(row.get("vocal_decision") or "")
 
 
 def is_vocal_accepted_row(row: dict[str, Any]) -> bool:
     return (
         str(row.get("score_mode") or "") == "vocal"
+        and row.get("vocal_score") not in (None, "")
         and vocal_acceptance_decision(row) == "accept_candidate"
+        and row.get("vocal_blockers") is not None
         and not as_list(row.get("vocal_blockers"))
+        and row_int(row, "window_count") >= STEM_MIN_WINDOW_COUNT
     )
 
 
@@ -483,7 +493,7 @@ def run_vocal_delivery_pipeline(
     selected_input_row = sorted(
         accepted_rows,
         key=lambda row: (
-            -float(row.get("vocal_score") or row.get("overall_no_reference_score") or 0.0),
+            -vocal_score_from_row(row),
             -float(row.get("confidence") or 0.0),
             candidate_id_from_row(row),
         ),

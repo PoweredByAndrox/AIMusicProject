@@ -126,6 +126,7 @@ def result_judge_row(
         "minus_decision": decision,
         "minus_score": 0.91,
         "minus_blockers": [],
+        "window_count": 12,
         "overall_no_reference_score": 0.91,
         "confidence": 0.88,
         "reasons": ["no_reference_proxy_passed"] if decision == "accept_candidate" else ["vocal_leakage_in_minus"],
@@ -225,6 +226,41 @@ def test_minus_listen_preview_blocks_selector_candidate_mismatch(tmp_path: Path)
     assert manifest["delivery_status"] == "blocked"
     assert manifest["delivery_allowed"] is False
     assert manifest["dominant_failure_reason"] == "selector_candidate_mismatch"
+
+
+def test_minus_listen_preview_blocks_generic_only_result_judge_evidence(tmp_path: Path) -> None:
+    row = result_judge_row()
+    del row["minus_score"]
+    del row["minus_decision"]
+    del row["minus_blockers"]
+    row["overall_no_reference_score"] = 0.99
+
+    manifest = build_manifest(
+        candidate_manifest_json=write_json(tmp_path / "candidate.json", candidate_manifest()),
+        self_judge_manifest_json=write_json(tmp_path / "self_judge.json", self_judge_manifest()),
+        result_judge_jsonl=write_jsonl(tmp_path / "result_judge.jsonl", [row]),
+        selector_jsonl=write_jsonl(tmp_path / "selector.jsonl", [selector_row()]),
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "result_judge_missing_minus_score"
+
+
+def test_minus_listen_preview_blocks_insufficient_result_judge_windows(tmp_path: Path) -> None:
+    row = result_judge_row()
+    row["window_count"] = 1
+
+    manifest = build_manifest(
+        candidate_manifest_json=write_json(tmp_path / "candidate.json", candidate_manifest()),
+        self_judge_manifest_json=write_json(tmp_path / "self_judge.json", self_judge_manifest()),
+        result_judge_jsonl=write_jsonl(tmp_path / "result_judge.jsonl", [row]),
+        selector_jsonl=write_jsonl(tmp_path / "selector.jsonl", [selector_row()]),
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "result_judge_insufficient_window_count"
 
 
 def test_minus_listen_preview_accepts_only_when_all_evidence_passes(tmp_path: Path) -> None:

@@ -6,15 +6,14 @@ It is mode-specific for `stem_type=vocal`:
 
 1. read existing `run_no_reference_windowed_judge.py --score-mode vocal` rows;
 2. reject rows that are not `score_mode=vocal`;
-3. accept a row by stem-specific vocal evidence: `vocal_decision=accept_candidate`
-   when present, otherwise legacy `decision=accept_candidate`, and always require
-   empty `vocal_blockers`;
+3. accept a row only when it has explicit stem-specific vocal evidence:
+   `vocal_score`, `vocal_decision=accept_candidate`, `vocal_blockers=[]`,
+   and `window_count >= 5`;
 4. fail closed before selection when the mix or vocal audio path is missing;
 5. optionally choose the base candidate from
    `tools/build_no_reference_vocal_candidate_score_matrix.py` via
    `--candidate-score-matrix-json`;
-6. otherwise rank accepted vocal-mode rows by `vocal_score` only, with
-   `overall_no_reference_score` used only as a missing-score fallback;
+6. otherwise rank accepted vocal-mode rows by `vocal_score` only;
 7. build `no_reference_vocal_listen_preview_manifest.json` through the artifact status contract.
 
 The listen-preview manifest also requires selector evidence with `score_mode=vocal`; legacy `both` selector JSONL is blocked before listen-pack promotion.
@@ -30,6 +29,7 @@ The rendered repair statuses are provenance only; post-render vocal judge and se
 still mandatory before listen-pack promotion.
 
 It does not run separation models, add checkpoints, require reference stems, require human CSV review, train, add cleanup/debleed/denoise stages, or use `minus`/`both`/shared overall scoring as the vocal selector.
+Generic `decision=accept_candidate` or `overall_no_reference_score` is diagnostic context only and cannot substitute for explicit vocal evidence.
 
 When `--candidate-score-matrix-json` is supplied, the pipeline manifest records
 `base_selection_source=candidate_score_matrix`. Without it, the fallback source

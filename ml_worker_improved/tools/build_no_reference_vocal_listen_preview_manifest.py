@@ -36,6 +36,7 @@ ACCEPTABLE_CANDIDATE_STATUSES = {
     "rendered_vocal_segment_switch_candidate",
 }
 ACCEPTED_SELECTOR_DECISIONS = {"accept_candidate", "select_alternative_candidate"}
+STEM_MIN_WINDOW_COUNT = 5
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -69,6 +70,13 @@ def as_list(value: Any) -> list[str]:
         return []
     text = str(value)
     return [text] if text else []
+
+
+def as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def stable_unique(values: Iterable[Any]) -> list[str]:
@@ -144,8 +152,23 @@ def first_selector_row(selector_jsonl: Path) -> dict[str, Any] | None:
 def vocal_acceptance_decision(row: dict[str, Any] | None) -> str:
     if not isinstance(row, dict):
         return ""
-    vocal_decision = str(row.get("vocal_decision") or "")
-    return vocal_decision or str(row.get("decision") or "")
+    return str(row.get("vocal_decision") or "")
+
+
+def vocal_judge_contract_failure(row: dict[str, Any]) -> str:
+    if "vocal_score" not in row or row.get("vocal_score") in (None, ""):
+        return "vocal_judge_missing_vocal_score"
+    if "vocal_decision" not in row or row.get("vocal_decision") in (None, ""):
+        return "vocal_judge_missing_vocal_decision"
+    if vocal_acceptance_decision(row) != "accept_candidate":
+        return "vocal_judge_not_accepted"
+    if "vocal_blockers" not in row or row.get("vocal_blockers") is None:
+        return "vocal_judge_missing_vocal_blockers"
+    if as_list(row.get("vocal_blockers")):
+        return "vocal_judge_has_blockers"
+    if as_int(row.get("window_count")) < STEM_MIN_WINDOW_COUNT:
+        return "vocal_judge_insufficient_window_count"
+    return ""
 
 
 def selector_selected_candidate(selector_row: dict[str, Any] | None) -> dict[str, Any]:
@@ -195,10 +218,9 @@ def failure_reason(
         return "vocal_judge_missing"
     if str(vocal_judge_row.get("score_mode") or "") != "vocal":
         return "vocal_judge_not_vocal_mode"
-    if vocal_acceptance_decision(vocal_judge_row) != "accept_candidate":
-        return "vocal_judge_not_accepted"
-    if as_list(vocal_judge_row.get("vocal_blockers")):
-        return "vocal_judge_has_blockers"
+    vocal_contract_reason = vocal_judge_contract_failure(vocal_judge_row)
+    if vocal_contract_reason:
+        return vocal_contract_reason
     expected_candidate_id = candidate_id_from_candidate(candidate_manifest)
     if str(vocal_judge_row.get("candidate_id") or "") != expected_candidate_id:
         return "vocal_judge_candidate_mismatch"
@@ -308,7 +330,10 @@ def accepted_manifest(
                 "candidate_id": str(row.get("candidate_id") or ""),
                 "stem_type": "vocal",
                 "vocal_path": vocal_path,
-                "vocal_score": float(vocal_judge_row.get("vocal_score") or vocal_judge_row.get("overall_no_reference_score") or 0.0),
+                "vocal_score": float(vocal_judge_row.get("vocal_score") or 0.0),
+                "vocal_decision": str(vocal_judge_row.get("vocal_decision") or ""),
+                "vocal_blockers": as_list(vocal_judge_row.get("vocal_blockers")),
+                "window_count": as_int(vocal_judge_row.get("window_count")),
                 "overall_no_reference_score": float(vocal_judge_row.get("overall_no_reference_score") or 0.0),
                 "confidence": float(vocal_judge_row.get("confidence") or selector_row.get("confidence") or 0.0),
                 "reasons": reasons,

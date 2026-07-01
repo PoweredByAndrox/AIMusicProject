@@ -87,6 +87,7 @@ def vocal_judge_row(
         "vocal_decision": decision,
         "vocal_score": 0.88,
         "vocal_blockers": [],
+        "window_count": 12,
         "overall_no_reference_score": 0.88,
         "confidence": 0.86,
         "reasons": ["no_reference_proxy_passed"],
@@ -127,6 +128,39 @@ def test_vocal_listen_preview_accepts_only_vocal_mode_evidence(tmp_path: Path) -
     assert manifest["can_mark_release_ready"] is False
     assert manifest["audio_copied"] is False
     assert manifest["audio_exported"] is False
+
+
+def test_vocal_listen_preview_blocks_generic_only_vocal_judge_evidence(tmp_path: Path) -> None:
+    row = vocal_judge_row()
+    del row["vocal_score"]
+    del row["vocal_decision"]
+    del row["vocal_blockers"]
+    row["overall_no_reference_score"] = 0.99
+
+    manifest = build_manifest(
+        candidate_manifest_json=write_json(tmp_path / "candidate.json", candidate_manifest()),
+        vocal_judge_jsonl=write_jsonl(tmp_path / "vocal_judge.jsonl", [row]),
+        selector_jsonl=write_jsonl(tmp_path / "selector.jsonl", [selector_row()]),
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "vocal_judge_missing_vocal_score"
+
+
+def test_vocal_listen_preview_blocks_insufficient_vocal_windows(tmp_path: Path) -> None:
+    row = vocal_judge_row()
+    row["window_count"] = 1
+
+    manifest = build_manifest(
+        candidate_manifest_json=write_json(tmp_path / "candidate.json", candidate_manifest()),
+        vocal_judge_jsonl=write_jsonl(tmp_path / "vocal_judge.jsonl", [row]),
+        selector_jsonl=write_jsonl(tmp_path / "selector.jsonl", [selector_row()]),
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "vocal_judge_insufficient_window_count"
 
 
 def test_vocal_listen_preview_accepts_mode_specific_vocal_decision_with_generic_minus_reasons(

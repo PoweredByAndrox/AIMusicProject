@@ -154,6 +154,7 @@ def test_minus_score_mode_adds_minus_matrix_fields(tmp_path: Path) -> None:
     assert "minus_score" in row
     assert "minus_decision" in row
     assert row["minus_blockers"] == []
+    assert row["window_count"] >= 5
     assert row["minus_musical_detail_preservation_gate"]["status"] == "proxy_pass"
     assert row["minus_musical_detail_preservation_gate"]["blockers"] == []
     assert result["summary"]["score_mode"] == "minus"

@@ -46,6 +46,7 @@ def vocal_judge_row(tmp_path: Path, candidate_id: str = "vocal-a") -> dict:
         "vocal_decision": "accept_candidate",
         "vocal_score": 0.88,
         "vocal_blockers": [],
+        "window_count": 12,
         "overall_no_reference_score": 0.88,
         "confidence": 0.86,
         "minus_decision": "blocked_hard_case",
@@ -252,6 +253,26 @@ def test_vocal_delivery_pipeline_blocks_non_vocal_rows(tmp_path: Path) -> None:
     assert manifest["delivery_status"] == "blocked"
     assert manifest["delivery_allowed"] is False
     assert manifest["presentation_status"] == "blocked_from_listen_pack"
+    assert manifest["dominant_failure_reason"] == "no_accepted_vocal_candidate"
+    assert manifest["score_modes_used"] == ["vocal"]
+
+
+def test_vocal_delivery_pipeline_blocks_generic_only_acceptance(tmp_path: Path) -> None:
+    row = vocal_judge_row(tmp_path)
+    del row["vocal_score"]
+    del row["vocal_decision"]
+    del row["vocal_blockers"]
+    row["decision"] = "accept_candidate"
+    row["overall_no_reference_score"] = 0.99
+
+    manifest = run_vocal_delivery_pipeline(
+        vocal_judge_jsonl=write_jsonl(tmp_path / "vocal_judge.jsonl", [row]),
+        output_dir=tmp_path / "out",
+        base_candidate_id=None,
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
     assert manifest["dominant_failure_reason"] == "no_accepted_vocal_candidate"
     assert manifest["score_modes_used"] == ["vocal"]
 

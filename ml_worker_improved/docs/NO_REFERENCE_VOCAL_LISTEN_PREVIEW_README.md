@@ -8,9 +8,9 @@ The manifest can be accepted only when:
 
 1. the candidate manifest is preview-only and has `render_status=existing_vocal_candidate_proxy_pass` or `render_status=rendered_vocal_segment_switch_candidate`;
 2. the candidate manifest requires post-candidate vocal judging;
-3. the vocal judge row has `score_mode=vocal`, accepted stem-specific vocal
-   evidence (`vocal_decision=accept_candidate` when present, otherwise legacy
-   `decision=accept_candidate`), and no vocal blockers;
+3. the vocal judge row has `score_mode=vocal`, explicit stem-specific vocal
+   evidence (`vocal_score`, `vocal_decision=accept_candidate`, `vocal_blockers=[]`,
+   and `window_count >= 5`), and no vocal blockers;
 4. the selector accepts the same candidate;
 5. every evidence path points to the same vocal path;
 6. the candidate manifest does not report any source safety violation such as training, model changes, cleanup route additions, threshold relaxation, or audio export/copy.
@@ -27,6 +27,7 @@ Accepted output is listen-preview only:
 - `can_mark_release_ready=false`
 
 This does not relax the shared pair dense delivery gate. Full vocal+minus delivery still requires separate accepted vocal and minus evidence.
+Generic `decision=accept_candidate` or `overall_no_reference_score` is diagnostic context only and cannot substitute for explicit vocal evidence.
 
 Example:
 
