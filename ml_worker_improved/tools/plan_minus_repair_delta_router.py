@@ -120,6 +120,30 @@ def load_delta_gate(path: Path) -> tuple[dict[str, Any] | None, list[dict[str, A
     return manifest, rows, failures
 
 
+def infer_source_route(gate_manifest: dict[str, Any], gate_path: Path, source_route: str) -> str:
+    if source_route:
+        return source_route
+    repair_manifest_path = canonical_path(gate_manifest.get("repair_manifest"), gate_path.parent)
+    if not gate_manifest.get("repair_manifest") or not repair_manifest_path.exists():
+        return ""
+    try:
+        repair_manifest = read_json(repair_manifest_path)
+    except (json.JSONDecodeError, OSError):
+        return ""
+    for key in ("mode", "route", "selected_route"):
+        value = repair_manifest.get(key)
+        route = str(value or "") if isinstance(value, str) else ""
+        if route:
+            return route
+    route_payload = repair_manifest.get("route")
+    if isinstance(route_payload, dict):
+        for key in ("mode", "route_id", "selected_route"):
+            route = str(route_payload.get(key) or "")
+            if route:
+                return route
+    return ""
+
+
 def issue_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     transition_counts: dict[str, int] = {}
     issue_counts: dict[str, int] = {}
@@ -176,6 +200,29 @@ def select_route(
             ],
             [],
             [],
+        )
+    if (
+        gate_status == "blocked_no_blocker_reduction"
+        and source_route == "judge_guided_minus_vocal_leakage_repair"
+        and unsafe_segments > 0
+    ):
+        return (
+            "ready_for_next_candidate_route",
+            "route_to_alternative_model_candidate",
+            "no_reference_minus_candidate_model_router",
+            [
+                "mine_alternative_minus_model_candidate",
+                "rerun_instrumental_self_judge_gate",
+                "rerun_minus_repair_delta_gate",
+            ],
+            stable_unique(
+                gate_failures
+                + [
+                    "persistent_unsafe_vocal_or_full_mix_blockers",
+                    "failed_leakage_repair_no_blocker_reduction",
+                ]
+            ),
+            [f"{source_route}:no_blocker_reduction"],
         )
     if gate_status == "blocked_unsafe_risk_increase" or unsafe_segments > 0:
         return (
@@ -315,6 +362,7 @@ def plan_minus_repair_delta_router(
         failure_taxonomy = stable_unique([str(item) for item in gate_manifest.get("failure_taxonomy") or []] + evidence_failures)
         blocked_repeat_routes = stable_unique([source_route] if source_route else [])
     else:
+        source_route = infer_source_route(gate_manifest, delta_gate_manifest, source_route)
         (
             router_status,
             selected_next_action,

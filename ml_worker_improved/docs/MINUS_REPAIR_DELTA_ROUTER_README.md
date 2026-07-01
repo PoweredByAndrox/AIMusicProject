@@ -19,7 +19,9 @@ The planner requires:
 
 - `--delta-gate-manifest`: output from `evaluate_minus_repair_delta_gate.py`;
 - `--output-dir`: short-name artifact directory;
-- optional `--source-route`: route that produced the failed repair;
+- optional `--source-route`: route that produced the failed repair. When this is
+  omitted, the router attempts to infer the source route from the delta gate's
+  `repair_manifest`;
 - optional `--candidate-id`: provenance override.
 
 The delta-gate manifest must point at readable `rows.jsonl` segment delta rows.
@@ -30,7 +32,11 @@ The planner reads unresolved segment transitions and classifies persistent
 blockers:
 
 - unsafe vocal/full-mix proxy blockers route to
-  `switch_to_leakage_repair` / `judge_guided_minus_vocal_leakage_repair`;
+  `switch_to_leakage_repair` / `judge_guided_minus_vocal_leakage_repair`,
+  unless that same leakage route already produced zero blocker reduction;
+- failed leakage repairs with zero blocker reduction route to
+  `route_to_alternative_model_candidate` /
+  `no_reference_minus_candidate_model_router`;
 - detail-only blockers route to `retune_detail_repair` and block repeating the
   same detail repair parameters;
 - unclassified persistent blockers route to `switch_to_segment_router`;

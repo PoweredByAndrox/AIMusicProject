@@ -74,6 +74,28 @@ def delta_gate(
     )
 
 
+def leakage_repair_manifest(tmp_path: Path) -> Path:
+    return write_json(
+        tmp_path / "repair" / "manifest.json",
+        {
+            "mode": "judge_guided_minus_vocal_leakage_repair",
+            "delivery_status": "candidate_only",
+            "delivery_allowed": False,
+        },
+    )
+
+
+def nested_leakage_repair_manifest(tmp_path: Path) -> Path:
+    return write_json(
+        tmp_path / "repair" / "manifest.json",
+        {
+            "delivery_status": "candidate_only",
+            "delivery_allowed": False,
+            "route": {"mode": "judge_guided_minus_vocal_leakage_repair"},
+        },
+    )
+
+
 def segment(segment_id: str, *, after_issues: list[str], transition: str = "persisting_blocker") -> dict:
     return {
         "schema": "minus_repair_delta_gate_segment.v1",
@@ -116,6 +138,95 @@ def test_router_switches_to_leakage_repair_for_persistent_unsafe_blockers(tmp_pa
     assert row["required_actions"][0] == "run_judge_guided_minus_vocal_leakage_repair"
     assert (tmp_path / "router" / "rows.jsonl").exists()
     assert (tmp_path / "router" / "summary.md").exists()
+
+
+def test_router_routes_to_alternative_after_failed_leakage_repair_loop(tmp_path: Path) -> None:
+    module = _load_module()
+    gate = delta_gate(
+        tmp_path,
+        gate_status="blocked_no_blocker_reduction",
+        rows=[
+            segment("segment_0000", after_issues=["vocal_projection_proxy"]),
+            segment("segment_0001", after_issues=["presence_loss_proxy"]),
+        ],
+    )
+
+    manifest = module.plan_minus_repair_delta_router(
+        delta_gate_manifest=gate,
+        output_dir=tmp_path / "router",
+        source_route="judge_guided_minus_vocal_leakage_repair",
+    )
+
+    assert manifest["router_status"] == "ready_for_next_candidate_route"
+    assert manifest["selected_next_action"] == "route_to_alternative_model_candidate"
+    assert manifest["selected_route"] == "no_reference_minus_candidate_model_router"
+    assert manifest["blocked_repeat_routes"] == [
+        "judge_guided_minus_vocal_leakage_repair:no_blocker_reduction"
+    ]
+    assert manifest["failure_taxonomy"] == [
+        "blocker_count_not_reduced",
+        "persistent_unsafe_vocal_or_full_mix_blockers",
+        "failed_leakage_repair_no_blocker_reduction",
+    ]
+    row = read_json(tmp_path / "router" / "plan.json")["rows"][0]
+    assert row["required_actions"] == [
+        "mine_alternative_minus_model_candidate",
+        "rerun_instrumental_self_judge_gate",
+        "rerun_minus_repair_delta_gate",
+    ]
+    assert manifest["delivery_allowed"] is False
+
+
+def test_router_infers_failed_leakage_source_route_from_repair_manifest(tmp_path: Path) -> None:
+    module = _load_module()
+    gate = delta_gate(
+        tmp_path,
+        gate_status="blocked_no_blocker_reduction",
+        rows=[
+            segment("segment_0000", after_issues=["vocal_projection_proxy"]),
+            segment("segment_0001", after_issues=["presence_loss_proxy"]),
+        ],
+    )
+    payload = read_json(gate)
+    payload["repair_manifest"] = str(leakage_repair_manifest(tmp_path))
+    write_json(gate, payload)
+
+    manifest = module.plan_minus_repair_delta_router(
+        delta_gate_manifest=gate,
+        output_dir=tmp_path / "router",
+        source_route="",
+    )
+
+    assert manifest["source_route"] == "judge_guided_minus_vocal_leakage_repair"
+    assert manifest["selected_next_action"] == "route_to_alternative_model_candidate"
+    assert manifest["selected_route"] == "no_reference_minus_candidate_model_router"
+    assert manifest["blocked_repeat_routes"] == [
+        "judge_guided_minus_vocal_leakage_repair:no_blocker_reduction"
+    ]
+    assert manifest["delivery_allowed"] is False
+
+
+def test_router_infers_failed_leakage_source_route_from_nested_repair_manifest(tmp_path: Path) -> None:
+    module = _load_module()
+    gate = delta_gate(
+        tmp_path,
+        gate_status="blocked_no_blocker_reduction",
+        rows=[segment("segment_0000", after_issues=["vocal_projection_proxy"])],
+    )
+    payload = read_json(gate)
+    payload["repair_manifest"] = str(nested_leakage_repair_manifest(tmp_path))
+    write_json(gate, payload)
+
+    manifest = module.plan_minus_repair_delta_router(
+        delta_gate_manifest=gate,
+        output_dir=tmp_path / "router",
+        source_route="",
+    )
+
+    assert manifest["source_route"] == "judge_guided_minus_vocal_leakage_repair"
+    assert manifest["selected_next_action"] == "route_to_alternative_model_candidate"
+    assert manifest["selected_route"] == "no_reference_minus_candidate_model_router"
+    assert manifest["delivery_allowed"] is False
 
 
 def test_router_retunes_detail_repair_for_detail_only_persistent_blockers(tmp_path: Path) -> None:
