@@ -193,3 +193,25 @@ def test_mac_api_get_job_finds_manifest_after_restart(tmp_path):
 
     assert manifest is not None
     assert manifest["status"] == "ok"
+
+
+def test_mac_api_start_job_blocks_without_windows_project_mount(tmp_path):
+    module = _load_module()
+    source_audio = tmp_path / "mix.flac"
+    source_audio.write_bytes(b"audio")
+    artifacts_root = tmp_path / "local_artifacts"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=tmp_path / "project",
+            artifacts_root=artifacts_root,
+            python_bin=tmp_path / "venv" / "bin" / "python",
+        )
+    )
+
+    manifest = runner.start_job({"source_audio_path": str(source_audio), "output_subdir": "mac_api/m001"})
+
+    assert manifest["status"] == "blocked"
+    assert manifest["blocked_reason"] == "mac_windows_project_mount_missing"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["mount_preflight"]["can_write_route_artifacts"] is False
+    assert not (artifacts_root / "mac_api").exists()

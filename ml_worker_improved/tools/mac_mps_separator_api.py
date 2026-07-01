@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -17,6 +18,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
+
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from mac_windows_mount_preflight import (  # noqa: E402
+    DEFAULT_WINDOWS_PROJECT_ROOT,
+    preflight_mac_windows_project_mount,
+)
 
 
 DEFAULT_MODEL_NAME = "htdemucs_6s"
@@ -33,13 +43,26 @@ class MacMpsApiConfig:
     project_root: Path
     artifacts_root: Path
     python_bin: Path
+    mac_windows_project_mount: Optional[Path] = None
+    windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT
 
 
-def build_config(*, project_root: Path, artifacts_root: Path, python_bin: Path) -> MacMpsApiConfig:
+def build_config(
+    *,
+    project_root: Path,
+    artifacts_root: Path,
+    python_bin: Path,
+    mac_windows_project_mount: Optional[Path] = None,
+    windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT,
+) -> MacMpsApiConfig:
     return MacMpsApiConfig(
         project_root=Path(project_root).expanduser().resolve(),
         artifacts_root=Path(artifacts_root).expanduser().resolve(),
         python_bin=Path(python_bin).expanduser(),
+        mac_windows_project_mount=Path(mac_windows_project_mount).expanduser().resolve()
+        if mac_windows_project_mount is not None
+        else None,
+        windows_project_root=str(windows_project_root),
     )
 
 
@@ -203,8 +226,9 @@ def build_job_manifest(
     route_id: str = DEFAULT_MODEL_NAME,
     returncode: Optional[int] = None,
     error: Optional[str] = None,
+    mount_preflight: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    return {
+    manifest = {
         "schema": "mac_mps_separator_api_job.v1",
         "job_id": str(job_id),
         "status": str(status),
@@ -220,6 +244,11 @@ def build_job_manifest(
         "presentation_status": "diagnostic_mps_api_only",
         "created_at_unix": time.time(),
     }
+    if mount_preflight is not None:
+        manifest["mount_preflight"] = mount_preflight
+        manifest["mac_windows_project_mount"] = str(mount_preflight.get("mac_windows_project_mount") or "")
+        manifest["windows_output_path"] = str(mount_preflight.get("windows_output_path") or "")
+    return manifest
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -270,6 +299,27 @@ class MacMpsJobRunner:
         job_id = make_job_id(str(source_audio_path))
         output_subdir = str(payload.get("output_subdir") or f"mac_api/{job_id}")
         output_dir = resolve_job_output_dir(self.config, output_subdir)
+        mount_preflight = preflight_mac_windows_project_mount(
+            mac_windows_project_mount=self.config.mac_windows_project_mount,
+            output_path=output_dir,
+            windows_project_root=self.config.windows_project_root,
+        )
+        if mount_preflight.get("preflight_status") != "passed":
+            manifest = build_job_manifest(
+                job_id=job_id,
+                status="blocked",
+                source_audio_path=source_audio_path,
+                output_dir=output_dir,
+                model_name=model_name,
+                route_id=route_id,
+                returncode=78,
+                error=str(mount_preflight.get("blocked_reason") or "mac_windows_project_mount_preflight_failed"),
+                mount_preflight=mount_preflight,
+            )
+            manifest["blocked_reason"] = str(mount_preflight.get("blocked_reason") or "")
+            with self._lock:
+                self._jobs[job_id] = manifest
+            return manifest
         manifest = build_job_manifest(
             job_id=job_id,
             status="queued",
@@ -277,6 +327,7 @@ class MacMpsJobRunner:
             output_dir=output_dir,
             model_name=model_name,
             route_id=route_id,
+            mount_preflight=mount_preflight,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(output_dir / "manifest.json", manifest)
@@ -284,7 +335,7 @@ class MacMpsJobRunner:
             self._jobs[job_id] = manifest
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, source_audio_path, output_dir, model_name, route_id),
+            args=(job_id, source_audio_path, output_dir, model_name, route_id, mount_preflight),
             daemon=True,
         )
         thread.start()
@@ -311,6 +362,7 @@ class MacMpsJobRunner:
         output_dir: Path,
         model_name: str,
         route_id: str,
+        mount_preflight: dict[str, Any],
     ) -> None:
         progress_path = output_dir / "progress.jsonl"
         run_dir = output_dir / "run"
@@ -322,6 +374,7 @@ class MacMpsJobRunner:
             output_dir=output_dir,
             model_name=model_name,
             route_id=route_id,
+            mount_preflight=mount_preflight,
         )
         _write_json(output_dir / "manifest.json", manifest)
         with self._lock:
@@ -338,6 +391,7 @@ class MacMpsJobRunner:
                 status="failed",
                 returncode=20,
                 error=error,
+                mount_preflight=mount_preflight,
             )
             _append_progress(progress_path, "preflight", "missing_source", error=error)
             return
@@ -377,6 +431,7 @@ class MacMpsJobRunner:
             status=status,
             returncode=int(completed.returncode),
             error=None if completed.returncode == 0 else f"export failed rc={completed.returncode}",
+            mount_preflight=mount_preflight,
         )
         _append_progress(progress_path, "summarize", "end")
 
@@ -391,6 +446,7 @@ class MacMpsJobRunner:
         status: str,
         returncode: int,
         error: Optional[str],
+        mount_preflight: Optional[dict[str, Any]] = None,
     ) -> None:
         manifest = build_job_manifest(
             job_id=job_id,
@@ -401,6 +457,7 @@ class MacMpsJobRunner:
             route_id=route_id,
             returncode=returncode,
             error=error,
+            mount_preflight=mount_preflight,
         )
         manifest.update(_summarize_stems(output_dir / "run"))
         _write_json(output_dir / "manifest.json", manifest)
@@ -466,6 +523,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--artifacts-root", type=Path, required=True)
     parser.add_argument("--python-bin", type=Path, required=True)
+    parser.add_argument("--mac-windows-project-mount", type=Path)
+    parser.add_argument("--windows-project-root", default=DEFAULT_WINDOWS_PROJECT_ROOT)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser.parse_args()
@@ -478,6 +537,8 @@ def main() -> None:
             project_root=args.project_root,
             artifacts_root=args.artifacts_root,
             python_bin=args.python_bin,
+            mac_windows_project_mount=args.mac_windows_project_mount,
+            windows_project_root=args.windows_project_root,
         ),
         host=str(args.host),
         port=int(args.port),

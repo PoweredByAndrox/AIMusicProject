@@ -6,9 +6,19 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from mac_windows_mount_preflight import (  # noqa: E402
+    DEFAULT_WINDOWS_PROJECT_ROOT,
+    preflight_mac_windows_project_mount,
+)
 
 
 SCHEMA = "apple_container_project_smoke.v1"
@@ -90,8 +100,9 @@ def base_manifest(
     mount_target: str = DEFAULT_MOUNT_TARGET,
     workdir: str = DEFAULT_WORKDIR,
     command: Sequence[str] = (),
+    mount_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    manifest = {
         "schema": SCHEMA,
         "mode": "apple_container_project_smoke",
         "project_root": str(project_root),
@@ -120,6 +131,11 @@ def base_manifest(
         "audio_generated": False,
         "listen_pack": {},
     }
+    if mount_preflight is not None:
+        manifest["mount_preflight"] = mount_preflight
+        manifest["mac_windows_project_mount"] = str(mount_preflight.get("mac_windows_project_mount") or "")
+        manifest["windows_output_path"] = str(mount_preflight.get("windows_output_path") or "")
+    return manifest
 
 
 def write_terminal_outputs(output_dir: Path, *, stdout: str = "", stderr: str = "") -> None:
@@ -141,6 +157,7 @@ def blocked_manifest(
     workdir: str = DEFAULT_WORKDIR,
     command: Sequence[str] = (),
     stderr: str = "",
+    mount_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest = {
         **base_manifest(
@@ -152,6 +169,7 @@ def blocked_manifest(
             mount_target=mount_target,
             workdir=workdir,
             command=command,
+            mount_preflight=mount_preflight,
         ),
         "status": "blocked",
         "blocked_reason": blocked_reason,
@@ -171,11 +189,36 @@ def run_apple_container_project_smoke(
     container_cli: Path = DEFAULT_CONTAINER_CLI,
     image: str = DEFAULT_IMAGE,
     test_selectors: Sequence[str] = DEFAULT_TEST_SELECTORS,
+    mac_windows_project_mount: Path | None = None,
+    windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT,
     mount_target: str = DEFAULT_MOUNT_TARGET,
     workdir: str = DEFAULT_WORKDIR,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
+    mount_preflight = preflight_mac_windows_project_mount(
+        mac_windows_project_mount=mac_windows_project_mount,
+        output_path=output_dir,
+        windows_project_root=windows_project_root,
+    )
+    if mount_preflight.get("preflight_status") != "passed":
+        manifest = {
+            **base_manifest(
+                output_dir=output_dir,
+                project_root=project_root,
+                container_cli=container_cli,
+                image=image,
+                test_selectors=test_selectors,
+                mount_target=mount_target,
+                workdir=workdir,
+                mount_preflight=mount_preflight,
+            ),
+            "status": "blocked",
+            "blocked_reason": str(mount_preflight.get("blocked_reason") or ""),
+            "returncode": 78,
+        }
+        return manifest
+
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
     if progress_path.exists():
@@ -203,6 +246,7 @@ def run_apple_container_project_smoke(
             mount_target=mount_target,
             workdir=workdir,
             command=command,
+            mount_preflight=mount_preflight,
         )
     if not container_cli.exists():
         return blocked_manifest(
@@ -216,6 +260,7 @@ def run_apple_container_project_smoke(
             mount_target=mount_target,
             workdir=workdir,
             command=command,
+            mount_preflight=mount_preflight,
         )
 
     write_json(output_dir / COMMAND_NAME, {"command": command})
@@ -238,6 +283,7 @@ def run_apple_container_project_smoke(
             workdir=workdir,
             command=command,
             stderr=str(exc),
+            mount_preflight=mount_preflight,
         )
     except OSError as exc:
         return blocked_manifest(
@@ -252,6 +298,7 @@ def run_apple_container_project_smoke(
             workdir=workdir,
             command=command,
             stderr=f"{type(exc).__name__}: {exc}",
+            mount_preflight=mount_preflight,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = (exc.stdout or "").decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
@@ -270,6 +317,7 @@ def run_apple_container_project_smoke(
             mount_target=mount_target,
             workdir=workdir,
             command=command,
+            mount_preflight=mount_preflight,
         ),
         "status": status,
         "delivery_status": "diagnostic_only" if status == "passed" else "blocked",
@@ -287,6 +335,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--container-cli", type=Path, default=DEFAULT_CONTAINER_CLI)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
+    parser.add_argument("--mac-windows-project-mount", type=Path)
+    parser.add_argument("--windows-project-root", default=DEFAULT_WINDOWS_PROJECT_ROOT)
     parser.add_argument("--mount-target", default=DEFAULT_MOUNT_TARGET)
     parser.add_argument("--workdir", default=DEFAULT_WORKDIR)
     parser.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
@@ -302,6 +352,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         container_cli=args.container_cli,
         image=args.image,
         test_selectors=tuple(args.test_selectors or DEFAULT_TEST_SELECTORS),
+        mac_windows_project_mount=args.mac_windows_project_mount,
+        windows_project_root=args.windows_project_root,
         mount_target=args.mount_target,
         workdir=args.workdir,
         timeout_sec=args.timeout_sec,
