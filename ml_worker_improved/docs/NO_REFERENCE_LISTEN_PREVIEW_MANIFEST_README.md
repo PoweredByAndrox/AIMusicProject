@@ -2,14 +2,15 @@
 
 `tools/build_no_reference_listen_preview_manifest.py` converts an accepted
 no-reference dense delivery gate manifest into a contract-safe listen-preview
-manifest.
+source manifest.
 
 It does not copy audio, export audio, train, add models, add cleanup/debleed,
 or mark anything `release_ready`.
 
 ## Contract
 
-The generated manifest is listenable only when:
+The generated manifest is an intermediate listen-preview source. It is
+promotable by the artifact status contract only when:
 
 - `--dense-delivery-gate-manifest-json` is provided;
 - the dense gate manifest is promotable by
@@ -50,6 +51,12 @@ The manifest writes:
 
 The tool validates the generated manifest through
 `artifact_status_contract.can_promote_to_listen_result()`.
+
+That validation is a source-manifest contract, not final delivery permission.
+Final user-facing listen delivery still requires staged aggregate validation
+plus an accepted `machine_stem_acceptance_gate` manifest. Pipeline runners that
+wrap this manifest must not copy its `delivery_allowed=true` status into a final
+delivery status without those later gates.
 
 ## Run
 

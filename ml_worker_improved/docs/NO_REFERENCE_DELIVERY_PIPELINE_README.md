@@ -1,7 +1,8 @@
 # No-Reference Delivery Pipeline
 
-`tools/run_no_reference_delivery_pipeline.py` is the single-command finalization
-runner for existing no-reference optimizer outputs.
+`tools/run_no_reference_delivery_pipeline.py` is the dense-gated listen-source
+staging runner for existing no-reference optimizer outputs. It does not create
+final accepted delivery by itself.
 
 It runs only control/scoring stages:
 
@@ -9,25 +10,26 @@ It runs only control/scoring stages:
 2. reject candidates whose vocal/minus duration does not match the original mix;
 3. run dense no-reference windowed judging for `vocal`, `minus`, and `both`;
 4. build `no_reference_dense_delivery_gate_manifest.json`;
-5. build the final dense-gated `no_reference_listen_preview_manifest.json`.
+5. build a dense-gated `no_reference_listen_preview_manifest.json` source
+   manifest for later aggregate validation.
 
 With `--enable-phase-alignment-rescue`, if the first dense gate blocks an
 otherwise accepted candidate, the runner may execute the existing bounded
 phase/stereo correction route from
 `tools/run_no_reference_phase_alignment_optimizer.py`. The corrected candidate
 is still preview-only until the runner re-runs dense `vocal`, `minus`, and
-`both` judges and builds a promotable listen-preview manifest from that
+`both` judges and builds a promotable listen-preview source manifest from that
 post-correction evidence. If the optimizer selects no corrected candidate, the
 rescue stops with `no_phase_corrected_delivery_candidate` and does not rejudge
 the original row again.
 
 It does not run separation models, add models, copy/export audio, train,
 fine-tune, add cleanup/debleed/denoise routes, relax thresholds, or mark
-anything `release_ready`.
+anything `release_ready` or final `accepted_for_listen_pack` delivery.
 
 ## Contract
 
-The final listen-preview manifest can be listenable only when:
+The dense-gated listen-preview source manifest can be promotable only when:
 
 - an optimizer row is already accepted;
 - vocal/minus audio duration matches the original mix duration within the
@@ -46,10 +48,23 @@ The final listen-preview manifest can be listenable only when:
   pass;
 - the dense delivery gate manifest is promotable by
   `artifact_status_contract.can_promote_to_listen_result()`;
-- the final listen-preview wrapper points to that dense gate manifest.
+- the listen-preview wrapper points to that dense gate manifest.
 
-If the dense gate fails, the runner still writes blocked manifests and exits
-with code `1`.
+The pipeline manifest itself must remain fail-closed for final delivery:
+
+- `final_status=blocked_from_listen_pack`;
+- `delivery_allowed=false`;
+- `presentation_status=aggregate_machine_gate_required_not_for_listen_pack`;
+- `release_status=not_release_ready`;
+- `requires_staged_aggregate_machine_gate=true`.
+
+Final user-facing listen delivery requires the staged aggregate validation path
+and an accepted `machine_stem_acceptance_gate` manifest. A promotable dense
+listen-preview source is only evidence for that later aggregate path.
+
+The runner exits with code `1` when final delivery is still blocked, including
+the normal case where a dense listen-preview source was produced but aggregate
+validation and the machine gate have not accepted it.
 
 ## Run
 

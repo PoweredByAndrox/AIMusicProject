@@ -85,15 +85,20 @@ def test_batch_runner_reports_accepted_and_blocked_without_audio_export(tmp_path
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["total_inputs"] == 2
-    assert manifest["accepted_for_listen_pack"] == 1
-    assert manifest["blocked_from_listen_pack"] == 1
+    assert manifest["accepted_for_listen_pack"] == 0
+    assert manifest["listen_source_promotable"] == 1
+    assert manifest["blocked_from_listen_pack"] == 2
+    assert manifest["requires_staged_aggregate_machine_gate"] is True
     assert manifest["audio_copied"] is False
     assert manifest["audio_exported"] is False
     assert manifest["safety"]["training_started"] is False
     assert manifest["safety"]["models_changed"] is False
 
     rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert [row["final_status"] for row in rows] == ["accepted_for_listen_pack", "blocked_from_listen_pack"]
+    assert [row["final_status"] for row in rows] == ["blocked_from_listen_pack", "blocked_from_listen_pack"]
+    assert [row["listen_source_promotable"] for row in rows] == [True, False]
+    assert rows[0]["requires_staged_aggregate_machine_gate"] is True
+    assert rows[0]["final_delivery_blockers"] == ["requires_staged_aggregate_validation_and_machine_gate"]
     assert not list(output_root.rglob("*.flac"))
     assert not list(output_root.rglob("*.wav"))
 
@@ -128,8 +133,11 @@ def test_batch_runner_splits_multi_track_optimizer_jsonl(tmp_path: Path) -> None
     manifest = json.loads((output_root / "no_reference_delivery_batch_manifest.json").read_text(encoding="utf-8"))
     rows = [json.loads(line) for line in (output_root / "no_reference_delivery_batch_rows.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     assert manifest["total_inputs"] == 2
-    assert manifest["accepted_for_listen_pack"] == 1
-    assert manifest["blocked_from_listen_pack"] == 1
+    assert manifest["accepted_for_listen_pack"] == 0
+    assert manifest["listen_source_promotable"] == 1
+    assert manifest["blocked_from_listen_pack"] == 2
+    assert manifest["requires_staged_aggregate_machine_gate"] is True
     assert [row["track_id"] for row in rows] == ["track-a", "track-b"]
+    assert [row["listen_source_promotable"] for row in rows] == [True, False]
     assert not list(output_root.rglob("*.flac"))
     assert not list(output_root.rglob("*.wav"))

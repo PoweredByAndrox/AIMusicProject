@@ -274,17 +274,17 @@ def build_dense_delivery_outputs(
     write_json(paths["listen_preview_manifest"], listen_manifest)
     write_listen_preview_summary_md(paths["listen_preview_summary"], build_listen_preview_summary(listen_manifest))
     try:
-        final_promotable = can_promote_to_listen_result(paths["listen_preview_manifest"])
+        listen_source_promotable = can_promote_to_listen_result(paths["listen_preview_manifest"])
     except ArtifactContractError:
-        final_promotable = False
+        listen_source_promotable = False
     log_event(
         "listen_preview_manifest",
         "end",
         accepted_count=listen_manifest.get("accepted_count"),
         delivery_allowed=listen_manifest.get("delivery_allowed"),
-        final_promotable=final_promotable,
+        listen_source_promotable=listen_source_promotable,
     )
-    return gate_manifest, listen_manifest, final_promotable
+    return gate_manifest, listen_manifest, listen_source_promotable
 
 
 def run_phase_alignment_rescue(
@@ -361,6 +361,7 @@ def run_phase_alignment_rescue(
         "selected_count": selected_count,
         "accepted_delivery_candidate_rows": len(phase_candidates),
         "rescue_promotable": rescue_promotable,
+        "rescue_source_promotable": rescue_promotable,
         "optimizer_result_jsonl": str(paths["phase_optimizer_result"]),
         "listen_preview_manifest": str(paths["listen_preview_manifest"]),
         "dense_delivery_gate_manifest": str(paths["dense_gate_manifest"]),
@@ -379,21 +380,31 @@ def build_pipeline_manifest(
     output_dir: Path,
     paths: dict[str, Path],
     accepted_candidate_count: int,
-    final_promotable: bool,
+    listen_source_promotable: bool,
     phase_alignment_rescue: dict[str, Any] | None = None,
     candidate_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     final_payload = json.loads(paths["listen_preview_manifest"].read_text(encoding="utf-8"))
+    source_delivery_allowed = bool(final_payload.get("delivery_allowed"))
+    final_delivery_blockers: list[str] = []
+    if listen_source_promotable or source_delivery_allowed:
+        final_delivery_blockers.append("requires_staged_aggregate_validation_and_machine_gate")
     return {
         "manifest_type": "no_reference_delivery_pipeline",
         "optimizer_result_jsonl": str(optimizer_result_jsonl),
         "output_dir": str(output_dir),
         "accepted_delivery_candidate_rows": int(accepted_candidate_count),
-        "final_status": "accepted_for_listen_pack" if final_promotable else "blocked_from_listen_pack",
-        "delivery_allowed": bool(final_payload.get("delivery_allowed")),
-        "presentation_status": str(final_payload.get("presentation_status") or ""),
-        "release_status": str(final_payload.get("release_status") or ""),
-        "can_mark_release_ready": bool(final_payload.get("can_mark_release_ready")),
+        "final_status": "blocked_from_listen_pack",
+        "delivery_allowed": False,
+        "presentation_status": "aggregate_machine_gate_required_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "can_mark_release_ready": False,
+        "listen_source_promotable": bool(listen_source_promotable),
+        "source_listen_preview_delivery_allowed": source_delivery_allowed,
+        "source_listen_preview_presentation_status": str(final_payload.get("presentation_status") or ""),
+        "source_listen_preview_release_status": str(final_payload.get("release_status") or ""),
+        "requires_staged_aggregate_machine_gate": True,
+        "final_delivery_blockers": final_delivery_blockers,
         "audio_copied": False,
         "audio_exported": False,
         "artifacts": {key: str(value) for key, value in sorted(paths.items())},
@@ -412,6 +423,9 @@ def write_pipeline_summary(path: Path, manifest: dict[str, Any]) -> None:
         f"- presentation_status: {manifest['presentation_status']}",
         f"- release_status: {manifest['release_status']}",
         f"- can_mark_release_ready: {str(manifest['can_mark_release_ready']).lower()}",
+        f"- listen_source_promotable: {str(manifest.get('listen_source_promotable') is True).lower()}",
+        f"- requires_staged_aggregate_machine_gate: {str(manifest.get('requires_staged_aggregate_machine_gate') is True).lower()}",
+        f"- final_delivery_blockers: {', '.join(manifest.get('final_delivery_blockers') or [])}",
         f"- accepted_delivery_candidate_rows: {manifest['accepted_delivery_candidate_rows']}",
         f"- candidate_preflight_rejected_count: {manifest.get('candidate_preflight', {}).get('rejected_count', 0)}",
         f"- candidate_preflight_duration_mismatch_count: {manifest.get('candidate_preflight', {}).get('duration_mismatch_count', 0)}",
@@ -466,13 +480,13 @@ def run_pipeline(
         max_candidates=max_candidates,
     )
 
-    _gate_manifest, _listen_manifest, final_promotable = build_dense_delivery_outputs(
+    _gate_manifest, _listen_manifest, listen_source_promotable = build_dense_delivery_outputs(
         optimizer_result_jsonl=optimizer_result_jsonl,
         paths=paths,
         min_window_count=min_window_count,
     )
     phase_alignment_rescue = {"attempted": False}
-    if not final_promotable and enable_phase_alignment_rescue and candidates:
+    if not listen_source_promotable and enable_phase_alignment_rescue and candidates:
         phase_alignment_rescue = run_phase_alignment_rescue(
             candidates=candidates,
             output_dir=output_dir,
@@ -485,14 +499,14 @@ def run_pipeline(
         )
         if phase_alignment_rescue.get("rescue_promotable") is True:
             promote_rescue_listen_preview(rescue_paths=phase_rescue_paths(output_dir), final_paths=paths)
-            final_promotable = True
+            listen_source_promotable = True
 
     pipeline_manifest = build_pipeline_manifest(
         optimizer_result_jsonl=optimizer_result_jsonl,
         output_dir=output_dir,
         paths=paths,
         accepted_candidate_count=len(candidates),
-        final_promotable=final_promotable,
+        listen_source_promotable=listen_source_promotable,
         phase_alignment_rescue=phase_alignment_rescue,
         candidate_preflight=candidate_preflight,
     )

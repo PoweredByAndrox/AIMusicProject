@@ -72,6 +72,9 @@ def batch_row_from_manifest(index: int, optimizer_result_jsonl: Path, output_dir
         "presentation_status": str(manifest.get("presentation_status") or ""),
         "release_status": str(manifest.get("release_status") or ""),
         "accepted_delivery_candidate_rows": int(manifest.get("accepted_delivery_candidate_rows") or 0),
+        "listen_source_promotable": bool(manifest.get("listen_source_promotable")),
+        "requires_staged_aggregate_machine_gate": bool(manifest.get("requires_staged_aggregate_machine_gate")),
+        "final_delivery_blockers": list(manifest.get("final_delivery_blockers") or []),
         "audio_copied": False,
         "audio_exported": False,
         "training_started": False,
@@ -94,6 +97,9 @@ def execution_failed_row(index: int, optimizer_result_jsonl: Path, output_dir: P
         "presentation_status": "blocked_from_listen_pack",
         "release_status": "listen_preview_only",
         "accepted_delivery_candidate_rows": 0,
+        "listen_source_promotable": False,
+        "requires_staged_aggregate_machine_gate": False,
+        "final_delivery_blockers": ["pipeline_execution_failed"],
         "error_type": type(error).__name__,
         "error": str(error),
         "audio_copied": False,
@@ -109,17 +115,20 @@ def execution_failed_row(index: int, optimizer_result_jsonl: Path, output_dir: P
 
 def build_batch_manifest(output_root: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     status_counts = Counter(str(row.get("final_status") or "unknown") for row in rows)
+    listen_source_promotable = sum(1 for row in rows if row.get("listen_source_promotable") is True)
     return {
         "manifest_type": "no_reference_delivery_batch",
         "output_root": str(output_root),
         "total_inputs": len(rows),
         "accepted_for_listen_pack": int(status_counts.get("accepted_for_listen_pack", 0)),
+        "listen_source_promotable": int(listen_source_promotable),
         "blocked_from_listen_pack": int(status_counts.get("blocked_from_listen_pack", 0)),
         "execution_failed": int(status_counts.get("execution_failed", 0)),
         "status_counts": dict(sorted(status_counts.items())),
         "audio_copied": False,
         "audio_exported": False,
         "can_mark_release_ready": False,
+        "requires_staged_aggregate_machine_gate": listen_source_promotable > 0,
         "safety": dict(SAFETY_FLAGS),
     }
 
@@ -130,11 +139,13 @@ def write_summary(path: Path, manifest: dict[str, Any], rows: list[dict[str, Any
         "",
         f"- total_inputs: {manifest['total_inputs']}",
         f"- accepted_for_listen_pack: {manifest['accepted_for_listen_pack']}",
+        f"- listen_source_promotable: {manifest['listen_source_promotable']}",
         f"- blocked_from_listen_pack: {manifest['blocked_from_listen_pack']}",
         f"- execution_failed: {manifest['execution_failed']}",
         f"- audio_copied: {str(manifest['audio_copied']).lower()}",
         f"- audio_exported: {str(manifest['audio_exported']).lower()}",
         f"- can_mark_release_ready: {str(manifest['can_mark_release_ready']).lower()}",
+        f"- requires_staged_aggregate_machine_gate: {str(manifest['requires_staged_aggregate_machine_gate']).lower()}",
         "",
         "## Rows",
         "",

@@ -14,14 +14,17 @@ Each optimizer output is processed by:
 3. dense `score_mode=minus` judging
 4. dense `score_mode=both` judging
 5. dense delivery gate
-6. final listen-preview manifest wrapper
+6. listen-preview source manifest wrapper
 
 When `--enable-phase-alignment-rescue` is supplied, each per-track pipeline may
 also run the bounded phase/stereo correction route and then re-run dense
-post-correction judging before accepting a listen-preview manifest.
+post-correction judging before creating a promotable listen-preview source
+manifest.
 
 Blocked rows remain blocked. The batch command exits successfully when it
-produces a report; acceptance is represented per row in the manifest.
+produces a report; source-preview readiness is represented per row in the
+manifest. Final accepted delivery still requires staged aggregate validation
+plus an accepted `machine_stem_acceptance_gate` manifest.
 
 ## Run
 

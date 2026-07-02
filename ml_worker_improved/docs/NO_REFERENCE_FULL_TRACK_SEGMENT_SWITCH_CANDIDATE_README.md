@@ -16,8 +16,9 @@ the base candidate.
 - The rendered audio is a candidate artifact only:
   `delivery_allowed=false`, `can_mark_release_ready=false`, and
   `requires_dense_post_reconciliation_judge=true`.
-- The candidate can enter a listen-preview manifest only after the existing
-  dense delivery pipeline accepts it in `vocal`, `minus`, and `both` modes.
+- The candidate can enter a listen-preview source manifest only after the
+  existing dense delivery pipeline accepts it in `vocal`, `minus`, and `both`
+  modes.
 
 ## Run
 
@@ -33,4 +34,6 @@ docker compose run --rm --no-deps ml-worker python tools/render_no_reference_ful
 
 Then run `tools/run_no_reference_delivery_pipeline.py` on
 `full_track_segment_switch_candidate_row.jsonl` output. The delivery pipeline
-must remain the only path that can create an accepted listen-preview manifest.
+can create a dense-gated listen-preview source manifest, but final listen
+delivery still requires staged aggregate validation plus an accepted
+`machine_stem_acceptance_gate` manifest.

@@ -122,7 +122,7 @@ def test_delivery_pipeline_runs_dense_gate_and_listen_preview(tmp_path: Path) ->
             "--min-window-count",
             "5",
         ]
-    ) == 0
+    ) == 1
 
     final_manifest = output_dir / "no_reference_listen_preview_manifest.json"
     pipeline_manifest = output_dir / "no_reference_delivery_pipeline_manifest.json"
@@ -144,7 +144,16 @@ def test_delivery_pipeline_runs_dense_gate_and_listen_preview(tmp_path: Path) ->
     assert can_promote_to_listen_result(final_manifest)
 
     pipeline_payload = json.loads(pipeline_manifest.read_text(encoding="utf-8"))
-    assert pipeline_payload["final_status"] == "accepted_for_listen_pack"
+    assert pipeline_payload["final_status"] == "blocked_from_listen_pack"
+    assert pipeline_payload["delivery_allowed"] is False
+    assert pipeline_payload["presentation_status"] == "aggregate_machine_gate_required_not_for_listen_pack"
+    assert pipeline_payload["release_status"] == "not_release_ready"
+    assert pipeline_payload["can_mark_release_ready"] is False
+    assert pipeline_payload["listen_source_promotable"] is True
+    assert pipeline_payload["source_listen_preview_delivery_allowed"] is True
+    assert pipeline_payload["source_listen_preview_presentation_status"] == "accepted_for_listen_pack"
+    assert pipeline_payload["requires_staged_aggregate_machine_gate"] is True
+    assert pipeline_payload["final_delivery_blockers"] == ["requires_staged_aggregate_validation_and_machine_gate"]
     assert pipeline_payload["safety"]["audio_exported"] is False
     assert pipeline_payload["safety"]["training_started"] is False
     assert pipeline_payload["safety"]["models_changed"] is False
@@ -236,7 +245,7 @@ def test_delivery_pipeline_can_rescue_phase_blocked_candidate_after_dense_rejudg
             "5",
             "--enable-phase-alignment-rescue",
         ]
-    ) == 0
+    ) == 1
 
     phase_optimizer_result = output_dir / "phase_alignment_rescue" / "no_reference_phase_alignment_optimizer_result.jsonl"
     assert phase_optimizer_result.exists()
@@ -263,10 +272,17 @@ def test_delivery_pipeline_can_rescue_phase_blocked_candidate_after_dense_rejudg
 
     pipeline_manifest = output_dir / "no_reference_delivery_pipeline_manifest.json"
     pipeline_payload = json.loads(pipeline_manifest.read_text(encoding="utf-8"))
-    assert pipeline_payload["final_status"] == "accepted_for_listen_pack"
+    assert pipeline_payload["final_status"] == "blocked_from_listen_pack"
+    assert pipeline_payload["delivery_allowed"] is False
+    assert pipeline_payload["presentation_status"] == "aggregate_machine_gate_required_not_for_listen_pack"
+    assert pipeline_payload["listen_source_promotable"] is True
+    assert pipeline_payload["source_listen_preview_delivery_allowed"] is True
+    assert pipeline_payload["requires_staged_aggregate_machine_gate"] is True
+    assert pipeline_payload["final_delivery_blockers"] == ["requires_staged_aggregate_validation_and_machine_gate"]
     assert pipeline_payload["phase_alignment_rescue"]["attempted"] is True
     assert pipeline_payload["phase_alignment_rescue"]["selected_count"] == 1
     assert pipeline_payload["phase_alignment_rescue"]["rescue_promotable"] is True
+    assert pipeline_payload["phase_alignment_rescue"]["rescue_source_promotable"] is True
     assert not list(output_dir.glob("*.wav"))
 
 
