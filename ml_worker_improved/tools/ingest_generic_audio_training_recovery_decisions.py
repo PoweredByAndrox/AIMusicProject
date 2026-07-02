@@ -130,6 +130,9 @@ def remaining_blockers(row: dict[str, Any], decision: dict[str, Any] | None) -> 
         blockers.remove("permission_not_trainable")
     if NEGATIVE_RATING_BLOCKERS.intersection(blockers):
         return blockers
+    if row.get("reference_verified") is not True and row.get("accepted_machine_gate") is not True:
+        if "missing_accepted_machine_gate_provenance" not in blockers:
+            blockers.append("missing_accepted_machine_gate_provenance")
     if not Path(str(row.get("source_audio_path") or "")).exists() and "source_audio_not_found" not in blockers:
         blockers.append("source_audio_not_found")
     if not Path(str(row.get("target_audio_path") or "")).exists() and "target_audio_not_found" not in blockers:
@@ -159,6 +162,10 @@ def approved_example(row: dict[str, Any], decision: dict[str, Any] | None) -> di
         "notes": str((decision or {}).get("notes") or row.get("notes") or ""),
         "trainable": True,
         "training_target": "audio_separator_or_stem_adapter",
+        "source_gate": {
+            "accepted_machine_gate": row.get("accepted_machine_gate") is True,
+            "reference_verified": row.get("reference_verified") is True,
+        },
         "safety": {
             "not_release_artifact": True,
             "requires_eval_before_promotion": True,

@@ -36,6 +36,7 @@ def _row(tmp_path: Path, row_id: str, track_id: str, *, split: str = "train", **
         "trainable": True,
         "human_verified": True,
         "reference_verified": False,
+        "source_gate": {"accepted_machine_gate": True, "reference_verified": False},
         "release_ready": False,
     }
     row.update(overrides)
@@ -87,6 +88,24 @@ def test_dirty_or_unverified_rows_fail_closed(tmp_path: Path) -> None:
     assert "target_audio_not_found" in by_id["missing"]["unsafe_reasons"]
     assert by_id["dirty"]["safe_for_training"] is False
     assert by_id["missing"]["safe_for_training"] is False
+
+
+def test_human_verified_row_without_machine_gate_or_reference_fails_closed(tmp_path: Path) -> None:
+    examples = _write_jsonl(
+        tmp_path / "examples.jsonl",
+        [_row(tmp_path, "ungated", "track-a", source_gate={"accepted_machine_gate": False, "reference_verified": False})],
+    )
+
+    manifest = validate_verified_audio_training_corpus(
+        audio_training_examples_jsonl=examples,
+        output_dir=tmp_path / "out",
+        min_unique_tracks=1,
+    )
+
+    assert manifest["corpus_validation_status"] == "failed"
+    rows = _read_jsonl(Path(manifest["row_report_jsonl"]))
+    assert "missing_accepted_machine_gate_provenance" in rows[0]["unsafe_reasons"]
+    assert rows[0]["safe_for_training"] is False
 
 
 def test_track_split_leakage_blocks_verified_corpus(tmp_path: Path) -> None:

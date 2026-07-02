@@ -142,8 +142,11 @@ def test_recovery_queue_blocks_feedback_without_permission(tmp_path: Path) -> No
     assert manifest["summary"]["missing_permission_status"] == 1
     rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
     assert rows[0]["stem_type"] == "minus"
-    assert rows[0]["blockers"] == ["missing_permission_status"]
-    assert rows[0]["recommended_actions"] == ["attach_trainable_permission_status_or_exclude"]
+    assert rows[0]["blockers"] == ["missing_accepted_machine_gate_provenance", "missing_permission_status"]
+    assert rows[0]["recommended_actions"] == [
+        "attach_trainable_permission_status_or_exclude",
+        "attach_accepted_machine_gate_or_verified_reference",
+    ]
     template_rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_decision_template.jsonl")
     assert template_rows == [
         {
@@ -155,9 +158,12 @@ def test_recovery_queue_blocks_feedback_without_permission(tmp_path: Path) -> No
             "track_id": rows[0]["track_id"],
             "stem_type": "minus",
             "source_domain": "human_feedback_audio_pair",
-            "recovery_priority": "P0_permission_only_verified_feedback_pair",
-            "blockers": ["missing_permission_status"],
-            "recommended_actions": ["attach_trainable_permission_status_or_exclude"],
+            "recovery_priority": "P0_accepted_machine_gate_required",
+            "blockers": ["missing_accepted_machine_gate_provenance", "missing_permission_status"],
+            "recommended_actions": [
+                "attach_trainable_permission_status_or_exclude",
+                "attach_accepted_machine_gate_or_verified_reference",
+            ],
         }
     ]
 
@@ -250,6 +256,9 @@ def test_recovery_queue_recovers_feedback_audio_paths_from_listen_manifest(tmp_p
     manifest = write_json(
         tmp_path / "listen_manifest.json",
         {
+            "schema": "machine_stem_acceptance_gate.v1",
+            "gate_status": "accepted",
+            "final_result_allowed": True,
             "delivery_allowed": True,
             "delivery_status": "accepted",
             "presentation_status": "accepted_for_listen_pack",
@@ -258,6 +267,15 @@ def test_recovery_queue_recovers_feedback_audio_paths_from_listen_manifest(tmp_p
             "track_id": "manifest-track",
             "mix_path": str(source),
             "selected_vocal_path": str(target),
+            "required_machine_gates": [
+                "aggregate_pack_validation_passed",
+                "full_required_stem_coverage",
+                "required_stem_machine_quality_evidence",
+                "source_vocal_minus_master_pair_compatible",
+                "minus_quality_audit_passed_without_warnings",
+            ],
+            "failed_checks": [],
+            "blocker_count": 0,
         },
     )
     feedback = write_jsonl(
@@ -285,8 +303,109 @@ def test_recovery_queue_recovers_feedback_audio_paths_from_listen_manifest(tmp_p
     assert rows[0]["source_audio_path"] == str(source)
     assert rows[0]["target_audio_path"] == str(target)
     assert rows[0]["ready_for_audio_training"] is True
+    assert rows[0]["accepted_machine_gate"] is True
     assert rows[0]["blockers"] == []
     assert rows[0]["source_manifest_path"] == str(manifest)
+
+
+def test_recovery_queue_blocks_listen_manifest_without_machine_gate(tmp_path: Path) -> None:
+    source = tmp_path / "mix.mp3"
+    target = tmp_path / "vocals.flac"
+    source.write_bytes(b"mix")
+    target.write_bytes(b"vocal")
+    manifest = write_json(
+        tmp_path / "plain_listen_manifest.json",
+        {
+            "delivery_allowed": True,
+            "delivery_status": "accepted",
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "stem_type": "vocal",
+            "track_id": "plain-listen-track",
+            "mix_path": str(source),
+            "selected_vocal_path": str(target),
+        },
+    )
+    feedback = write_jsonl(
+        tmp_path / "feedback.jsonl",
+        [
+            {
+                "manifest_path": str(manifest),
+                "target_stem": "vocal",
+                "rating": "ideal",
+                "human_verified": True,
+                "permission_status": "owned",
+            }
+        ],
+    )
+
+    recovery_manifest = build_generic_audio_training_recovery_queue(
+        artifact_root=tmp_path,
+        output_dir=tmp_path / "out",
+        feedback_jsonls=[feedback],
+    )
+
+    assert recovery_manifest["summary"]["ready_for_audio_training"] == 0
+    rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
+    assert rows[0]["ready_for_audio_training"] is False
+    assert "missing_accepted_machine_gate_provenance" in rows[0]["blockers"]
+    assert rows[0]["accepted_machine_gate"] is False
+
+
+def test_recovery_queue_allows_accepted_machine_gate_manifest(tmp_path: Path) -> None:
+    source = tmp_path / "mix.mp3"
+    target = tmp_path / "vocals.flac"
+    source.write_bytes(b"mix")
+    target.write_bytes(b"vocal")
+    manifest = write_json(
+        tmp_path / "machine_stem_acceptance_gate.json",
+        {
+            "schema": "machine_stem_acceptance_gate.v1",
+            "gate_status": "accepted",
+            "final_result_allowed": True,
+            "delivery_allowed": True,
+            "delivery_status": "accepted",
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "stem_type": "vocal",
+            "track_id": "machine-gated-track",
+            "mix_path": str(source),
+            "selected_vocal_path": str(target),
+            "required_machine_gates": [
+                "aggregate_pack_validation_passed",
+                "full_required_stem_coverage",
+                "required_stem_machine_quality_evidence",
+                "source_vocal_minus_master_pair_compatible",
+                "minus_quality_audit_passed_without_warnings",
+            ],
+            "failed_checks": [],
+            "blocker_count": 0,
+        },
+    )
+    feedback = write_jsonl(
+        tmp_path / "feedback.jsonl",
+        [
+            {
+                "manifest_path": str(manifest),
+                "target_stem": "vocal",
+                "rating": "ideal",
+                "human_verified": True,
+                "permission_status": "owned",
+            }
+        ],
+    )
+
+    recovery_manifest = build_generic_audio_training_recovery_queue(
+        artifact_root=tmp_path,
+        output_dir=tmp_path / "out",
+        feedback_jsonls=[feedback],
+    )
+
+    assert recovery_manifest["summary"]["ready_for_audio_training"] == 1
+    rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
+    assert rows[0]["ready_for_audio_training"] is True
+    assert rows[0]["accepted_machine_gate"] is True
+    assert rows[0]["blockers"] == []
 
 
 def test_recovery_queue_recovers_feedback_source_from_candidate_map_manifest(tmp_path: Path) -> None:
@@ -333,15 +452,15 @@ def test_recovery_queue_recovers_feedback_source_from_candidate_map_manifest(tmp
         feedback_jsonls=[feedback],
     )
 
-    assert recovery_manifest["summary"]["ready_for_audio_training"] == 1
+    assert recovery_manifest["summary"]["ready_for_audio_training"] == 0
     rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
     assert rows[0]["source_audio_path"] == str(source)
     assert rows[0]["target_audio_path"] == str(listen_target)
     assert rows[0]["stem_type"] == "vocal"
     assert rows[0]["source_recovery_method"] == "candidate_map_stem_manifest"
     assert rows[0]["source_recovery_mapped_target_path"] == str(candidate_vocal)
-    assert rows[0]["ready_for_audio_training"] is True
-    assert rows[0]["blockers"] == []
+    assert rows[0]["ready_for_audio_training"] is False
+    assert rows[0]["blockers"] == ["missing_accepted_machine_gate_provenance"]
 
 
 def test_recovery_queue_recovers_candidate_map_source_from_trainer_manifest_shape(tmp_path: Path) -> None:
@@ -384,11 +503,13 @@ def test_recovery_queue_recovers_candidate_map_source_from_trainer_manifest_shap
         feedback_jsonls=[feedback],
     )
 
-    assert manifest["summary"]["ready_for_audio_training"] == 1
+    assert manifest["summary"]["ready_for_audio_training"] == 0
     rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
     assert rows[0]["source_audio_path"] == str(source)
     assert rows[0]["stem_type"] == "vocal"
     assert rows[0]["source_recovery_method"] == "candidate_map_stem_manifest"
+    assert rows[0]["ready_for_audio_training"] is False
+    assert rows[0]["blockers"] == ["missing_accepted_machine_gate_provenance"]
 
 
 def test_recovery_queue_treats_requires_review_feedback_pair_as_permission_only(tmp_path: Path) -> None:
@@ -417,8 +538,8 @@ def test_recovery_queue_treats_requires_review_feedback_pair_as_permission_only(
     )
 
     rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
-    assert rows[0]["blockers"] == ["permission_not_trainable"]
-    assert rows[0]["recovery_priority"] == "P0_permission_only_verified_feedback_pair"
+    assert rows[0]["blockers"] == ["missing_accepted_machine_gate_provenance", "permission_not_trainable"]
+    assert rows[0]["recovery_priority"] == "P0_accepted_machine_gate_required"
     template_rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_decision_template.jsonl")
     assert template_rows[0]["recovery_row_id"] == rows[0]["id"]
 
@@ -465,7 +586,7 @@ def test_decision_template_is_sorted_by_recovery_priority(tmp_path: Path) -> Non
 
     template_rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_decision_template.jsonl")
     assert [row["recovery_priority"] for row in template_rows] == [
-        "P0_permission_only_verified_feedback_pair",
+        "P0_accepted_machine_gate_required",
         "P1_permission_only_verified_music_gt",
     ]
 
@@ -496,7 +617,7 @@ def test_recovery_queue_blocks_missing_target_audio(tmp_path: Path) -> None:
     assert manifest["summary"]["target_audio_not_found"] == 1
     rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_queue.jsonl")
     assert rows[0]["ready_for_audio_training"] is False
-    assert rows[0]["blockers"] == ["target_audio_not_found"]
+    assert rows[0]["blockers"] == ["missing_accepted_machine_gate_provenance", "target_audio_not_found"]
 
 
 def test_recovery_queue_can_write_short_output_names(tmp_path: Path) -> None:

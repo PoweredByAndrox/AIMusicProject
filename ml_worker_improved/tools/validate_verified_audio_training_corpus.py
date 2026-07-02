@@ -94,6 +94,7 @@ def row_unsafe_reasons(row: dict[str, Any]) -> list[str]:
     permission_status = str(row.get("permission_status") or "").strip().lower()
     source_audio_path = str(row.get("source_audio_path") or "")
     target_audio_path = str(row.get("target_audio_path") or "")
+    source_gate = row.get("source_gate") if isinstance(row.get("source_gate"), dict) else {}
     if row.get("schema") != "generic_finetuning_audio_training_example.v1":
         reasons.append("unexpected_schema")
     if row.get("trainable") is not True:
@@ -102,6 +103,8 @@ def row_unsafe_reasons(row: dict[str, Any]) -> list[str]:
         reasons.append("permission_not_trainable")
     if row.get("human_verified") is not True and row.get("reference_verified") is not True:
         reasons.append("not_human_or_reference_verified")
+    if row.get("reference_verified") is not True and source_gate.get("accepted_machine_gate") is not True:
+        reasons.append("missing_accepted_machine_gate_provenance")
     if row.get("release_ready") is True:
         reasons.append("input_row_release_ready_true")
     if row.get("delivery_allowed") is True:

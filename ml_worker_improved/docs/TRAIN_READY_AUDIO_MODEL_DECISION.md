@@ -14,6 +14,8 @@ Required per row:
 - `trainable=true`
 - `permission_status` in `owned`, `licensed`, `cleared`, `project_owned`
 - `human_verified=true` or `reference_verified=true`
+- human-only rows must carry `source_gate.accepted_machine_gate=true`; reference
+  rows remain eligible through `reference_verified=true`
 - existing `source_audio_path`
 - existing `target_audio_path`
 - no `release_ready=true`

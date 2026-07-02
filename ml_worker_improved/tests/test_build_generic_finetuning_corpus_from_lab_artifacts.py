@@ -46,6 +46,36 @@ def accepted_vocal_manifest(tmp_path: Path) -> Path:
     )
 
 
+def accepted_machine_gate_vocal_manifest(tmp_path: Path) -> Path:
+    audio = tmp_path / "audio" / "machine_gate_vocal.flac"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"machine-gate-vocal")
+    return write_json(
+        tmp_path / "lab" / "accepted_gate" / "machine_stem_acceptance_gate.json",
+        {
+            "schema": "machine_stem_acceptance_gate.v1",
+            "track_id": "machine-gated-track",
+            "stem_type": "vocal",
+            "gate_status": "accepted",
+            "final_result_allowed": True,
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "selected_vocal_path": str(audio),
+            "required_machine_gates": [
+                "aggregate_pack_validation_passed",
+                "full_required_stem_coverage",
+                "required_stem_machine_quality_evidence",
+                "source_vocal_minus_master_pair_compatible",
+                "minus_quality_audit_passed_without_warnings",
+            ],
+            "failed_checks": [],
+            "blocker_count": 0,
+        },
+    )
+
+
 def blocked_minus_manifest(tmp_path: Path) -> Path:
     audio = tmp_path / "audio" / "bad_minus.flac"
     audio.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +172,7 @@ def verified_ground_truth_manifest(tmp_path: Path) -> Path:
     )
 
 
-def test_builds_curated_corpus_with_human_verified_trainable_audio(tmp_path: Path) -> None:
+def test_human_positive_listen_preview_without_machine_gate_is_not_audio_trainable(tmp_path: Path) -> None:
     vocal_manifest = accepted_vocal_manifest(tmp_path)
     blocked_minus_manifest(tmp_path)
     feedback = write_jsonl(
@@ -170,17 +200,51 @@ def test_builds_curated_corpus_with_human_verified_trainable_audio(tmp_path: Pat
 
     assert manifest["summary"]["accepted_like"] == 1
     assert manifest["summary"]["blocked_like"] == 1
-    assert manifest["summary"]["audio_training_examples"] == 1
+    assert manifest["summary"]["audio_training_examples"] == 0
     assert manifest["summary"]["hard_eval_cases"] == 1
-    assert manifest["summary"]["excluded_examples"] == 0
+    assert manifest["summary"]["excluded_examples"] == 1
     assert manifest["training_started"] is False
+    excluded = read_jsonl(tmp_path / "out" / "excluded_examples.jsonl")
+    assert excluded[0]["exclude_reason"] == "accepted_but_missing_accepted_machine_gate_provenance"
+    hard_eval = read_jsonl(tmp_path / "out" / "hard_eval_cases.jsonl")
+    assert hard_eval[0]["dominant_failure_reason"] == "severe_vocal_bleed_in_minus"
+
+
+def test_builds_curated_corpus_with_machine_gate_human_verified_trainable_audio(tmp_path: Path) -> None:
+    vocal_manifest = accepted_machine_gate_vocal_manifest(tmp_path)
+    feedback = write_jsonl(
+        tmp_path / "feedback.jsonl",
+        [
+            {
+                "track_id": "machine-gated-track",
+                "stem_type": "vocal",
+                "manifest_path": str(vocal_manifest),
+                "rating": "ideal",
+                "human_verified": True,
+                "permission_status": "owned",
+                "split": "train",
+                "notes": "User confirmed this post-gate vocal by listening.",
+            }
+        ],
+    )
+
+    manifest = build_corpus(
+        artifact_root=tmp_path / "lab",
+        output_dir=tmp_path / "out",
+        human_feedback_jsonls=[feedback],
+        permission_default="requires_review",
+    )
+
+    assert manifest["summary"]["accepted_like"] == 1
+    assert manifest["summary"]["accepted_machine_gate_like"] == 1
+    assert manifest["summary"]["audio_training_examples"] == 1
+    assert manifest["summary"]["excluded_examples"] == 0
     audio_rows = read_jsonl(tmp_path / "out" / "audio_training_examples.jsonl")
-    assert audio_rows[0]["track_id"] == "nothing-can-wait"
+    assert audio_rows[0]["track_id"] == "machine-gated-track"
     assert audio_rows[0]["stem_type"] == "vocal"
     assert audio_rows[0]["trainable"] is True
     assert audio_rows[0]["permission_status"] == "owned"
-    hard_eval = read_jsonl(tmp_path / "out" / "hard_eval_cases.jsonl")
-    assert hard_eval[0]["dominant_failure_reason"] == "severe_vocal_bleed_in_minus"
+    assert audio_rows[0]["source_gate"]["accepted_machine_gate"] is True
 
 
 def test_builds_audio_examples_from_verified_ground_truth_bundle(tmp_path: Path) -> None:
@@ -382,7 +446,7 @@ def test_accepted_without_human_or_reference_is_not_audio_trainable(tmp_path: Pa
 
 
 def test_auto_discovers_human_feedback_jsonl_from_artifact_root(tmp_path: Path) -> None:
-    vocal_manifest = accepted_vocal_manifest(tmp_path)
+    vocal_manifest = accepted_machine_gate_vocal_manifest(tmp_path)
     manifest_payload = read_json(vocal_manifest)
     write_jsonl(
         tmp_path / "lab" / "golden_audio" / "adaptive_vocal_feedback.jsonl",
@@ -465,12 +529,12 @@ def test_fingerprint_is_stable_for_same_inputs(tmp_path: Path) -> None:
 
 
 def test_cli_writes_manifest_and_jsonl_outputs(tmp_path: Path) -> None:
-    vocal_manifest = accepted_vocal_manifest(tmp_path)
+    vocal_manifest = accepted_machine_gate_vocal_manifest(tmp_path)
     feedback = write_jsonl(
         tmp_path / "feedback.jsonl",
         [
             {
-                "track_id": "nothing-can-wait",
+                "track_id": "machine-gated-track",
                 "stem_type": "vocal",
                 "manifest_path": str(vocal_manifest),
                 "rating": "ideal",

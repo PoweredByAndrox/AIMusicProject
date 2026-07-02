@@ -15,6 +15,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.docker_runtime import require_docker_runtime  # noqa: E402
+from tools.build_generic_finetuning_corpus_from_lab_artifacts import accepted_machine_gate_contract  # noqa: E402
 
 QUEUE_NAME = "generic_audio_training_recovery_queue.jsonl"
 DECISION_TEMPLATE_NAME = "generic_audio_training_recovery_decision_template.jsonl"
@@ -322,12 +323,15 @@ def blockers_for_candidate(
     target_audio_path: str,
     human_verified: bool,
     reference_verified: bool,
+    accepted_machine_gate: bool,
     rating: str,
     permission_status: str,
 ) -> list[str]:
     blockers: list[str] = []
     if not human_verified and not reference_verified:
         blockers.append("missing_human_or_reference_verification")
+    if not reference_verified and not accepted_machine_gate:
+        blockers.append("missing_accepted_machine_gate_provenance")
     if rating in NEGATIVE_RATINGS:
         blockers.append("negative_human_rating")
     if rating and rating not in POSITIVE_RATINGS and not reference_verified:
@@ -357,6 +361,8 @@ def recommended_actions(blockers: Sequence[str]) -> list[str]:
         actions.append("attach_trainable_permission_status_or_exclude")
     if "missing_human_or_reference_verification" in blockers or "rating_not_positive" in blockers:
         actions.append("attach_listener_or_reference_verification")
+    if "missing_accepted_machine_gate_provenance" in blockers:
+        actions.append("attach_accepted_machine_gate_or_verified_reference")
     if "missing_source_audio_path" in blockers or "source_audio_not_found" in blockers:
         actions.append("recover_docker_visible_source_audio_path")
     if "missing_target_audio_path" in blockers or "target_audio_not_found" in blockers:
@@ -389,6 +395,8 @@ def recovery_priority(row: dict[str, Any]) -> str:
     permission_only = blockers in ({"missing_permission_status"}, {"permission_not_trainable"})
     if domain == "synthetic_fixture":
         return "P4_synthetic_fixture_not_production_training"
+    if "missing_accepted_machine_gate_provenance" in blockers:
+        return "P0_accepted_machine_gate_required"
     if domain == "human_feedback_audio_pair" and permission_only:
         return "P0_permission_only_verified_feedback_pair"
     if domain == "user_supplied_flstudio_music" and permission_only:
@@ -436,13 +444,14 @@ def feedback_recovery_row(path: Path, index: int, row: dict[str, Any]) -> dict[s
     target_audio_path = docker_visible_path(first_text(row, TARGET_KEYS))
     source_manifest_path = manifest_path_from_feedback(path, row)
     source_manifest_payload: dict[str, Any] = {}
-    if source_manifest_path and (not source_audio_path or not target_audio_path):
+    if source_manifest_path:
         manifest_source_path, manifest_target_path, source_manifest_payload = audio_paths_from_listen_manifest(
             source_manifest_path,
             stem_type,
         )
         source_audio_path = source_audio_path or manifest_source_path
         target_audio_path = target_audio_path or manifest_target_path
+    accepted_machine_gate = accepted_machine_gate_contract(source_manifest_payload)
     source_recovery: dict[str, str] = {}
     if target_audio_path and not source_audio_path:
         source_recovery = source_recovery_from_candidate_map(target_audio_path, row.get("source_audio_sha256"))
@@ -455,6 +464,7 @@ def feedback_recovery_row(path: Path, index: int, row: dict[str, Any]) -> dict[s
         target_audio_path=target_audio_path,
         human_verified=human_verified,
         reference_verified=False,
+        accepted_machine_gate=accepted_machine_gate,
         rating=rating,
         permission_status=permission_status,
     )
@@ -474,6 +484,7 @@ def feedback_recovery_row(path: Path, index: int, row: dict[str, Any]) -> dict[s
         "rating": rating,
         "human_verified": human_verified,
         "reference_verified": False,
+        "accepted_machine_gate": accepted_machine_gate,
         "permission_status": permission_status,
         "blockers": blockers,
         "ready_for_audio_training": not blockers,
@@ -519,6 +530,7 @@ def ground_truth_recovery_rows(path: Path, payload: dict[str, Any]) -> list[dict
             target_audio_path=target_audio_path,
             human_verified=False,
             reference_verified=reference_verified,
+            accepted_machine_gate=False,
             rating="reference_verified" if reference_verified else "",
             permission_status=permission_status,
         )
@@ -540,6 +552,7 @@ def ground_truth_recovery_rows(path: Path, payload: dict[str, Any]) -> list[dict
             "rating": "reference_verified" if reference_verified else "",
             "human_verified": False,
             "reference_verified": reference_verified,
+            "accepted_machine_gate": False,
             "permission_status": permission_status,
             "blockers": blockers,
             "ready_for_audio_training": not blockers,
@@ -768,6 +781,7 @@ def build_generic_audio_training_recovery_queue(
         "ground_truth_manifests_scanned": len(ground_truth_paths),
         "recovery_rows": len(rows),
         "ready_for_audio_training": sum(1 for row in rows if row["ready_for_audio_training"]),
+        "accepted_machine_gate_rows": sum(1 for row in rows if row.get("accepted_machine_gate") is True),
         "blocked_rows": sum(1 for row in rows if not row["ready_for_audio_training"]),
         "decision_template_rows": len(decision_template_rows),
         "missing_permission_status": sum(1 for row in rows if "missing_permission_status" in row["blockers"]),

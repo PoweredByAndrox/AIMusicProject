@@ -21,9 +21,16 @@ The builder is metadata-only. It does not run model inference, does not copy
 audio, does not start training, and does not mark release-ready artifacts.
 
 Accepted listen-preview artifacts are not automatically audio-training
-targets. Audio examples become trainable only when they are human-verified or
-reference-verified and have a cleared `permission_status` such as `owned` or
-`licensed`.
+targets. Human-positive feedback is sufficient only for controller metadata
+training unless the source manifest is an accepted
+`machine_stem_acceptance_gate.v1` with the aggregate validation, required-stem
+coverage, machine-quality, pair-compatibility, and minus-audit gates present.
+Reference-verified manifests and verified `ground_truth_manifest.json` bundles
+remain eligible through the reference path. Audio examples become trainable only
+when that post-gate/reference provenance exists and the row has a cleared
+`permission_status` such as `owned` or `licensed`; otherwise the row is written
+to `excluded_examples.jsonl` as
+`accepted_but_missing_accepted_machine_gate_provenance`.
 
 Machine failure labels win over accepted-looking status fields. Nested
 `dominant_failure_reason`, `failure_reason`, `reasons`, `failure_reasons`,
@@ -516,11 +523,14 @@ rows with explicit blockers:
 
 - missing or non-trainable permission status;
 - missing human/reference verification;
+- missing accepted machine-gate provenance for non-reference rows;
 - missing Docker-visible source or target audio path;
 - negative or non-positive listener rating.
 
 The queue is metadata-only. Rows with no blockers can be imported into the next
-corpus version; blocked rows tell exactly what must be fixed before training.
+corpus version only when they are either reference-verified or carry accepted
+`machine_stem_acceptance_gate.v1` provenance; blocked rows tell exactly what
+must be fixed before training.
 It also writes `generic_audio_training_recovery_decision_template.jsonl`, a
 ready-to-fill review sheet for blocked rows.
 Rows are tagged with `source_domain` and `recovery_priority`; synthetic fixture
@@ -531,10 +541,12 @@ If a human-feedback row points at an accepted listen-preview manifest via
 `manifest_path` but does not repeat the source/target audio paths, the recovery
 queue resolves the manifest and recovers Docker-visible `mix_path` plus the
 stem-specific selected target path (`selected_vocal_path`, `selected_minus_path`,
-etc.). This applies only to manifests with `delivery_status=accepted`,
-`delivery_allowed=true`, and `presentation_status=accepted_for_listen_pack`.
-It does not make the row trainable by itself; permission and verification
-blockers still apply.
+etc.). Path recovery applies only to manifests with `delivery_status=accepted`,
+`delivery_allowed=true`, and `presentation_status=accepted_for_listen_pack`,
+but training readiness still requires accepted `machine_stem_acceptance_gate.v1`
+provenance. Plain listen-preview/source-ready manifests are kept as
+non-training recovery evidence with
+`missing_accepted_machine_gate_provenance`.
 
 If a human-feedback row points at a listen-pack artifact and the listen-pack
 directory contains `candidate_map.json`, the recovery queue can recover the
@@ -546,16 +558,20 @@ hardcode track names, timestamps, or candidate labels.
 `tools/ingest_generic_audio_training_recovery_decisions.py` applies explicit
 review decisions to that queue. A blocked row becomes an audio-training example
 only when the decision says `approve_for_training`, provides a trainable
-`permission_status`, and no source/target/verification blocker remains.
-Rows that are already ready can be imported without a decisions file.
+`permission_status`, and no source/target/verification/provenance blocker
+remains. The ingest layer repeats the accepted-machine-gate/reference check so
+older or manually created `ready_for_audio_training=true` rows cannot bypass the
+queue builder.
 
 `tools/build_generic_audio_training_approval_pack.py` is the safe review
 handoff for expanding the training set. It selects only P0/P1 permission-only
 recovery rows with existing source/target audio and human/reference
-verification, writes `generic_audio_training_approval_candidates.jsonl`, and
+verification after accepted machine-gate/reference provenance has already been
+cleared, writes `generic_audio_training_approval_candidates.jsonl`, and
 also writes `generic_audio_training_draft_decisions.jsonl` with
 `decision=needs_more_evidence`. It never auto-approves permission and excludes
-synthetic fixture rows.
+synthetic fixture rows. Rows with `missing_accepted_machine_gate_provenance` are
+not permission-only candidates and cannot enter the approval pack.
 Both `missing_permission_status` and `permission_not_trainable` are treated as
 permission-only review blockers when they are the only blocker. This allows
 rows with `permission_status=requires_review` to enter the approval pack after

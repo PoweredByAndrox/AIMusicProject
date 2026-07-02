@@ -42,14 +42,21 @@ def recovery_row(tmp_path: Path, row_id: str, *, blockers: list[str] | None = No
         "rating": "good",
         "human_verified": True,
         "reference_verified": False,
+        "accepted_machine_gate": False,
         "permission_status": "",
         "blockers": blockers if blockers is not None else ["missing_permission_status"],
         "ready_for_audio_training": not blockers,
     }
 
 
+def gated_recovery_row(tmp_path: Path, row_id: str, *, blockers: list[str] | None = None) -> dict:
+    row = recovery_row(tmp_path, row_id, blockers=blockers)
+    row["accepted_machine_gate"] = True
+    return row
+
+
 def test_approved_permission_decision_creates_audio_training_example(tmp_path: Path) -> None:
-    queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a")])
+    queue = write_jsonl(tmp_path / "queue.jsonl", [gated_recovery_row(tmp_path, "row-a")])
     decisions = write_jsonl(
         tmp_path / "decisions.jsonl",
         [{"recovery_row_id": "row-a", "decision": "approve_for_training", "permission_status": "project_owned"}],
@@ -66,11 +73,30 @@ def test_approved_permission_decision_creates_audio_training_example(tmp_path: P
     assert rows[0]["permission_status"] == "project_owned"
     assert rows[0]["trainable"] is True
     assert rows[0]["human_verified"] is True
+    assert rows[0]["source_gate"]["accepted_machine_gate"] is True
     assert rows[0]["training_target"] == "audio_separator_or_stem_adapter"
 
 
+def test_approval_without_machine_gate_or_reference_is_rejected(tmp_path: Path) -> None:
+    queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a", blockers=[])])
+    decisions = write_jsonl(
+        tmp_path / "decisions.jsonl",
+        [{"recovery_row_id": "row-a", "decision": "approve_for_training", "permission_status": "project_owned"}],
+    )
+
+    manifest = ingest_generic_audio_training_recovery_decisions(
+        recovery_queue_jsonl=queue,
+        decisions_jsonl=decisions,
+        output_dir=tmp_path / "out",
+    )
+
+    assert manifest["summary"]["approved_audio_training_examples"] == 0
+    rejected = read_jsonl(tmp_path / "out" / "rejected_audio_training_recovery_rows.jsonl")
+    assert rejected[0]["remaining_blockers"] == ["missing_accepted_machine_gate_provenance"]
+
+
 def test_approval_with_remaining_blocker_is_rejected(tmp_path: Path) -> None:
-    row = recovery_row(tmp_path, "row-b", blockers=["target_audio_not_found"])
+    row = gated_recovery_row(tmp_path, "row-b", blockers=["target_audio_not_found"])
     Path(row["target_audio_path"]).unlink()
     queue = write_jsonl(tmp_path / "queue.jsonl", [row])
     decisions = write_jsonl(
@@ -117,7 +143,7 @@ def test_invalid_decision_is_rejected(tmp_path: Path) -> None:
 
 
 def test_recovery_decision_ingest_can_write_short_output_names(tmp_path: Path) -> None:
-    queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a")])
+    queue = write_jsonl(tmp_path / "queue.jsonl", [gated_recovery_row(tmp_path, "row-a")])
     decisions = write_jsonl(
         tmp_path / "decisions.jsonl",
         [{"recovery_row_id": "row-a", "decision": "approve_for_training", "permission_status": "project_owned"}],
@@ -141,7 +167,7 @@ def test_recovery_decision_ingest_can_write_short_output_names(tmp_path: Path) -
 
 
 def test_cli_writes_decision_manifest(tmp_path: Path) -> None:
-    queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a", blockers=[])])
+    queue = write_jsonl(tmp_path / "queue.jsonl", [gated_recovery_row(tmp_path, "row-a", blockers=[])])
 
     assert main(["--recovery-queue-jsonl", str(queue), "--output-dir", str(tmp_path / "out")]) == 0
 
@@ -152,7 +178,7 @@ def test_cli_writes_decision_manifest(tmp_path: Path) -> None:
 
 
 def test_cli_can_write_short_decision_ingest_outputs(tmp_path: Path) -> None:
-    queue = write_jsonl(tmp_path / "queue.jsonl", [recovery_row(tmp_path, "row-a", blockers=[])])
+    queue = write_jsonl(tmp_path / "queue.jsonl", [gated_recovery_row(tmp_path, "row-a", blockers=[])])
 
     assert (
         main(

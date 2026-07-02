@@ -25,6 +25,15 @@ EXCLUDED_NAME = "excluded_examples.jsonl"
 PROGRESS_NAME = "generic_finetuning_corpus_progress.jsonl"
 
 ACCEPTED_PRESENTATION_STATUSES = {"accepted_for_listen_pack"}
+MACHINE_STEM_ACCEPTANCE_GATE_SCHEMA = "machine_stem_acceptance_gate.v1"
+MACHINE_STEM_ACCEPTANCE_GATE_TYPES = {"machine_stem_acceptance_gate"}
+TRAINING_REQUIRED_MACHINE_GATES = {
+    "aggregate_pack_validation_passed",
+    "full_required_stem_coverage",
+    "required_stem_machine_quality_evidence",
+    "source_vocal_minus_master_pair_compatible",
+    "minus_quality_audit_passed_without_warnings",
+}
 POSITIVE_RATINGS = {"ideal", "good", "accepted", "accept", "pass", "approved", "better", "prefer", "preferred"}
 NEGATIVE_RATINGS = {"bad", "reject", "rejected", "fail", "failed", "poor", "worse"}
 TRAINABLE_PERMISSION_STATUSES = {"owned", "licensed", "cleared", "project_owned"}
@@ -271,6 +280,31 @@ def accepted_contract(payload: dict[str, Any]) -> bool:
     return payload.get("delivery_allowed") is True and presentation_status(payload) in ACCEPTED_PRESENTATION_STATUSES
 
 
+def accepted_machine_gate_contract(payload: dict[str, Any]) -> bool:
+    schema = str(payload.get("schema") or "")
+    manifest_type = str(payload.get("manifest_type") or "")
+    if schema != MACHINE_STEM_ACCEPTANCE_GATE_SCHEMA and manifest_type not in MACHINE_STEM_ACCEPTANCE_GATE_TYPES:
+        return False
+    if str(payload.get("gate_status") or "").lower() != "accepted":
+        return False
+    if payload.get("final_result_allowed") is not True:
+        return False
+    if delivery_status(payload).lower() != "accepted":
+        return False
+    if payload.get("delivery_allowed") is not True:
+        return False
+    if presentation_status(payload) not in ACCEPTED_PRESENTATION_STATUSES:
+        return False
+    if payload.get("blocker_count") != 0:
+        return False
+    if payload.get("failed_checks") != []:
+        return False
+    required_gates = payload.get("required_machine_gates")
+    if not isinstance(required_gates, list):
+        return False
+    return TRAINING_REQUIRED_MACHINE_GATES.issubset({str(gate) for gate in required_gates})
+
+
 def label_blocked_like(labels: Sequence[str]) -> bool:
     text = " ".join(str(label or "") for label in labels).lower()
     return any(marker in text for marker in BLOCKING_FAILURE_LABEL_MARKERS)
@@ -480,6 +514,7 @@ def inventory_row(path: Path, artifact_root: Path, payload: dict[str, Any]) -> d
         "presentation_status": presentation_status(payload),
         "release_status": release_status(payload),
         "accepted_contract": accepted_contract(payload),
+        "accepted_machine_gate_contract": accepted_machine_gate_contract(payload),
         "blocked_like": blocked_like(payload, failure_labels),
         "reference_verified": reference_verified(payload),
         "source_audio_path": source_audio_path(payload),
@@ -517,6 +552,7 @@ def controller_example(row: dict[str, Any], feedback: HumanFeedback | None) -> d
             "human_verified": bool(feedback and feedback.human_verified),
             "human_rating": feedback.rating if feedback else "",
             "reference_verified": row["reference_verified"],
+            "accepted_machine_gate": row["accepted_machine_gate_contract"],
         },
         "trainable": accepted or row["blocked_like"],
         "training_target": "llm_controller",
@@ -559,6 +595,10 @@ def audio_training_example(
         "notes": feedback.notes,
         "trainable": permission_status in TRAINABLE_PERMISSION_STATUSES,
         "training_target": "audio_separator_or_stem_adapter",
+        "source_gate": {
+            "accepted_machine_gate": row["accepted_machine_gate_contract"],
+            "reference_verified": row["reference_verified"],
+        },
         "safety": {
             "not_release_artifact": True,
             "requires_eval_before_promotion": True,
@@ -736,11 +776,16 @@ def build_corpus(
         if row["accepted_contract"]:
             positive_feedback = feedback and feedback.human_verified and feedback.rating in POSITIVE_RATINGS
             if positive_feedback and row["selected_audio_exists"]:
-                candidate = audio_training_example(row, feedback, permission_default=permission_default)
-                if candidate["trainable"]:
-                    audio_rows.append(candidate)
+                if not (row["accepted_machine_gate_contract"] or row["reference_verified"]):
+                    excluded_rows.append(
+                        excluded_example(row, "accepted_but_missing_accepted_machine_gate_provenance", feedback)
+                    )
                 else:
-                    excluded_rows.append(excluded_example(row, "permission_not_trainable", feedback))
+                    candidate = audio_training_example(row, feedback, permission_default=permission_default)
+                    if candidate["trainable"]:
+                        audio_rows.append(candidate)
+                    else:
+                        excluded_rows.append(excluded_example(row, "permission_not_trainable", feedback))
             elif row["reference_verified"] and row["selected_audio_exists"]:
                 synthetic_feedback = HumanFeedback(
                     track_id=row["track_id"],
@@ -810,6 +855,7 @@ def build_corpus(
         "json_files_scanned": len(json_paths),
         "inventory_rows": len(inventory),
         "accepted_like": sum(1 for row in inventory if row["accepted_contract"]),
+        "accepted_machine_gate_like": sum(1 for row in inventory if row["accepted_machine_gate_contract"]),
         "blocked_like": sum(1 for row in inventory if row["blocked_like"]),
         "controller_decision_examples": len(controller_rows),
         "audio_training_examples": len(audio_rows),
