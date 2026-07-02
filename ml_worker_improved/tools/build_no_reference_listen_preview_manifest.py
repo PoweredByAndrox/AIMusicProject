@@ -160,7 +160,44 @@ def dense_gate_rows_evidence_failures(rows: Sequence[Any], *, min_window_count: 
     return stable_unique(failures)
 
 
+def optimizer_row_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(row.get("track_id") or ""),
+        str(row.get("candidate_id") or row.get("selected_candidate_id") or row.get("input_candidate_id") or ""),
+    )
+
+
+def optimizer_row_semantic_failures(row: dict[str, Any]) -> list[str]:
+    labels = blocking_labels_from_values(
+        row.get("reasons"),
+        row.get("decision"),
+        row.get("pair_score_mode_reasons"),
+        row.get("failure_labels"),
+        row.get("issue_labels"),
+        row.get("dominant_failure_reason"),
+    )
+    return [f"optimizer_blocking_semantic_label:{label}" for label in labels]
+
+
+def optimizer_rows_evidence_failures(accepted_rows: Sequence[Any], optimizer_rows: Sequence[dict[str, Any]]) -> list[str]:
+    optimizer_by_key = {optimizer_row_key(row): row for row in optimizer_rows}
+    failures: list[str] = []
+    for index, row in enumerate(accepted_rows):
+        if not isinstance(row, dict):
+            failures.append(f"row:{index}:accepted_row_must_be_object")
+            continue
+        optimizer_row = optimizer_by_key.get(optimizer_row_key(row))
+        if optimizer_row is None:
+            failures.append(f"row:{index}:optimizer_source_row_missing")
+            continue
+        for failure in optimizer_row_semantic_failures(optimizer_row):
+            failures.append(f"row:{index}:{failure}")
+    return stable_unique(failures)
+
+
 def is_accepted_optimizer_row(row: dict[str, Any]) -> bool:
+    if optimizer_row_semantic_failures(row):
+        return False
     if str(row.get("final_decision") or "") not in ACCEPTED_FINAL_DECISIONS:
         return False
     if str(row.get("final_decision") or "") == "pair_reconciliation_candidate" and row.get("requires_dense_post_reconciliation_judge") is not True:
@@ -209,15 +246,21 @@ def listen_row_from_optimizer(row: dict[str, Any], source_manifest: Path) -> dic
 
 
 def skipped_optimizer_rows(rows: list[dict[str, Any]], *, skip_reason: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "track_id": str(row.get("track_id") or ""),
-            "candidate_id": str(row.get("candidate_id") or ""),
-            "final_decision": str(row.get("final_decision") or ""),
-            "skip_reason": skip_reason if is_accepted_optimizer_row(row) else "not_accepted_for_listen_preview",
-        }
-        for row in rows
-    ]
+    skipped: list[dict[str, Any]] = []
+    for row in rows:
+        semantic_failures = optimizer_row_semantic_failures(row)
+        skipped.append(
+            {
+                "track_id": str(row.get("track_id") or ""),
+                "candidate_id": str(row.get("candidate_id") or ""),
+                "final_decision": str(row.get("final_decision") or ""),
+                "skip_reason": "optimizer_semantic_blocker_present"
+                if semantic_failures
+                else (skip_reason if is_accepted_optimizer_row(row) else "not_accepted_for_listen_preview"),
+                "failed_checks": semantic_failures,
+            }
+        )
+    return skipped
 
 
 def blocked_manifest(
@@ -227,6 +270,7 @@ def blocked_manifest(
     reason: str,
     dense_delivery_gate_manifest_json: Path | None = None,
     dense_delivery_gate_evidence_failures: Sequence[str] = (),
+    optimizer_evidence_failures: Sequence[str] = (),
 ) -> dict[str, Any]:
     return {
         "manifest_type": "no_reference_listen_preview",
@@ -248,6 +292,7 @@ def blocked_manifest(
         "accepted_listen_preview_rows": [],
         "skipped_rows": sorted(skipped_optimizer_rows(rows, skip_reason=reason), key=lambda item: (item["track_id"], item["candidate_id"])),
         "dense_delivery_gate_evidence_failures": list(dense_delivery_gate_evidence_failures),
+        "optimizer_evidence_failures": list(optimizer_evidence_failures),
         "can_mark_release_ready": False,
         "can_publish_as_release": False,
         "audio_copied": False,
@@ -286,16 +331,23 @@ def build_manifest(optimizer_result_jsonl: Path, dense_delivery_gate_manifest_js
         accepted_rows,
         min_window_count=dense_gate_min_window_count(gate),
     )
-    has_dense_evidence = bool(accepted_rows) and not dense_evidence_failures
+    optimizer_evidence_failures = optimizer_rows_evidence_failures(accepted_rows, rows)
+    has_dense_evidence = bool(accepted_rows) and not dense_evidence_failures and not optimizer_evidence_failures
     delivery_allowed = bool(dense_promotable and accepted_rows and not skipped and has_dense_evidence)
     if not delivery_allowed:
-        reason = "dense_delivery_gate_missing_mode_specific_evidence" if dense_evidence_failures else "dense_delivery_gate_not_promotable"
+        if dense_evidence_failures:
+            reason = "dense_delivery_gate_missing_mode_specific_evidence"
+        elif optimizer_evidence_failures:
+            reason = "optimizer_result_semantic_blockers_present"
+        else:
+            reason = "dense_delivery_gate_not_promotable"
         return blocked_manifest(
             optimizer_result_jsonl,
             rows,
             reason=reason,
             dense_delivery_gate_manifest_json=dense_delivery_gate_manifest_json,
             dense_delivery_gate_evidence_failures=dense_evidence_failures,
+            optimizer_evidence_failures=optimizer_evidence_failures,
         )
 
     return {

@@ -22,6 +22,7 @@ from tools.build_no_reference_listen_preview_manifest import (
     SAFETY_FLAGS,
     is_accepted_optimizer_row,
     listen_row_from_optimizer,
+    optimizer_row_semantic_failures,
     write_json,
 )
 
@@ -172,13 +173,14 @@ def dense_gate_view(mode: str, row: dict[str, Any] | None, *, min_window_count: 
 
 
 def optimizer_skip(row: dict[str, Any]) -> dict[str, Any]:
+    semantic_failures = optimizer_row_semantic_failures(row)
     return {
         "track_id": str(row.get("track_id") or ""),
         "candidate_id": str(row.get("candidate_id") or ""),
         "final_decision": str(row.get("final_decision") or ""),
-        "skip_reason": "not_accepted_optimizer_row",
+        "skip_reason": "optimizer_semantic_blocker_present" if semantic_failures else "not_accepted_optimizer_row",
         "failed_modes": [],
-        "failed_checks": ["optimizer_row_not_accepted_for_listen_preview"],
+        "failed_checks": semantic_failures or ["optimizer_row_not_accepted_for_listen_preview"],
     }
 
 

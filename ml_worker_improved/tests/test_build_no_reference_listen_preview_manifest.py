@@ -230,6 +230,38 @@ def test_dense_gate_with_semantic_blocker_reason_is_blocked(tmp_path: Path) -> N
     ]
 
 
+def test_optimizer_row_semantic_blocker_blocks_forged_dense_gate(tmp_path: Path) -> None:
+    row = accepted_optimizer_row()
+    row["reasons"] = ["vocal_leakage_in_minus"]
+    optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [row])
+    gate = dense_gate_manifest(tmp_path / "dense_gate.json", optimizer)
+
+    manifest = build_manifest(optimizer, dense_delivery_gate_manifest_json=gate)
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "optimizer_result_semantic_blockers_present"
+    assert manifest["optimizer_evidence_failures"] == [
+        "row:0:optimizer_blocking_semantic_label:vocal_leakage_in_minus"
+    ]
+
+
+def test_optimizer_pair_score_mode_reason_blocks_forged_dense_gate(tmp_path: Path) -> None:
+    row = accepted_optimizer_row()
+    row["pair_score_mode_reasons"] = ["vocal_leakage_in_minus"]
+    optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [row])
+    gate = dense_gate_manifest(tmp_path / "dense_gate.json", optimizer)
+
+    manifest = build_manifest(optimizer, dense_delivery_gate_manifest_json=gate)
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "optimizer_result_semantic_blockers_present"
+    assert manifest["optimizer_evidence_failures"] == [
+        "row:0:optimizer_blocking_semantic_label:vocal_leakage_in_minus"
+    ]
+
+
 def test_written_manifest_satisfies_artifact_status_contract(tmp_path: Path) -> None:
     optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [accepted_optimizer_row()])
     gate = dense_gate_manifest(tmp_path / "dense_gate.json", optimizer)

@@ -214,6 +214,56 @@ def test_gate_blocks_accept_decision_with_semantic_blocker_reason(tmp_path: Path
     ]
 
 
+def test_gate_blocks_optimizer_row_with_semantic_blocker_reason(tmp_path: Path) -> None:
+    row = accepted_optimizer_row()
+    row["reasons"] = ["vocal_leakage_in_minus"]
+    optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [row])
+    vocal = write_jsonl(tmp_path / "vocal.jsonl", [judge_row("vocal")])
+    minus = write_jsonl(tmp_path / "minus.jsonl", [judge_row("minus")])
+    both = write_jsonl(tmp_path / "both.jsonl", [judge_row("both")])
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=optimizer,
+        vocal_judge_jsonl=vocal,
+        minus_judge_jsonl=minus,
+        both_judge_jsonl=both,
+        min_window_count=5,
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["accepted_count"] == 0
+    assert manifest["skipped_rows"][0]["skip_reason"] == "optimizer_semantic_blocker_present"
+    assert manifest["skipped_rows"][0]["failed_checks"] == [
+        "optimizer_blocking_semantic_label:vocal_leakage_in_minus"
+    ]
+
+
+def test_gate_blocks_optimizer_row_with_pair_score_mode_reason(tmp_path: Path) -> None:
+    row = accepted_optimizer_row()
+    row["pair_score_mode_reasons"] = ["vocal_leakage_in_minus"]
+    optimizer = write_jsonl(tmp_path / "optimizer.jsonl", [row])
+    vocal = write_jsonl(tmp_path / "vocal.jsonl", [judge_row("vocal")])
+    minus = write_jsonl(tmp_path / "minus.jsonl", [judge_row("minus")])
+    both = write_jsonl(tmp_path / "both.jsonl", [judge_row("both")])
+
+    manifest = build_delivery_gate_manifest(
+        optimizer_result_jsonl=optimizer,
+        vocal_judge_jsonl=vocal,
+        minus_judge_jsonl=minus,
+        both_judge_jsonl=both,
+        min_window_count=5,
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["accepted_count"] == 0
+    assert manifest["skipped_rows"][0]["skip_reason"] == "optimizer_semantic_blocker_present"
+    assert manifest["skipped_rows"][0]["failed_checks"] == [
+        "optimizer_blocking_semantic_label:vocal_leakage_in_minus"
+    ]
+
+
 def test_gate_blocks_missing_dense_evidence(tmp_path: Path) -> None:
     paths = write_gate_inputs(tmp_path, include_both=False)
 

@@ -19,6 +19,9 @@ promotable by the artifact status contract only when:
   as `foreign_source_recovered:*`, `mix_conservation_failed`, vocal leak/bleed,
   residual, separator-server, delivery-pair, or GPU-memory blockers;
 - the dense gate source manifest hash matches `--optimizer-result-jsonl`;
+- accepted rows map back to optimizer source rows that contain no blocking
+  semantic labels in generic `decision/reasons`, `pair_score_mode_reasons`,
+  `failure_labels`, `issue_labels`, or `dominant_failure_reason`;
 - accepted rows include `dense_delivery_gate` evidence for vocal, minus, and
   pair checks;
 - embedded dense gate evidence is schema-closed: vocal rows must include
@@ -40,6 +43,10 @@ Legacy or forged dense gate manifests that only contain generic
 Optimizer metadata such as `pair_compatibility_decision` and generic
 `overall_no_reference_score` is not accepted as a substitute for embedded
 dense pair evidence.
+Dense gate evidence also cannot launder blocked optimizer evidence. If the
+matching optimizer source row contains semantic blockers such as
+`vocal_leakage_in_minus`, the final listen-preview manifest is blocked with
+`dominant_failure_reason=optimizer_result_semantic_blockers_present`.
 
 The manifest writes:
 

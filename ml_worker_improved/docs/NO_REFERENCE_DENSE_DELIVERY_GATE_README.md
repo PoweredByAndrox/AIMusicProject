@@ -16,6 +16,9 @@ routes, or relax thresholds.
 A row can become `accepted_for_listen_pack` only when:
 
 - the optimizer row is accepted by the existing listen-preview contract;
+- the optimizer row itself has no blocking semantic labels in generic
+  `decision/reasons`, `pair_score_mode_reasons`, `failure_labels`, `issue_labels`, or
+  `dominant_failure_reason`;
 - phase-corrected optimizer rows are eligible only when they carry `requires_post_correction_judge=true`;
 - matching dense judge rows exist for `vocal`, `minus`, and `both`;
 - every mode has `decision=accept_candidate`;
@@ -38,6 +41,10 @@ and blockers otherwise look accepted.
 Optimizer metadata such as `pair_compatibility_decision` and generic
 `overall_no_reference_score` also cannot substitute for dense
 `pair_decision`, `pair_compatibility_score`, and `pair_blockers`.
+Optimizer source rows remain part of the gate evidence: a row carrying semantic
+blockers such as `vocal_leakage_in_minus` is skipped with
+`optimizer_semantic_blocker_present` even if separate dense judge rows are
+otherwise clean.
 
 The output remains listen preview only:
 
