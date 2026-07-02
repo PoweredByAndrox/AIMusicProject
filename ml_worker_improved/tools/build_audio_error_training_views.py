@@ -294,6 +294,7 @@ def runtime_window_rows(run_roots: Sequence[Path]) -> list[dict[str, Any]]:
                     track_id = str(judge_row.get("track_id") or "")
                     candidate_id = str(judge_row.get("candidate_id") or judge_row.get("selected_candidate_id") or "")
                     candidate = candidates.get((track_id, candidate_id), {})
+                    candidate = {**judge_row, **candidate} if candidate else dict(judge_row)
                     paths = runtime_candidate_paths(candidate)
                     windows = judge_row.get("window_metrics")
                     if not isinstance(windows, list):
@@ -323,7 +324,15 @@ def runtime_window_rows(run_roots: Sequence[Path]) -> list[dict[str, Any]]:
                                 "window_end_sec": end,
                                 **paths,
                                 "candidate_id": candidate_id,
-                                "route_id": str(judge_row.get("route_id") or candidate.get("route_id") or candidate.get("candidate_config_id") or ""),
+                                "route_id": str(
+                                    judge_row.get("route_id")
+                                    or candidate.get("route_id")
+                                    or candidate.get("minus_route_id")
+                                    or candidate.get("model_id")
+                                    or candidate.get("minus_model_id")
+                                    or candidate.get("candidate_config_id")
+                                    or ""
+                                ),
                                 "stem_type": stem_type,
                                 "blockers": window_blockers_for(stem_type, window),
                                 "judge_decision": window_decision_for(stem_type, judge_row, window),

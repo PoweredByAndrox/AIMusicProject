@@ -479,6 +479,70 @@ def test_runtime_run_roots_import_no_reference_scores_as_acoustic_evidence(tmp_p
     assert "missing_acoustic_feature_evidence" not in ";".join(row["unsafe_reason_for_this_view"] for row in minus_rows)
 
 
+def test_runtime_run_roots_import_self_contained_no_reference_judge_rows(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    write_repaired_dataset(dataset_dir, [])
+    assets = write_assets(tmp_path, "runtime_self_contained")
+    run_dir = tmp_path / "runtime_self_contained_run"
+    assert not (run_dir / "candidate_pool.jsonl").exists()
+    write_jsonl(
+        run_dir / "minus_windowed_judge.jsonl",
+        [
+            {
+                "track_id": "track-self-contained",
+                "run_id": "run-self-contained",
+                "candidate_id": "cand-self-contained",
+                "minus_route_id": "route-self-contained",
+                "route_family": "self_contained_runtime_candidate",
+                "mix_path": assets["mix_path"],
+                "vocal_path": assets["vocal_candidate_path"],
+                "minus_path": assets["minus_candidate_path"],
+                "window_metrics": [
+                    add_no_reference_window_scores(
+                        {
+                            "start_sec": 0.0,
+                            "duration_sec": 1.0,
+                            "minus_decision": "accept_candidate",
+                            "minus_blockers": [],
+                        },
+                        accepted=True,
+                    ),
+                    add_no_reference_window_scores(
+                        {
+                            "start_sec": 1.0,
+                            "duration_sec": 1.0,
+                            "minus_decision": "blocked_hard_case",
+                            "minus_blockers": ["severe_vocal_bleed_in_minus"],
+                        },
+                        accepted=False,
+                    ),
+                ],
+            }
+        ],
+    )
+
+    manifest = build_audio_error_training_views(
+        dataset_dir=dataset_dir,
+        output_dir=tmp_path / "views",
+        run_roots=[run_dir],
+    )
+    minus_rows = read_jsonl(tmp_path / "views" / "minus_critic_training_view.jsonl")
+
+    safe_rows = [row for row in minus_rows if row["safe_for_this_view"] is True]
+    assert manifest["source_run_rows_added"] == 2
+    assert [row["label"] for row in safe_rows] == [1, 0]
+    assert all(row["candidate_audio_path"] == assets["minus_candidate_path"] for row in safe_rows)
+    assert all(row["mix_path"] == assets["mix_path"] for row in safe_rows)
+    assert all(row["route_id"] == "route-self-contained" for row in safe_rows)
+    assert all(row["source_candidate_family"] == "self_contained_runtime_candidate" for row in safe_rows)
+    assert all(row["candidate_family"] == "self_contained_runtime_candidate" for row in safe_rows)
+    assert "missing_audio_file:candidate_audio_path" not in ";".join(
+        row["unsafe_reason_for_this_view"] for row in minus_rows
+    )
+
+
 def test_runtime_run_roots_normalize_mac_project_artifact_paths(tmp_path: Path, monkeypatch) -> None:
     from tools.build_audio_error_training_views import build_audio_error_training_views
 

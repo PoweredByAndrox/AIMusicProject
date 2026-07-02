@@ -64,6 +64,11 @@ rows preserve structured source provenance in addition to
 - `hardcase`
 - `hardcase_holdout`
 
+Runtime judge rows may be self-contained. If `candidate_pool.jsonl` contains a
+matching `(track_id, candidate_id)` row, its candidate metadata is preferred.
+Otherwise the builder imports paths, route aliases such as `minus_route_id`, and
+candidate family fields from the judge row itself.
+
 `hardcase=true` marks blocked/error windows for downstream mining. Imported
 runtime rows keep `hardcase_holdout=false` unless the source row explicitly
 marks them as holdout, so diagnostic hardcase evidence is not silently promoted
