@@ -374,6 +374,40 @@ def test_runtime_run_roots_add_strict_window_view_rows(tmp_path: Path) -> None:
     assert manifest["source_run_rows_added"] == 2
     assert [row["label"] for row in safe_rows] == [1, 0]
     assert all(row["label_source"] == "minus_windowed_judge.jsonl" for row in safe_rows)
+    assert all(row["runtime_source_row"] is True for row in safe_rows)
+    assert all(row["source_run_dir"] == str(run_dir) for row in safe_rows)
+    assert all(row["source_judge_file"] == "minus_windowed_judge.jsonl" for row in safe_rows)
+    assert all(row["source_candidate_family"] == "runtime_candidate" for row in safe_rows)
+    assert all(row["candidate_family"] == "runtime_candidate" for row in safe_rows)
+    assert [row["hardcase"] for row in safe_rows] == [False, True]
+    assert all(row["hardcase_holdout"] is False for row in safe_rows)
+
+
+def test_repaired_rows_preserve_source_run_without_runtime_flag(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    source_run_dir = tmp_path / "historic_run"
+    source = repaired_row(
+        tmp_path,
+        13,
+        accepted=True,
+        pair_status="",
+        unsafe_reason="",
+        source_run_dir=str(source_run_dir),
+        source_candidate_family="historic_family",
+    )
+    write_repaired_dataset(dataset_dir, [source])
+
+    build_audio_error_training_views(dataset_dir=dataset_dir, output_dir=tmp_path / "views")
+    minus_rows = read_jsonl(tmp_path / "views" / "minus_critic_training_view.jsonl")
+
+    assert len(minus_rows) == 1
+    row = minus_rows[0]
+    assert row["runtime_source_row"] is False
+    assert row["source_run_dir"] == str(source_run_dir)
+    assert row["source_candidate_family"] == "historic_family"
+    assert row["candidate_family"] == "historic_family"
 
 
 def test_runtime_run_roots_import_no_reference_scores_as_acoustic_evidence(tmp_path: Path) -> None:

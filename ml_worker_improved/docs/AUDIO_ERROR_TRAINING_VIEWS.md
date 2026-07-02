@@ -51,6 +51,24 @@ Every row's `feature_values` includes evidence flags:
 - `acoustic_feature_evidence_present`
 - `error_map_evidence_present`
 
+When `--run-roots` imports autonomous runtime/hardcase judge artifacts, output
+rows preserve structured source provenance in addition to
+`provenance_source_files`:
+
+- `runtime_source_row`
+- `source_run_dir`
+- `source_judge_file`
+- `source_pair_file`
+- `source_candidate_family`
+- `candidate_family`
+- `hardcase`
+- `hardcase_holdout`
+
+`hardcase=true` marks blocked/error windows for downstream mining. Imported
+runtime rows keep `hardcase_holdout=false` unless the source row explicitly
+marks them as holdout, so diagnostic hardcase evidence is not silently promoted
+into locked-eval or listen-result status.
+
 Target critic training excludes legacy or malformed safe rows whose
 `feature_values` do not contain acoustic evidence, even if an older view file
 marked them safe.

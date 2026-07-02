@@ -626,6 +626,17 @@ def base_view_row(
     map_cache: dict[str, dict[str, float]],
     blocker_labels: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    resolved_blockers = list(blocker_labels if blocker_labels is not None else as_list(source_row.get("blockers")))
+    source_run_dir = normalize_runtime_path(source_row.get("source_run_dir"))
+    source_candidate_family = str(source_row.get("source_candidate_family") or "")
+    candidate_family = str(
+        source_row.get("candidate_family")
+        or source_candidate_family
+        or source_row.get("route_family")
+        or source_row.get("route_family_or_unknown")
+        or ""
+    )
+    hardcase = source_row.get("hardcase") is True or (label == 0 and bool(resolved_blockers))
     return {
         "view_name": view_name,
         "target_name": target_name,
@@ -643,7 +654,16 @@ def base_view_row(
         "feature_values": view_feature_dict(source_row, map_cache=map_cache),
         "label": label if safe else None,
         "label_source": label_source if safe else "",
-        "blocker_labels": list(blocker_labels if blocker_labels is not None else as_list(source_row.get("blockers"))),
+        "blocker_labels": resolved_blockers,
+        "candidate_family": candidate_family,
+        "source_candidate_family": source_candidate_family,
+        "runtime_source_row": str(source_row.get("dataset_id") or "") == "runtime_harvest",
+        "source_run_dir": source_run_dir,
+        "source_judge_file": str(source_row.get("source_judge_file") or ""),
+        "source_pair_file": str(source_row.get("source_pair_file") or ""),
+        "source_selected_file": str(source_row.get("source_selected_file") or ""),
+        "hardcase": bool(hardcase),
+        "hardcase_holdout": source_row.get("hardcase_holdout") is True,
         "provenance_source_files": normalized_source_files(source_row),
         "safe_for_this_view": bool(safe),
         "unsafe_reason_for_this_view": ";".join(stable_unique(unsafe_reasons)),
