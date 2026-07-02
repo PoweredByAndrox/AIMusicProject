@@ -484,12 +484,18 @@ merged training corpus, or close reference gaps. Its CLI exits nonzero until the
 completion audit is machine accepted, so a refreshed blocked state cannot be
 mistaken for a result.
 
-To combine separately accepted listen packs into one user-facing folder, use
-`tools/build_aggregate_short_listen_pack.py`. It accepts source manifests as
+To combine separately accepted listen packs into one aggregate validation
+staging folder, use `tools/build_aggregate_short_listen_pack.py`. It accepts source manifests as
 `--source-manifest ALIAS=PATH`, validates each alias/path segment against the
 short-name policy, copies audio without modification, writes `pack.json` and
 `coverage.json`, and fails closed on release-ready, publishable, threshold
 relaxed, registry-edited, missing-audio, or long-name sources.
+Successful aggregate packs are not accepted listen/result artifacts. They must
+write `delivery_status=aggregate_validation_pending`,
+`delivery_allowed=false`,
+`presentation_status=aggregate_validation_pending_not_for_listen_pack`, and
+`aggregate_validation_ready=true` until validation, semantic review, minus
+audit, and `tools/build_machine_stem_acceptance_gate.py` promote them.
 When the aggregate pack is intended to represent the full 6s stem pack, pass
 `--require-full-pack-stems` to the builder, validator, and review packet runner.
 That contract requires `vocal`, `minus`, `drums`, `bass`, `other`, `guitar`,
@@ -500,7 +506,7 @@ If the source is a registered stem manifest, start the contract at
 `pack.json.required_stems` is then enforced by the aggregate validator and
 review packet runner even when no later CLI flag is supplied.
 
-Before calling any aggregate listen pack usable for user listening, run
+Before calling any aggregate pack usable for user listening, run
 `tools/validate_aggregate_short_listen_pack.py` and
 `tools/audit_short_listen_goal_status.py`. The validator recomputes copied audio
 sha256/metadata and checks promised metadata artifacts. The audit records which

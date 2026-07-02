@@ -78,10 +78,12 @@ def pack(
         tmp_path / "pack" / "pack.json",
         {
             "schema": "aggregate_short_listen_pack_manifest.v1",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
-            "release_status": "listen_preview_only",
+            "delivery_status": "aggregate_validation_pending",
+            "delivery_allowed": False,
+            "presentation_status": "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "aggregate_validation_pending",
+            "aggregate_validation_ready": True,
+            "listenable": False,
             "release_ready": False,
             "can_publish_as_result": False,
             "item_count": len(items),
@@ -315,6 +317,25 @@ def test_machine_stem_acceptance_gate_blocks_minus_audit_failures(tmp_path: Path
     blockers = [json.loads(line) for line in Path(manifest["blockers_jsonl"]).read_text(encoding="utf-8").splitlines()]
     assert any(row["reason"] == "minus_audit_row_not_passed" for row in blockers)
     assert any(row["reason"] == "minus_audit_row_warnings_present" for row in blockers)
+
+
+def test_machine_stem_acceptance_gate_blocks_listenable_staged_pack(tmp_path: Path) -> None:
+    master = source_master(tmp_path)
+    pack_manifest = pack(tmp_path, master, stems=FULL_STEMS)
+    payload = json.loads(pack_manifest.read_text(encoding="utf-8"))
+    payload["listenable"] = True
+    pack_manifest.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    manifest = build_machine_stem_acceptance_gate(
+        pack_manifest_json=pack_manifest,
+        validation_json=validation(tmp_path),
+        minus_audit_json=minus_audit(tmp_path, passed=True),
+        output_dir=tmp_path / "gate",
+    )
+
+    assert manifest["gate_status"] == "blocked"
+    assert manifest["final_result_allowed"] is False
+    assert "pack_listenable_not_false" in manifest["failed_checks"]
 
 
 def test_machine_stem_acceptance_gate_blocks_missing_training_coverage_when_required(tmp_path: Path) -> None:

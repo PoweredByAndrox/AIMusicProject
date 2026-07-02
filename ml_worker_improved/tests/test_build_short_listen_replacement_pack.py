@@ -98,14 +98,15 @@ def _base_pack(tmp_path: Path) -> Path:
         {
             "schema": "aggregate_short_listen_pack_manifest.v1",
             "pack_id": "base",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
-            "release_status": "listen_preview_only",
+            "delivery_status": "aggregate_validation_pending",
+            "delivery_allowed": False,
+            "presentation_status": "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "aggregate_validation_pending",
             "release_ready": False,
             "can_publish_as_result": False,
-            "listenable": True,
+            "listenable": False,
             "deliverable": False,
+            "aggregate_validation_ready": True,
             "item_count": len(items),
             "items": items,
             "failed_checks": [],
@@ -241,7 +242,11 @@ def test_replacement_pack_preserves_complete_group_and_short_paths(tmp_path: Pat
         pack_id="lp_test_replaced",
     )
 
-    assert manifest["delivery_status"] == "accepted"
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     assert manifest["item_count"] == len(STEMS)
     assert manifest["replacement_count"] == 1
     assert manifest["release_ready"] is False
@@ -281,7 +286,11 @@ def test_replacement_pack_can_match_direct_minus_by_track_id(tmp_path: Path) -> 
         pack_id="lp_test_replaced",
     )
 
-    assert manifest["delivery_status"] == "accepted"
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     assert manifest["replacement_count"] == 1
     minus = next(row for row in manifest["items"] if row["stem_type"] == "minus")
     assert minus["audio_path"] == "audio/s004/t001/minus.flac"
@@ -307,8 +316,31 @@ def test_replacement_pack_prefers_nested_source_path_over_shared_track_id(tmp_pa
         pack_id="lp_test_replaced",
     )
 
-    assert manifest["delivery_status"] == "accepted"
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     replaced = [row for row in manifest["items"] if row["stem_type"] == "minus" and row["replacement_applied"]]
     assert len(replaced) == 1
     assert replaced[0]["audio_path"] == "audio/s004/t001/minus.flac"
     assert replaced[0]["replacement_match_key"] == str(Path(minus["source_audio_path"]).resolve())
+
+
+def test_replacement_pack_blocks_stale_base_release_status(tmp_path: Path) -> None:
+    base_pack = _base_pack(tmp_path)
+    base_payload = json.loads(base_pack.read_text(encoding="utf-8"))
+    base_payload["release_status"] = "listen_preview_only"
+    base_pack.write_text(json.dumps(base_payload, sort_keys=True), encoding="utf-8")
+    source_minus_path = Path(next(row for row in base_payload["items"] if row["stem_type"] == "minus")["source_audio_path"])
+
+    manifest = build_short_listen_replacement_pack(
+        base_pack_json=base_pack,
+        replacement_pack_jsons=[_replacement_pack(tmp_path, source_minus_path)],
+        output_dir=tmp_path / "out",
+        pack_id="lp_test_replaced",
+    )
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["aggregate_validation_ready"] is False
+    assert "base_pack_release_status_not_aggregate_validation_pending" in manifest["failed_checks"]

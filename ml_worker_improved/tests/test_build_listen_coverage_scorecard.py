@@ -45,9 +45,12 @@ def _pack(tmp_path: Path, *, release_ready: bool = False) -> Path:
         {
             "schema": "aggregate_short_listen_pack_manifest.v1",
             "pack_id": "lp_test",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
+            "delivery_status": "aggregate_validation_pending",
+            "delivery_allowed": False,
+            "presentation_status": "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "aggregate_validation_pending",
+            "aggregate_validation_ready": True,
+            "listenable": False,
             "release_ready": release_ready,
             "can_publish_as_result": False,
             "item_count": len(items),
@@ -318,6 +321,42 @@ def test_build_listen_coverage_scorecard_blocks_release_ready_sources(tmp_path: 
     assert "pack_release_ready_true" in manifest["failed_checks"]
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
+
+
+def test_build_listen_coverage_scorecard_blocks_listenable_staged_pack(tmp_path: Path) -> None:
+    pack = _pack(tmp_path)
+    payload = json.loads(pack.read_text(encoding="utf-8"))
+    payload["listenable"] = True
+    pack.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    manifest = build_listen_coverage_scorecard(
+        pack_manifest_json=pack,
+        coverage_json=_coverage(tmp_path),
+        output_dir=tmp_path / "score",
+        goal_audit_json=_goal_audit(tmp_path),
+        idea_funnel_json=_idea_funnel(tmp_path),
+    )
+
+    assert manifest["scorecard_status"] == "blocked"
+    assert "pack_listenable_not_false" in manifest["failed_checks"]
+
+
+def test_build_listen_coverage_scorecard_blocks_stale_release_status(tmp_path: Path) -> None:
+    pack = _pack(tmp_path)
+    payload = json.loads(pack.read_text(encoding="utf-8"))
+    payload["release_status"] = "listen_preview_only"
+    pack.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    manifest = build_listen_coverage_scorecard(
+        pack_manifest_json=pack,
+        coverage_json=_coverage(tmp_path),
+        output_dir=tmp_path / "score",
+        goal_audit_json=_goal_audit(tmp_path),
+        idea_funnel_json=_idea_funnel(tmp_path),
+    )
+
+    assert manifest["scorecard_status"] == "blocked"
+    assert "pack_release_status_not_aggregate_validation_pending" in manifest["failed_checks"]
 
 
 def test_build_listen_coverage_scorecard_blocks_missing_idea_funnel(tmp_path: Path) -> None:

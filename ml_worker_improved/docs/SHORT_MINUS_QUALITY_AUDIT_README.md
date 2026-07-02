@@ -10,7 +10,10 @@ evidence when a source listen pack already recorded it.
 
 ## Contract
 
-- Input is an accepted `aggregate_short_listen_pack_manifest.v1`.
+- Input is a staged `aggregate_short_listen_pack_manifest.v1` with
+  `delivery_status=aggregate_validation_pending`, `delivery_allowed=false`,
+  `presentation_status=aggregate_validation_pending_not_for_listen_pack`, and
+  `aggregate_validation_ready=true`.
 - Only `stem_type=minus` rows are audited.
 - Fresh judging requires sibling vocal audio plus original mix evidence from
   source provenance.
@@ -63,7 +66,10 @@ In this mode:
 - `minus` rows are selected only when `audit_decision=passed`;
 - blocked or evidence-missing `minus` rows are written to `excluded.jsonl`;
 - missing audit coverage for a selected minus row blocks the subset;
-- the output remains listen-preview only and keeps `release_ready=false`.
+- the output remains aggregate-validation staging material and writes
+  `delivery_status=aggregate_validation_pending`, `delivery_allowed=false`,
+  `presentation_status=aggregate_validation_pending_not_for_listen_pack`,
+  `aggregate_validation_ready=true`, and `release_ready=false`.
 
 Passed minus rows can still carry warning reasons such as
 `residual_vocal_watch`. Blocked rows can carry hard blockers such as
@@ -101,8 +107,9 @@ docker compose run --rm --no-deps ml-worker python tools/build_listen_coverage_s
   --output-dir /app/lab_artifacts/lp_v45_001/gsub001/score001
 ```
 
-The resulting subset pack can be handed to the standard feedback template and
-review handoff tools:
+After aggregate validation, semantic review, minus audit, and the final machine
+stem acceptance gate, the resulting subset pack can be handed to the standard
+feedback template and review handoff tools:
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_short_listen_feedback_template.py \

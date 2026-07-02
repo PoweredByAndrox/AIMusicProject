@@ -23,6 +23,8 @@ BLOCKERS_NAME = "blockers.jsonl"
 PROGRESS_NAME = "progress.jsonl"
 SUMMARY_NAME = "summary.md"
 DEFAULT_REQUIRED_STEMS = ("vocal", "minus", "drums", "bass", "other", "guitar", "piano")
+AGGREGATE_VALIDATION_PENDING_STATUS = "aggregate_validation_pending"
+AGGREGATE_VALIDATION_PENDING_PRESENTATION = "aggregate_validation_pending_not_for_listen_pack"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -483,12 +485,18 @@ def build_machine_stem_acceptance_gate(
     items = pack_items(pack)
     blockers: list[dict[str, Any]] = []
 
-    if pack.get("delivery_status") != "accepted":
-        blockers.append(blocker("pack_not_accepted", evidence={"delivery_status": pack.get("delivery_status")}))
-    if pack.get("delivery_allowed") is not True:
-        blockers.append(blocker("pack_delivery_not_allowed", evidence={"delivery_allowed": pack.get("delivery_allowed")}))
-    if pack.get("presentation_status") != "accepted_for_listen_pack":
-        blockers.append(blocker("pack_presentation_not_accepted", evidence={"presentation_status": pack.get("presentation_status")}))
+    if pack.get("delivery_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        blockers.append(blocker("pack_not_aggregate_validation_pending", evidence={"delivery_status": pack.get("delivery_status")}))
+    if pack.get("delivery_allowed") is not False:
+        blockers.append(blocker("pack_delivery_allowed_not_false", evidence={"delivery_allowed": pack.get("delivery_allowed")}))
+    if pack.get("presentation_status") != AGGREGATE_VALIDATION_PENDING_PRESENTATION:
+        blockers.append(blocker("pack_presentation_not_aggregate_validation_pending", evidence={"presentation_status": pack.get("presentation_status")}))
+    if pack.get("release_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        blockers.append(blocker("pack_release_status_not_aggregate_validation_pending", evidence={"release_status": pack.get("release_status")}))
+    if pack.get("aggregate_validation_ready") is not True:
+        blockers.append(blocker("pack_aggregate_validation_ready_not_true", evidence={"aggregate_validation_ready": pack.get("aggregate_validation_ready")}))
+    if pack.get("listenable") is not False:
+        blockers.append(blocker("pack_listenable_not_false", evidence={"listenable": pack.get("listenable")}))
     if pack.get("release_ready") is True or pack.get("can_publish_as_result") is True:
         blockers.append(blocker("pack_release_or_publish_true"))
     if validation.get("validation_status") != "passed" or validation.get("failed_checks"):

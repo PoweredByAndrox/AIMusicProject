@@ -33,6 +33,8 @@ from tools.docker_runtime import require_docker_runtime  # noqa: E402
 
 
 START_TIME = time.monotonic()
+AGGREGATE_VALIDATION_PENDING_STATUS = "aggregate_validation_pending"
+AGGREGATE_VALIDATION_PENDING_PRESENTATION = "aggregate_validation_pending_not_for_listen_pack"
 BLOCKED_TRUE_FLAGS = (
     "release_ready",
     "can_publish_as_result",
@@ -313,8 +315,16 @@ def build_short_listen_replacement_pack(
     failed.extend(collect_true_flag_failures("base_pack", base_pack))
     if base_pack.get("schema") != "aggregate_short_listen_pack_manifest.v1":
         failed.append("base_pack_schema_unexpected")
-    if base_pack.get("delivery_status") != "accepted" or base_pack.get("delivery_allowed") is not True:
-        failed.append("base_pack_not_accepted")
+    if base_pack.get("delivery_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        failed.append("base_pack_delivery_status_not_aggregate_validation_pending")
+    if base_pack.get("delivery_allowed") is not False:
+        failed.append("base_pack_delivery_allowed_not_false")
+    if base_pack.get("presentation_status") != AGGREGATE_VALIDATION_PENDING_PRESENTATION:
+        failed.append("base_pack_presentation_status_not_aggregate_validation_pending")
+    if base_pack.get("release_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        failed.append("base_pack_release_status_not_aggregate_validation_pending")
+    if base_pack.get("aggregate_validation_ready") is not True:
+        failed.append("base_pack_aggregate_validation_ready_not_true")
     base_items = [item for item in base_pack.get("items") or [] if isinstance(item, dict)]
 
     replacements, replacement_manifests, replacement_failed = build_replacement_map(replacement_pack_jsons)
@@ -397,14 +407,15 @@ def build_short_listen_replacement_pack(
     manifest = {
         "schema": "aggregate_short_listen_pack_manifest.v1",
         "pack_id": pack_id,
-        "delivery_status": "accepted" if accepted else "blocked",
-        "delivery_allowed": accepted,
-        "presentation_status": "accepted_for_listen_pack" if accepted else "blocked_from_listen_pack",
-        "release_status": "listen_preview_only",
+        "delivery_status": AGGREGATE_VALIDATION_PENDING_STATUS if accepted else "blocked",
+        "delivery_allowed": False,
+        "presentation_status": AGGREGATE_VALIDATION_PENDING_PRESENTATION if accepted else "blocked_from_listen_pack",
+        "release_status": AGGREGATE_VALIDATION_PENDING_STATUS if accepted else "blocked",
         "release_ready": False,
         "can_publish_as_result": False,
-        "listenable": accepted,
+        "listenable": False,
         "deliverable": False,
+        "aggregate_validation_ready": accepted,
         "item_count": len(selected) if accepted else 0,
         "replacement_count": replacement_count,
         "items": selected if accepted else [],
@@ -489,7 +500,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sort_keys=True,
         )
     )
-    return 0 if manifest["delivery_allowed"] else 2
+    return 0 if manifest["aggregate_validation_ready"] else 2
 
 
 if __name__ == "__main__":

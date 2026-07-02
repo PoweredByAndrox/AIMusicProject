@@ -164,9 +164,12 @@ def test_build_short_listen_subset_pack_filters_by_stem_and_route(tmp_path: Path
         alias_prefix="v",
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
-    assert manifest["presentation_status"] == "accepted_for_listen_pack"
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["release_status"] == "aggregate_validation_pending"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
     assert manifest["selected_count"] == 1
@@ -185,7 +188,12 @@ def test_build_short_listen_subset_pack_gates_minus_rows_by_audit(tmp_path: Path
         minus_audit_json=_minus_audit(tmp_path),
     )
 
-    assert manifest["delivery_status"] == "accepted"
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["release_status"] == "aggregate_validation_pending"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
     assert manifest["selected_count"] == 2

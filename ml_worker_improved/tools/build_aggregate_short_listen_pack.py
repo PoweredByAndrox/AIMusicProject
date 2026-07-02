@@ -41,6 +41,8 @@ COVERAGE_NAME = "coverage.json"
 SELECTED_NAME = "selected.jsonl"
 PROGRESS_NAME = "progress.jsonl"
 README_NAME = "README.md"
+AGGREGATE_VALIDATION_PENDING_STATUS = "aggregate_validation_pending"
+AGGREGATE_VALIDATION_PENDING_PRESENTATION = "aggregate_validation_pending_not_for_listen_pack"
 
 SOURCE_LEVEL_BLOCKERS = (
     "release_ready",
@@ -413,14 +415,15 @@ def build_aggregate_short_listen_pack(
     manifest = {
         "schema": "aggregate_short_listen_pack_manifest.v1",
         "pack_id": pack_id,
-        "delivery_status": "accepted" if accepted else "blocked",
-        "delivery_allowed": accepted,
-        "presentation_status": "accepted_for_listen_pack" if accepted else "blocked_from_listen_pack",
-        "release_status": "listen_preview_only",
+        "delivery_status": AGGREGATE_VALIDATION_PENDING_STATUS if accepted else "blocked",
+        "delivery_allowed": False,
+        "presentation_status": AGGREGATE_VALIDATION_PENDING_PRESENTATION if accepted else "blocked_from_listen_pack",
+        "release_status": AGGREGATE_VALIDATION_PENDING_STATUS if accepted else "blocked",
         "release_ready": False,
         "can_publish_as_result": False,
-        "listenable": accepted,
+        "listenable": False,
         "deliverable": False,
+        "aggregate_validation_ready": accepted,
         "item_count": len(selected) if accepted else 0,
         "items": selected if accepted else [],
         "required_stems": normalized_required_stems,
@@ -500,7 +503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sort_keys=True,
         )
     )
-    return 0 if manifest["delivery_allowed"] else 2
+    return 0 if manifest["aggregate_validation_ready"] else 2
 
 
 if __name__ == "__main__":

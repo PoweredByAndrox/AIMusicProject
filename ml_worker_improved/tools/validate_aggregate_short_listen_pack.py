@@ -33,6 +33,8 @@ from tools.full_pack_stem_contract import (  # noqa: E402
 START_TIME = time.monotonic()
 MANIFEST_NAME = "validation.json"
 PROGRESS_NAME = "progress.jsonl"
+AGGREGATE_VALIDATION_PENDING_STATUS = "aggregate_validation_pending"
+AGGREGATE_VALIDATION_PENDING_PRESENTATION = "aggregate_validation_pending_not_for_listen_pack"
 BLOCKED_TRUE_FLAGS = (
     "release_ready",
     "can_publish_as_result",
@@ -256,8 +258,8 @@ def check_progress_jsonl(pack_root: Path, pack: dict[str, Any]) -> list[str]:
     finish = rows[-1]
     if finish.get("event") != "finish":
         failed.append("progress_jsonl_missing_finish")
-    if finish.get("delivery_status") != "accepted":
-        failed.append("progress_jsonl_finish_not_accepted")
+    if finish.get("delivery_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        failed.append("progress_jsonl_finish_not_aggregate_validation_pending")
     if finish.get("failed_checks") not in ([], None):
         failed.append("progress_jsonl_finish_failed_checks_not_empty")
     return failed
@@ -305,14 +307,18 @@ def validate_aggregate_short_listen_pack(
     failed.extend(list_failed_checks("pack", pack))
     if pack.get("schema") != "aggregate_short_listen_pack_manifest.v1":
         failed.append("unexpected_schema")
-    if pack.get("delivery_status") != "accepted":
-        failed.append("pack_delivery_status_not_accepted")
-    if pack.get("delivery_allowed") is not True:
-        failed.append("pack_delivery_allowed_not_true")
-    if pack.get("presentation_status") != "accepted_for_listen_pack":
-        failed.append("pack_presentation_status_not_accepted")
-    if pack.get("release_status") != "listen_preview_only":
-        failed.append("pack_release_status_not_listen_preview")
+    if pack.get("delivery_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        failed.append("pack_delivery_status_not_aggregate_validation_pending")
+    if pack.get("delivery_allowed") is not False:
+        failed.append("pack_delivery_allowed_not_false")
+    if pack.get("presentation_status") != AGGREGATE_VALIDATION_PENDING_PRESENTATION:
+        failed.append("pack_presentation_status_not_aggregate_validation_pending")
+    if pack.get("release_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        failed.append("pack_release_status_not_aggregate_validation_pending")
+    if pack.get("listenable") is not False:
+        failed.append("pack_listenable_not_false")
+    if pack.get("aggregate_validation_ready") is not True:
+        failed.append("pack_aggregate_validation_ready_not_true")
     failed.extend(check_policy(pack.get("artifact_name_policy")))
 
     items = pack.get("items")

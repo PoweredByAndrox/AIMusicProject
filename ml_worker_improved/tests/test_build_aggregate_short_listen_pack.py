@@ -149,7 +149,11 @@ def test_aggregate_short_listen_pack_copies_sources_with_short_aliases(tmp_path:
         pack_id="lp_test",
     )
 
-    assert manifest["delivery_status"] == "accepted"
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
     assert manifest["item_count"] == 3
@@ -178,8 +182,11 @@ def test_aggregate_short_listen_pack_copies_no_reference_master_rows_with_short_
         pack_id="lp_master",
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     assert manifest["item_count"] == 2
     paths = [item["audio_path"] for item in manifest["items"]]
     assert paths == [
@@ -354,8 +361,11 @@ def test_aggregate_short_listen_pack_preserves_unrequired_instrument_preview(tmp
         pack_id="lp001",
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert manifest["delivery_status"] == "aggregate_validation_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_validation_pending_not_for_listen_pack"
+    assert manifest["listenable"] is False
+    assert manifest["aggregate_validation_ready"] is True
     assert manifest["item_count"] == 1
     assert manifest["required_stems"] == []
 

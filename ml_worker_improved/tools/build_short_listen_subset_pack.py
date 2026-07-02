@@ -28,6 +28,8 @@ SELECTED_NAME = "selected.jsonl"
 EXCLUDED_NAME = "excluded.jsonl"
 SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
+AGGREGATE_VALIDATION_PENDING_STATUS = "aggregate_validation_pending"
+AGGREGATE_VALIDATION_PENDING_PRESENTATION = "aggregate_validation_pending_not_for_listen_pack"
 
 BLOCKED_TRUE_FLAGS = (
     "release_ready",
@@ -431,14 +433,15 @@ def build_short_listen_subset_pack(
     excluded_minus_count = sum(1 for row in excluded if str(row.get("stem_type") or "").lower() == "minus")
     manifest = {
         "schema": "short_listen_subset_pack_manifest.v1",
-        "delivery_status": "accepted" if accepted else "blocked",
-        "delivery_allowed": accepted,
-        "presentation_status": "accepted_for_listen_pack" if accepted else "blocked_from_listen_pack",
-        "release_status": "listen_preview_only",
+        "delivery_status": AGGREGATE_VALIDATION_PENDING_STATUS if accepted else "blocked",
+        "delivery_allowed": False,
+        "presentation_status": AGGREGATE_VALIDATION_PENDING_PRESENTATION if accepted else "blocked_from_listen_pack",
+        "release_status": AGGREGATE_VALIDATION_PENDING_STATUS if accepted else "blocked",
         "release_ready": False,
         "can_publish_as_result": False,
         "deliverable": False,
-        "listenable": accepted,
+        "listenable": False,
+        "aggregate_validation_ready": accepted,
         "selected_count": len(selected),
         "listen_audio_files": selected,
         "stem_type_counts": stem_type_counts(selected),
@@ -546,7 +549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sort_keys=True,
         )
     )
-    return 0 if manifest["delivery_allowed"] else 2
+    return 0 if manifest["aggregate_validation_ready"] else 2
 
 
 if __name__ == "__main__":

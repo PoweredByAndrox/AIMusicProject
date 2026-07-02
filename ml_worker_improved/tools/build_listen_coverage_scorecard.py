@@ -22,6 +22,8 @@ GROUPS_NAME = "groups.jsonl"
 SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
 START_TIME = time.monotonic()
+AGGREGATE_VALIDATION_PENDING_STATUS = "aggregate_validation_pending"
+AGGREGATE_VALIDATION_PENDING_PRESENTATION = "aggregate_validation_pending_not_for_listen_pack"
 
 REQUIRED_6S_STEMS = {"bass", "drums", "guitar", "minus", "other", "piano", "vocal"}
 BLOCKED_TRUE_FLAGS = (
@@ -326,8 +328,18 @@ def schema_failures(pack: dict[str, Any], coverage: dict[str, Any], goal_audit: 
     failed: list[str] = []
     if pack.get("schema") != "aggregate_short_listen_pack_manifest.v1":
         failed.append("pack_schema_unexpected")
-    if pack.get("delivery_status") != "accepted" or pack.get("delivery_allowed") is not True:
-        failed.append("pack_not_accepted")
+    if pack.get("delivery_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        failed.append("pack_delivery_status_not_aggregate_validation_pending")
+    if pack.get("delivery_allowed") is not False:
+        failed.append("pack_delivery_allowed_not_false")
+    if pack.get("presentation_status") != AGGREGATE_VALIDATION_PENDING_PRESENTATION:
+        failed.append("pack_presentation_status_not_aggregate_validation_pending")
+    if pack.get("release_status") != AGGREGATE_VALIDATION_PENDING_STATUS:
+        failed.append("pack_release_status_not_aggregate_validation_pending")
+    if pack.get("aggregate_validation_ready") is not True:
+        failed.append("pack_aggregate_validation_ready_not_true")
+    if pack.get("listenable") is not False:
+        failed.append("pack_listenable_not_false")
     if coverage.get("schema") != "aggregate_short_listen_pack_coverage.v1":
         failed.append("coverage_schema_unexpected")
     if not goal_audit:

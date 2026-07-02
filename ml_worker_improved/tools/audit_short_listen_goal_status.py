@@ -24,6 +24,8 @@ SUMMARY_NAME = "goal_status_summary.md"
 PROGRESS_NAME = "progress.jsonl"
 
 REQUIRED_6S_STEMS = {"vocal", "minus", "drums", "bass", "other", "guitar", "piano"}
+AGGREGATE_VALIDATION_PENDING_STATUS = "aggregate_validation_pending"
+AGGREGATE_VALIDATION_PENDING_PRESENTATION = "aggregate_validation_pending_not_for_listen_pack"
 BLOCKED_TRUE_FLAGS = (
     "release_ready",
     "can_publish_as_result",
@@ -156,13 +158,15 @@ def delivery_blockers(pack: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
     expected = {
         "schema": "aggregate_short_listen_pack_manifest.v1",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
-        "release_status": "listen_preview_only",
+        "delivery_status": AGGREGATE_VALIDATION_PENDING_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": AGGREGATE_VALIDATION_PENDING_PRESENTATION,
+        "release_status": AGGREGATE_VALIDATION_PENDING_STATUS,
         "release_ready": False,
         "can_publish_as_result": False,
+        "listenable": False,
         "deliverable": False,
+        "aggregate_validation_ready": True,
     }
     for key, expected_value in expected.items():
         if pack.get(key) != expected_value:

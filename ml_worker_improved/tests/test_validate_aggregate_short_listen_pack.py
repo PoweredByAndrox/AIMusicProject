@@ -67,7 +67,15 @@ def _valid_pack(tmp_path: Path) -> Path:
         "\n".join(
             [
                 json.dumps({"event": "start", "pack_id": "lp_test", "sources": [{"alias": "voc"}]}, sort_keys=True),
-                json.dumps({"event": "finish", "delivery_status": "accepted", "item_count": 1, "failed_checks": []}, sort_keys=True),
+                json.dumps(
+                    {
+                        "event": "finish",
+                        "delivery_status": "aggregate_validation_pending",
+                        "item_count": 1,
+                        "failed_checks": [],
+                    },
+                    sort_keys=True,
+                ),
             ]
         )
         + "\n",
@@ -103,14 +111,15 @@ def _valid_pack(tmp_path: Path) -> Path:
         {
             "schema": "aggregate_short_listen_pack_manifest.v1",
             "pack_id": "lp_test",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
-            "release_status": "listen_preview_only",
+            "delivery_status": "aggregate_validation_pending",
+            "delivery_allowed": False,
+            "presentation_status": "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "aggregate_validation_pending",
             "release_ready": False,
             "can_publish_as_result": False,
-            "listenable": True,
+            "listenable": False,
             "deliverable": False,
+            "aggregate_validation_ready": True,
             "item_count": 1,
             "items": selected,
             "failed_checks": [],

@@ -102,12 +102,17 @@ Short artifact paths must be contained relative paths: `.` / `..` traversal
 segments, absolute paths, Windows reserved device names such as `CON` or
 `COM1`, overlong path segments, and Windows-unsafe characters are rejected.
 
-To combine already accepted vocal/minus/stem listen packs into one
-user-facing folder, use `tools/build_aggregate_short_listen_pack.py`. It copies
+To combine already accepted vocal/minus/stem listen packs into one aggregate
+validation staging folder, use `tools/build_aggregate_short_listen_pack.py`. It copies
 only existing audio from source manifests, writes `pack.json`, `coverage.json`,
 `selected.jsonl`, `progress.jsonl`, and `README.md`, and blocks the pack if any
 source manifest or row is release-ready, publishable, threshold-relaxed, missing
 audio, or uses a non-short alias/path segment.
+Successful aggregate packs are not user-facing listen/result artifacts: they
+write `delivery_status=aggregate_validation_pending`,
+`delivery_allowed=false`,
+`presentation_status=aggregate_validation_pending_not_for_listen_pack`,
+`listenable=false`, and `aggregate_validation_ready=true`.
 
 If a source manifest or CLI argument declares required instrument stems, aggregate
 packaging also fails closed until those present required stems carry machine
@@ -123,7 +128,8 @@ Those rows are copied without modification using short stem filenames such as
 `pack.json` provenance only.
 
 Validate the aggregate pack with `tools/validate_aggregate_short_listen_pack.py`
-before handing it off for listening. The validator rechecks the short-name
+before any semantic review, minus audit, scorecard, or final machine-gate
+handoff. The validator rechecks the short-name
 policy, source/listen contracts, missing audio, copied audio sha256 and audio
 metadata, coverage rows, promised `selected.jsonl` / `progress.jsonl` /
 `README.md` artifacts, release/publish flags, and writes
@@ -235,10 +241,14 @@ for known-bad machine warning families such as `silence_hallucination`. The
 repeated `--include-minus-source-key <key>` flag narrows a diagnostic selection
 to one provenance-safe source such as `track:trk008:minus`, which prevents
 window comparison or segment switching from mixing candidates across different
-tracks. The
-replacement pack still matches by specific source-path provenance first and
-uses track id only as a fallback, so one replacement candidate cannot silently
-overwrite unrelated clean minus rows that merely share a track id.
+tracks. The replacement pack still matches by specific source-path provenance
+first and uses track id only as a fallback, so one replacement candidate cannot
+silently overwrite unrelated clean minus rows that merely share a track id. The
+replacement aggregate output is not a listen/result handoff; successful runs
+write `delivery_status=aggregate_validation_pending`, `delivery_allowed=false`,
+`presentation_status=aggregate_validation_pending_not_for_listen_pack`, and
+`aggregate_validation_ready=true` until aggregate validation and the final
+machine gate accept it.
 
 Use `tools/build_short_minus_replacement_sweep.py` when the idea funnel has
 identified accepted-with-warning minus rows. The sweep tries each accepted
@@ -309,18 +319,26 @@ For fully automated corpus-scale acceptance, run
 `tools/build_machine_stem_acceptance_gate.py` after aggregate validation and the
 minus quality audit. This gate blocks `machine_pass_human_listen_pending` as a
 final state: `final_result_allowed=true` is emitted only when the aggregate pack
-is accepted, validation passed, source vocal/minus master evidence is pair
-compatible, and every minus row passes the machine quality audit with no
-blockers or warnings. A blocked gate writes `gate.json`, `blockers.jsonl`,
-`summary.md`, and `progress.jsonl` so the next ARIS loop can target exact
-machine-detected defects instead of asking for manual listening.
+is staged for validation (`delivery_status=aggregate_validation_pending`,
+`delivery_allowed=false`), validation passed, source vocal/minus master evidence
+is pair compatible, and every minus row passes the machine quality audit with no
+blockers or warnings. The gate is the first artifact in this flow allowed to
+write `delivery_status=accepted`, `delivery_allowed=true`, and
+`presentation_status=accepted_for_listen_pack`. A blocked gate writes
+`gate.json`, `blockers.jsonl`, `summary.md`, and `progress.jsonl` so the next
+ARIS loop can target exact machine-detected defects instead of asking for manual
+listening.
 
 After the audit, consume it with `tools/build_short_listen_subset_pack.py`
 using `--minus-audit-json`. In audit-gated mode the subset builder keeps
 non-minus rows, keeps only `minus` rows whose `audit_decision=passed`, writes
 excluded blocked/evidence-missing minus rows to `excluded.jsonl`, and fails
-closed if a selected minus row has no matching audit row. This prevents a
-blocked minus from staying in the next listen handoff as an accepted row.
+closed if a selected minus row has no matching audit row. The subset output is
+still staging material, not a listen handoff: successful runs write
+`delivery_status=aggregate_validation_pending`, `delivery_allowed=false`,
+`presentation_status=aggregate_validation_pending_not_for_listen_pack`, and
+`aggregate_validation_ready=true`. This prevents a blocked or unaudited minus
+from staying in the next machine-gate path as an accepted listen row.
 
 If minus audit rows are blocked or passed with warnings such as residual vocal
 watch, route them into `tools/build_short_listen_repair_queue.py` with
@@ -364,7 +382,8 @@ accepted rows than the current listen handoff should include. It filters by
 stem type and route intent, keeps provenance in the manifest, and writes short
 paths such as `audio/sub/v001.flac`. This is useful for replacing a rejected
 vocal item without carrying older rejected minus alternatives into the next
-aggregate pack.
+aggregate pack. The subset output is an aggregate-validation staging pack; it
+must be validated and machine-gated before any listen/result presentation.
 
 Use `tools/build_minus_mid_pack.py` when a minus item is rejected for middle-song
 vocal bleed or muffling and the next repair cycle needs precise listening
@@ -393,9 +412,10 @@ Example post-feedback aggregate pattern:
 - `noe6`, `hh6`, `t026`: available 6-stem/6s packs;
 - `mi`: music-intelligence stem listen pack if already accepted.
 
-The aggregate pack is still a listen pack, not a release artifact. The goal
+The aggregate pack is staging material, not a listen/result artifact. The goal
 audit can reach `machine_pass_human_listen_pending`; it must not be marked
-complete until the short-path files have a human listen verdict.
+complete until validation, semantic review, minus audit when applicable, the
+final machine gate, and the short-path human listen verdict are all present.
 
 ## Run
 
