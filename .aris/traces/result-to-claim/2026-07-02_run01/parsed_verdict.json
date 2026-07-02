@@ -1,0 +1,27 @@
+{
+  "claim_supported": "partial",
+  "confidence": "medium",
+  "integrity_status": "unavailable",
+  "review_status": "pending_external_review",
+  "what_results_support": [
+    "Self-contained no-reference judge rows from it071 can now be ingested into audio-error training views without candidate_pool.jsonl.",
+    "r005 shadow critic validates for shadow scoring with errors=[] and rows_scored=204.",
+    "The critic localizes the it071 nicegreenhorn minus issue to the first two 6-second windows with phase/detail blockers."
+  ],
+  "what_results_dont_support": [
+    "Production gate readiness.",
+    "A general robust minus-quality claim.",
+    "An accepted repaired minus listen artifact."
+  ],
+  "missing_evidence": [
+    "More negative hardcase groups to satisfy the stricter 20/20/20 negative split contract.",
+    "A bounded minus repair candidate judged through the accepted-only delivery contract.",
+    "External review of this result-to-claim verdict."
+  ],
+  "suggested_claim_revision": "The current evidence supports shadow-only localization of minus defects, not production delivery or a completed minus repair.",
+  "next_experiments_needed": [
+    "Run a bounded production-safe minus repair candidate route on the localized 0-12 second failure.",
+    "Judge the candidate with no-reference/exact gate artifacts and do not present it unless delivery_allowed=true.",
+    "Harvest additional independent hardcase minus roots to raise negative coverage."
+  ]
+}
