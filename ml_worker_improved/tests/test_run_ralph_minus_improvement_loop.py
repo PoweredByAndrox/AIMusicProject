@@ -125,6 +125,33 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         self.assertIn("presence_dip_damage", labels)
         self.assertIn("air_dip_damage", labels)
 
+    def test_overboosted_candidate_is_rejected_even_with_better_vocal_proxy(self) -> None:
+        module = _load_module()
+
+        evaluation = module.evaluate_minus_candidate(
+            candidate_name="overboosted_minus",
+            candidate_summary={
+                "rms_delta_db_vs_base": -30.0,
+                "avg_vocal_residue_corr": 0.09618,
+                "max_vocal_residue_corr": 0.25215,
+                "avg_vocal_projection_ratio_db": -20.537,
+                "worst_rms_dip_db": 0.0,
+                "worst_presence_dip_db": 0.0,
+                "worst_air_dip_db": 0.0,
+                "max_rms_boost_db": 24.0,
+                "max_presence_boost_db": 12.0,
+                "max_air_boost_db": 11.0,
+            },
+            base_summary=_base_summary(),
+            policy=module.MinusAcceptancePolicy(),
+        )
+
+        labels = {blocker["label"] for blocker in evaluation["blockers"]}
+        self.assertEqual(evaluation["status"], "rejected")
+        self.assertIn("rms_boost_damage", labels)
+        self.assertIn("presence_boost_damage", labels)
+        self.assertIn("air_boost_damage", labels)
+
     def test_iterative_candidate_is_rejected_when_cumulative_dip_budget_is_exceeded(self) -> None:
         module = _load_module()
 

@@ -9,6 +9,8 @@ The route is Docker-only and external-only CPU/DSP scoring:
 - no model training
 - no model registry edits
 - no threshold relaxation
+- no over-boost acceptance: excessive RMS/presence/air boosts are rejected like
+  detail dips
 
 The runner writes `ralph_minus_improvement_progress.jsonl` with flushed phase records:
 

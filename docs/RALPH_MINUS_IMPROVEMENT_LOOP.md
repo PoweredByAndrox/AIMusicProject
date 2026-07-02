@@ -29,6 +29,9 @@ The default policy requires:
 - `worst_rms_dip_db >= -0.12`
 - `worst_presence_dip_db >= -0.15`
 - `worst_air_dip_db >= -0.12`
+- `max_rms_boost_db <= 6.0`
+- `max_presence_boost_db <= 8.0`
+- `max_air_boost_db <= 8.0`
 
 These values are not track timestamps and are not per-track hardcodes. They are
 production safety thresholds for the minus route.

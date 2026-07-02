@@ -44,6 +44,9 @@ class MinusAcceptancePolicy:
     maximum_rms_dip_db: float = -0.12
     maximum_presence_dip_db: float = -0.15
     maximum_air_dip_db: float = -0.12
+    maximum_rms_boost_db: float = 6.0
+    maximum_presence_boost_db: float = 8.0
+    maximum_air_boost_db: float = 8.0
 
 
 def default_candidate_recipes(
@@ -293,12 +296,17 @@ def calculate_windowed_minus_summary(
             np.mean([window["vocal_projection_ratio_db"] for window in windows])
         ),
         "worst_rms_dip_db": float(np.min([window["rms_drift_db_vs_base"] for window in windows])),
+        "max_rms_boost_db": float(np.max([window["rms_drift_db_vs_base"] for window in windows])),
         "worst_presence_dip_db": float(
             np.min([window["presence_band_ratio_drift_db"] for window in windows])
+        ),
+        "max_presence_boost_db": float(
+            np.max([window["presence_band_ratio_drift_db"] for window in windows])
         ),
         "worst_air_dip_db": float(
             np.min([window["air_band_ratio_drift_db"] for window in windows])
         ),
+        "max_air_boost_db": float(np.max([window["air_band_ratio_drift_db"] for window in windows])),
         "top_vocal_residue_windows": sorted(
             windows,
             key=lambda item: item["vocal_residue_corr"],
@@ -372,6 +380,33 @@ def evaluate_minus_candidate(
                 "threshold": policy.maximum_air_dip_db,
             }
         )
+    if float(candidate_summary.get("max_rms_boost_db", 0.0)) > policy.maximum_rms_boost_db:
+        blockers.append(
+            {
+                "label": "rms_boost_damage",
+                "reason": "candidate_creates_excessive_energy_boost_risk",
+                "value": float(candidate_summary.get("max_rms_boost_db", 0.0)),
+                "threshold": policy.maximum_rms_boost_db,
+            }
+        )
+    if float(candidate_summary.get("max_presence_boost_db", 0.0)) > policy.maximum_presence_boost_db:
+        blockers.append(
+            {
+                "label": "presence_boost_damage",
+                "reason": "candidate_creates_excessive_presence_boost_risk",
+                "value": float(candidate_summary.get("max_presence_boost_db", 0.0)),
+                "threshold": policy.maximum_presence_boost_db,
+            }
+        )
+    if float(candidate_summary.get("max_air_boost_db", 0.0)) > policy.maximum_air_boost_db:
+        blockers.append(
+            {
+                "label": "air_boost_damage",
+                "reason": "candidate_creates_excessive_air_boost_risk",
+                "value": float(candidate_summary.get("max_air_boost_db", 0.0)),
+                "threshold": policy.maximum_air_boost_db,
+            }
+        )
     if cumulative_summary is not None:
         if float(cumulative_summary["worst_rms_dip_db"]) < policy.maximum_rms_dip_db:
             blockers.append(
@@ -398,6 +433,33 @@ def evaluate_minus_candidate(
                     "reason": "iterative_candidate_exceeds_total_air_dip_budget",
                     "value": float(cumulative_summary["worst_air_dip_db"]),
                     "threshold": policy.maximum_air_dip_db,
+                }
+            )
+        if float(cumulative_summary.get("max_rms_boost_db", 0.0)) > policy.maximum_rms_boost_db:
+            blockers.append(
+                {
+                    "label": "cumulative_rms_boost_damage",
+                    "reason": "iterative_candidate_exceeds_total_rms_boost_budget",
+                    "value": float(cumulative_summary.get("max_rms_boost_db", 0.0)),
+                    "threshold": policy.maximum_rms_boost_db,
+                }
+            )
+        if float(cumulative_summary.get("max_presence_boost_db", 0.0)) > policy.maximum_presence_boost_db:
+            blockers.append(
+                {
+                    "label": "cumulative_presence_boost_damage",
+                    "reason": "iterative_candidate_exceeds_total_presence_boost_budget",
+                    "value": float(cumulative_summary.get("max_presence_boost_db", 0.0)),
+                    "threshold": policy.maximum_presence_boost_db,
+                }
+            )
+        if float(cumulative_summary.get("max_air_boost_db", 0.0)) > policy.maximum_air_boost_db:
+            blockers.append(
+                {
+                    "label": "cumulative_air_boost_damage",
+                    "reason": "iterative_candidate_exceeds_total_air_boost_budget",
+                    "value": float(cumulative_summary.get("max_air_boost_db", 0.0)),
+                    "threshold": policy.maximum_air_boost_db,
                 }
             )
 
