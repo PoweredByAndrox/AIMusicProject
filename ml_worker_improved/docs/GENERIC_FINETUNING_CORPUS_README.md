@@ -780,12 +780,14 @@ python /app/tools/eval_generic_finetuning_controller_model.py \
 python /app/tools/run_generic_finetuning_controller_runtime_smoke_replay.py \
   --controller-model-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_model_from_hard_case_split_v1/generic_finetuning_controller_model.json \
   --replay-examples-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_hard_case_split_v1/hard_case_holdout_external_eval_examples.jsonl \
+  --hard-case-route-policy-json /app/lab_artifacts/no_reference_minus_route_expansion/hard_case_route_policy.json \
   --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_runtime_smoke_from_hard_case_split_v1 \
   --min-replay-examples 20
 
 python /app/tools/stage_generic_finetuning_controller_with_no_reference_selector.py \
   --controller-model-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_model_from_hard_case_split_v1/generic_finetuning_controller_model.json \
   --judge-jsonl /app/lab_artifacts/generic_finetuning_playbook_20260613/example_no_reference_score_matrix/no_reference_minus_candidate_score_matrix.jsonl \
+  --hard-case-route-policy-json /app/lab_artifacts/no_reference_minus_route_expansion/hard_case_route_policy.json \
   --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_integration_v1 \
   --score-mode minus \
   --min-selector-usable 1

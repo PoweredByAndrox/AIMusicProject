@@ -28,6 +28,12 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def write_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def controller_row(row_id: str, stem: str, route: str, accepted: bool) -> dict:
     return {
         "id": row_id,
@@ -82,6 +88,26 @@ def trained_controller(tmp_path: Path) -> dict:
         output_dir=tmp_path / "controller_model",
         min_examples_per_route=1,
     )
+
+
+def hard_case_policy(tmp_path: Path, **fields: object) -> Path:
+    payload = {
+        "schema": "no_reference_hard_case_route_policy.v1",
+        "run_id": "policy-test",
+        "track_id": "track-policy",
+        "hard_case_detected": True,
+        "trigger_reasons": [],
+        "training_objective_required": False,
+        "artifact_safe_route_required": False,
+        "artifact_safe_candidate_route_ids": [],
+        "selected_conditional_route_ids": [],
+        "route_allowed": False,
+        "route_reason": "",
+        "route_block_reason": "",
+        "release_ready": False,
+    }
+    payload.update(fields)
+    return write_json(tmp_path / "hard_case_route_policy.json", payload)
 
 
 def test_stages_controller_over_existing_selector_without_registry_edit(tmp_path: Path) -> None:
@@ -300,3 +326,85 @@ def test_repeat_run_replaces_progress_log_instead_of_appending(tmp_path: Path) -
 
     progress_rows = read_jsonl(output_dir / PROGRESS_NAME)
     assert [row["event"] for row in progress_rows] == ["start", "write_outputs", "finish"]
+
+
+def test_training_objective_policy_blocks_selector_staging(tmp_path: Path) -> None:
+    training_manifest = trained_controller(tmp_path)
+    judge_rows = write_jsonl(tmp_path / "judge.jsonl", [judge_row("good-route", track_id="track-training-required")])
+    policy_json = hard_case_policy(
+        tmp_path,
+        trigger_reasons=["model_gap_requires_separator_training_objective"],
+        training_objective_required=True,
+        route_block_reason="hard_case_requires_separator_training_objective",
+        route_reason="train_separator_attribution_objective_required",
+    )
+
+    manifest = stage_controller_with_selector(
+        controller_model_json=Path(training_manifest["outputs"]["model_json"]),
+        judge_jsonl=judge_rows,
+        output_dir=tmp_path / "stage",
+        score_mode="minus",
+        min_selector_usable=1,
+        hard_case_route_policy_json=policy_json,
+    )
+
+    assert manifest["promotion"]["status"] == "blocked_hard_case_requires_separator_training_objective"
+    assert manifest["promotion"]["can_stage_controller_candidate"] is False
+    assert manifest["integration_summary"]["hard_case_training_objective_required"] is True
+    assert manifest["integration_summary"]["controller_allowed_candidates"] == 0
+
+    decisions = read_jsonl(tmp_path / "stage" / INTEGRATION_DECISIONS_NAME)
+    assert decisions[0]["controller_action"] == "require_separator_training_objective"
+    assert decisions[0]["hard_case_route_policy_applied"] is True
+    assert decisions[0]["hard_case_policy_block_reason"] == "hard_case_requires_separator_training_objective"
+
+
+def test_artifact_safe_policy_reranks_selector_to_allowed_route(tmp_path: Path) -> None:
+    examples = write_jsonl(
+        tmp_path / "controller.jsonl",
+        [
+            controller_row("good1", "minus", "good-route", True),
+            controller_row("good2", "minus", "good-route", True),
+            controller_row("safe1", "minus", "safe-route", True),
+            controller_row("safe2", "minus", "safe-route", True),
+        ],
+    )
+    training_manifest = train_controller_model(
+        controller_examples_jsonl=examples,
+        output_dir=tmp_path / "controller_model",
+        min_examples_per_route=1,
+    )
+    judge_rows = write_jsonl(
+        tmp_path / "judge.jsonl",
+        [
+            judge_row("good-route", track_id="track-safe-required", score=0.95),
+            judge_row("safe-route", track_id="track-safe-required", score=0.90),
+        ],
+    )
+    policy_json = hard_case_policy(
+        tmp_path,
+        trigger_reasons=["pitch_guard_damage_regression"],
+        artifact_safe_route_required=True,
+        artifact_safe_candidate_route_ids=["safe-route"],
+        selected_conditional_route_ids=["safe-route"],
+        route_allowed=True,
+        route_reason="artifact_safe_route_for_damage_regression_blocker",
+    )
+
+    manifest = stage_controller_with_selector(
+        controller_model_json=Path(training_manifest["outputs"]["model_json"]),
+        judge_jsonl=judge_rows,
+        output_dir=tmp_path / "stage",
+        score_mode="minus",
+        min_selector_usable=1,
+        hard_case_route_policy_json=policy_json,
+    )
+
+    decisions = read_jsonl(tmp_path / "stage" / INTEGRATION_DECISIONS_NAME)
+    assert decisions[0]["selector_original_selected_candidate_id"] == "good-route"
+    assert decisions[0]["selected_candidate_id"] == "safe-route"
+    assert decisions[0]["controller_action"] == "allow_controller_reranked_candidate"
+    assert decisions[0]["hard_case_artifact_safe_route_required"] is True
+    assert decisions[0]["hard_case_allowed_route_ids"] == ["safe-route"]
+    assert manifest["integration_summary"]["hard_case_artifact_safe_route_required"] is True
+    assert manifest["integration_summary"]["controller_reranked_candidates"] == 1

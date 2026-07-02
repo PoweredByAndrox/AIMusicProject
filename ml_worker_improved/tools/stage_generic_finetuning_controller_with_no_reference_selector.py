@@ -13,6 +13,13 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.docker_runtime import require_docker_runtime  # noqa: E402
+from tools.hard_case_route_policy_controls import (  # noqa: E402
+    hard_case_allowed_route_ids,
+    hard_case_artifact_safe_route_required,
+    hard_case_policy_applies,
+    hard_case_policy_fields,
+    hard_case_training_objective_required,
+)
 from tools.no_reference_score_matrix import validate_mode  # noqa: E402
 from tools.run_no_reference_candidate_selector import (  # noqa: E402
     is_acceptable,
@@ -53,6 +60,12 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"Expected JSON object at {path}")
     return payload
+
+
+def read_optional_json(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    return read_json(path)
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -192,12 +205,19 @@ def controller_candidate_evaluation(
     score_mode: str,
     accept_threshold: float,
     rank: int,
+    hard_case_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy = hard_case_policy or {}
     stem = candidate_stem_type(candidate, score_mode)
     route_id = candidate_route_id(candidate)
     prior, match_kind, source_route_ids = resolve_controller_prior(model, priors, stem_type=stem, route_id=route_id)
     posterior = float(prior.get("posterior_accept_rate") or 0.0) if prior else None
-    if prior is None:
+    allowed_route_ids = set(hard_case_allowed_route_ids(policy))
+    if hard_case_training_objective_required(policy):
+        action = "require_separator_training_objective"
+    elif hard_case_artifact_safe_route_required(policy) and route_id not in allowed_route_ids:
+        action = "controller_block_hard_case_policy_route_mismatch"
+    elif prior is None:
         action = "manual_review_missing_controller_route"
     elif float(posterior or 0.0) >= accept_threshold:
         action = "allow_selector_candidate"
@@ -214,6 +234,7 @@ def controller_candidate_evaluation(
         "controller_matched_route_id": str(prior.get("route_id") or "") if prior else "",
         "controller_source_route_ids": source_route_ids,
         "posterior_accept_rate": posterior,
+        **hard_case_policy_fields(policy),
     }
 
 
@@ -225,14 +246,19 @@ def apply_controller_aware_rerank(
     priors: dict[tuple[str, str], dict[str, Any]],
     score_mode: str,
     accept_threshold: float,
+    hard_case_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy = hard_case_policy or {}
     original_route_id = selected_route_id(selector_row)
     base = dict(selector_row)
     base["selector_original_selected_candidate_id"] = original_route_id
     base["controller_rerank_applied"] = False
     base["controller_rerank_from_candidate_id"] = ""
     base["controller_rerank_evaluated_candidates"] = []
+    base.update(hard_case_policy_fields(policy))
     if not selector_is_usable(selector_row):
+        return base
+    if hard_case_training_objective_required(policy):
         return base
 
     ordered = sorted(
@@ -240,6 +266,9 @@ def apply_controller_aware_rerank(
         key=lambda row: (-row_score(row, score_mode), -row_confidence(row), str(row.get("candidate_id") or "")),
     )
     acceptable = [row for row in ordered if is_acceptable(row, score_mode)]
+    allowed_route_ids = set(hard_case_allowed_route_ids(policy))
+    if hard_case_artifact_safe_route_required(policy):
+        acceptable = [row for row in acceptable if candidate_route_id(row) in allowed_route_ids]
     evaluations: list[dict[str, Any]] = []
     for index, candidate in enumerate(acceptable, start=1):
         evaluation = controller_candidate_evaluation(
@@ -249,6 +278,7 @@ def apply_controller_aware_rerank(
             score_mode=score_mode,
             accept_threshold=accept_threshold,
             rank=index,
+            hard_case_policy=policy,
         )
         evaluations.append(evaluation)
         if evaluation["controller_action"] != "allow_selector_candidate":
@@ -281,14 +311,21 @@ def integration_decision(
     priors: dict[tuple[str, str], dict[str, Any]],
     score_mode: str,
     accept_threshold: float,
+    hard_case_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy = hard_case_policy or {}
     stem = stem_for_selector_row(selector_row, score_mode)
     route_id = selected_route_id(selector_row)
     selector_decision = str(selector_row.get("decision") or "")
     selector_usable = selector_is_usable(selector_row)
     prior, match_kind, source_route_ids = resolve_controller_prior(model, priors, stem_type=stem, route_id=route_id)
     posterior = float(prior.get("posterior_accept_rate") or 0.0) if prior else None
-    if selector_decision == "needs_segment_blend":
+    allowed_route_ids = set(hard_case_allowed_route_ids(policy))
+    if hard_case_training_objective_required(policy):
+        action = "require_separator_training_objective"
+    elif hard_case_artifact_safe_route_required(policy) and route_id not in allowed_route_ids:
+        action = "controller_block_hard_case_policy_route_mismatch"
+    elif selector_decision == "needs_segment_blend":
         action = "respect_selector_segment_blend_plan"
     elif not selector_usable:
         action = "respect_selector_block"
@@ -320,6 +357,7 @@ def integration_decision(
         "controller_source_route_ids": source_route_ids,
         "posterior_accept_rate": posterior,
         "route_recommendation": str(prior.get("recommendation") or "") if prior else "",
+        **hard_case_policy_fields(policy),
         "can_execute_without_audio_render": True,
         "delivery_allowed": False,
         "presentation_status": "controller_selector_integration_not_for_listen_pack",
@@ -342,6 +380,11 @@ def build_summary(
     )
     reranked = sum(1 for row in integration_rows if row["controller_action"] == "allow_controller_reranked_candidate")
     blocked = sum(1 for row in integration_rows if row["controller_action"] == "controller_block_selector_candidate")
+    policy_blocked = sum(
+        1
+        for row in integration_rows
+        if row["controller_action"] in {"require_separator_training_objective", "controller_block_hard_case_policy_route_mismatch"}
+    )
     missing = sum(1 for row in integration_rows if row["controller_missing_route"])
     return {
         "tracks": len(selector_rows),
@@ -351,13 +394,33 @@ def build_summary(
         "controller_allowed_candidates": allowed,
         "controller_reranked_candidates": reranked,
         "controller_blocked_candidates": blocked,
+        "hard_case_policy_blocked_candidates": policy_blocked,
         "controller_missing_routes": missing,
-        "controller_override_count": blocked + reranked,
+        "controller_override_count": blocked + reranked + policy_blocked,
         "selector_blocked_or_blend_tracks": len(selector_rows) - selector_usable,
+        "hard_case_route_policy_applied": any(row.get("hard_case_route_policy_applied") is True for row in integration_rows),
+        "hard_case_training_objective_required": any(
+            row.get("hard_case_training_objective_required") is True for row in integration_rows
+        ),
+        "hard_case_artifact_safe_route_required": any(
+            row.get("hard_case_artifact_safe_route_required") is True for row in integration_rows
+        ),
     }
 
 
 def promotion_status(summary: dict[str, Any]) -> tuple[str, str, bool]:
+    if summary.get("hard_case_training_objective_required") is True:
+        return (
+            "blocked_hard_case_requires_separator_training_objective",
+            "hard-case policy requires separator training objective before generic route staging",
+            False,
+        )
+    if int(summary.get("hard_case_policy_blocked_candidates") or 0) > 0:
+        return (
+            "blocked_hard_case_policy_route_mismatch",
+            "hard-case policy blocked selector routes outside the allowed artifact-safe route set",
+            False,
+        )
     if int(summary.get("selector_usable_tracks") or 0) < int(summary.get("min_selector_usable") or 0):
         return ("blocked_insufficient_selector_usable_tracks", "not enough selector-usable tracks for staging", False)
     if int(summary.get("controller_checked_candidates") or 0) <= 0:
@@ -375,6 +438,7 @@ def stage_controller_with_selector(
     score_mode: str = "both",
     min_selector_usable: int = 1,
     accept_threshold: float = 0.5,
+    hard_case_route_policy_json: Path | None = None,
 ) -> dict[str, Any]:
     if min_selector_usable <= 0:
         raise ValueError("min_selector_usable must be > 0")
@@ -390,11 +454,13 @@ def stage_controller_with_selector(
         "start",
         controller_model_json=str(controller_model_json),
         judge_jsonl=str(judge_jsonl),
+        hard_case_route_policy_json=str(hard_case_route_policy_json or ""),
         score_mode=score_mode,
         min_selector_usable=min_selector_usable,
         accept_threshold=accept_threshold,
     )
     model = read_json(controller_model_json)
+    hard_case_policy = read_optional_json(hard_case_route_policy_json)
     judge_rows = list(iter_jsonl(judge_jsonl))
     selector_result = select_candidates(judge_rows, score_mode=score_mode)
     raw_selector_rows = selector_result["rows"]
@@ -410,11 +476,19 @@ def stage_controller_with_selector(
             priors=priors,
             score_mode=score_mode,
             accept_threshold=accept_threshold,
+            hard_case_policy=hard_case_policy,
         )
         for row in raw_selector_rows
     ]
     integration_rows = [
-        integration_decision(row, model=model, priors=priors, score_mode=score_mode, accept_threshold=accept_threshold)
+        integration_decision(
+            row,
+            model=model,
+            priors=priors,
+            score_mode=score_mode,
+            accept_threshold=accept_threshold,
+            hard_case_policy=hard_case_policy,
+        )
         for row in selector_rows
     ]
     summary = build_summary(
@@ -427,6 +501,8 @@ def stage_controller_with_selector(
         {
             "controller_model_json": str(controller_model_json),
             "judge_jsonl": str(judge_jsonl),
+            "hard_case_route_policy_json": str(hard_case_route_policy_json or ""),
+            "hard_case_route_policy": hard_case_policy,
             "score_mode": score_mode,
             "min_selector_usable": min_selector_usable,
             "accept_threshold": accept_threshold,
@@ -446,6 +522,8 @@ def stage_controller_with_selector(
         "manifest_type": "generic_finetuning_controller_selector_integration",
         "controller_model_json": str(controller_model_json),
         "judge_jsonl": str(judge_jsonl),
+        "hard_case_route_policy_json": str(hard_case_route_policy_json or ""),
+        "hard_case_route_policy": hard_case_policy,
         "output_dir": str(output_dir),
         "score_mode": score_mode,
         "fingerprint": fingerprint,
@@ -493,6 +571,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stage a generic controller overlay on no-reference selector decisions.")
     parser.add_argument("--controller-model-json", type=Path, required=True)
     parser.add_argument("--judge-jsonl", type=Path, required=True)
+    parser.add_argument("--hard-case-route-policy-json", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--score-mode", choices=("vocal", "minus", "both"), default="both")
     parser.add_argument("--min-selector-usable", type=int, default=1)
@@ -509,6 +588,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = stage_controller_with_selector(
         controller_model_json=args.controller_model_json,
         judge_jsonl=args.judge_jsonl,
+        hard_case_route_policy_json=args.hard_case_route_policy_json,
         output_dir=args.output_dir,
         score_mode=args.score_mode,
         min_selector_usable=int(args.min_selector_usable),

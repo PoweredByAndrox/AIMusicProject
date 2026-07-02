@@ -17,6 +17,12 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def write_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def controller_row(row_id: str, stem: str, model: str, accepted: bool) -> dict:
     return {
         "id": row_id,
@@ -35,6 +41,26 @@ def controller_row(row_id: str, stem: str, model: str, accepted: bool) -> dict:
         "result": {"accepted": accepted},
         "trainable": True,
     }
+
+
+def hard_case_policy(tmp_path: Path, **fields: object) -> Path:
+    payload = {
+        "schema": "no_reference_hard_case_route_policy.v1",
+        "run_id": "runtime-policy-test",
+        "track_id": "track-runtime-policy",
+        "hard_case_detected": True,
+        "trigger_reasons": [],
+        "training_objective_required": False,
+        "artifact_safe_route_required": False,
+        "artifact_safe_candidate_route_ids": [],
+        "selected_conditional_route_ids": [],
+        "route_allowed": False,
+        "route_reason": "",
+        "route_block_reason": "",
+        "release_ready": False,
+    }
+    payload.update(fields)
+    return write_json(tmp_path / "hard_case_route_policy.json", payload)
 
 
 def test_runtime_smoke_replay_passes_controller_actions(tmp_path: Path) -> None:
@@ -126,3 +152,77 @@ def test_cli_writes_runtime_smoke_manifest(tmp_path: Path) -> None:
 
     manifest = read_json(tmp_path / "smoke" / MANIFEST_NAME)
     assert manifest["promotion"]["status"] == "runtime_smoke_replay_passed"
+
+
+def test_runtime_smoke_policy_blocks_training_objective_gap(tmp_path: Path) -> None:
+    train_examples = write_jsonl(
+        tmp_path / "train.jsonl",
+        [controller_row("good1", "minus", "good-route", True), controller_row("good2", "minus", "good-route", True)],
+    )
+    replay_examples = write_jsonl(tmp_path / "replay.jsonl", [controller_row("good3", "minus", "good-route", True)])
+    training_manifest = train_controller_model(
+        controller_examples_jsonl=train_examples,
+        output_dir=tmp_path / "train",
+        min_examples_per_route=1,
+    )
+    policy_json = hard_case_policy(
+        tmp_path,
+        trigger_reasons=["model_gap_requires_separator_training_objective"],
+        training_objective_required=True,
+        route_block_reason="hard_case_requires_separator_training_objective",
+        route_reason="train_separator_attribution_objective_required",
+    )
+
+    manifest = run_runtime_smoke_replay(
+        controller_model_json=Path(training_manifest["outputs"]["model_json"]),
+        replay_examples_jsonl=replay_examples,
+        output_dir=tmp_path / "smoke",
+        min_replay_examples=1,
+        min_action_accuracy=1.0,
+        hard_case_route_policy_json=policy_json,
+    )
+
+    assert manifest["runtime_smoke"]["hard_case_training_objective_required"] is True
+    assert manifest["runtime_smoke"]["action_accuracy"] == 0.0
+    assert manifest["promotion"]["status"] == "blocked_hard_case_requires_separator_training_objective"
+    assert manifest["promotion"]["can_stage_controller_candidate"] is False
+
+
+def test_runtime_smoke_policy_rejects_non_artifact_safe_route(tmp_path: Path) -> None:
+    train_examples = write_jsonl(
+        tmp_path / "train.jsonl",
+        [
+            controller_row("good1", "minus", "good-route", True),
+            controller_row("good2", "minus", "good-route", True),
+            controller_row("safe1", "minus", "safe-route", True),
+            controller_row("safe2", "minus", "safe-route", True),
+        ],
+    )
+    replay_examples = write_jsonl(tmp_path / "replay.jsonl", [controller_row("good3", "minus", "good-route", True)])
+    training_manifest = train_controller_model(
+        controller_examples_jsonl=train_examples,
+        output_dir=tmp_path / "train",
+        min_examples_per_route=1,
+    )
+    policy_json = hard_case_policy(
+        tmp_path,
+        trigger_reasons=["pitch_guard_damage_regression"],
+        artifact_safe_route_required=True,
+        artifact_safe_candidate_route_ids=["safe-route"],
+        selected_conditional_route_ids=["safe-route"],
+        route_allowed=True,
+        route_reason="artifact_safe_route_for_damage_regression_blocker",
+    )
+
+    manifest = run_runtime_smoke_replay(
+        controller_model_json=Path(training_manifest["outputs"]["model_json"]),
+        replay_examples_jsonl=replay_examples,
+        output_dir=tmp_path / "smoke",
+        min_replay_examples=1,
+        hard_case_route_policy_json=policy_json,
+    )
+
+    assert manifest["runtime_smoke"]["hard_case_artifact_safe_route_required"] is True
+    assert manifest["runtime_smoke"]["hard_case_policy_blocked_examples"] == 1
+    assert manifest["promotion"]["status"] == "blocked_hard_case_policy_route_mismatch"
+    assert manifest["promotion"]["can_stage_controller_candidate"] is False

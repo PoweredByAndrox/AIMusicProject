@@ -103,6 +103,13 @@ Damage-regression blockers only select a route registered for
 `generate_artifact_safe_variants`; if none is available the policy blocks
 instead of falling back to a more aggressive minus-focused route.
 
+Downstream controller gates must consume this artifact explicitly via
+`--hard-case-route-policy-json`. When `training_objective_required=true`,
+generic controller selector staging and runtime-smoke replay fail closed with
+`blocked_hard_case_requires_separator_training_objective`; when
+`artifact_safe_route_required=true`, they only allow routes listed in
+`artifact_safe_candidate_route_ids`.
+
 When a matrix-selected route is minus-only but a same-model `both` route is
 locally available, the policy selects the `both` route so the next candidate
 wave can produce a vocal+minus pair for the required gates. The policy also
