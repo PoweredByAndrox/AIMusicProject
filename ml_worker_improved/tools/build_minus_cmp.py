@@ -25,11 +25,13 @@ PROGRESS_NAME = "progress.jsonl"
 START_TIME = time.monotonic()
 IMPROVED_SCORE_DELTA = 0.02
 IMPROVED_LEAK_DELTA = -0.02
+CANDIDATE_WAVE_SCHEMA = "short_candidate_wave_listen_pack_manifest.v1"
 ACCEPTED_SELECTION_SCHEMAS = {
     "short_listen_repair_selection_pack_manifest.v1",
-    "short_candidate_wave_listen_pack_manifest.v1",
     "short_minus_phase_repair_selection_pack_manifest.v1",
 }
+DIAGNOSTIC_SELECTION_SCHEMAS = {CANDIDATE_WAVE_SCHEMA}
+SUPPORTED_SELECTION_SCHEMAS = ACCEPTED_SELECTION_SCHEMAS | DIAGNOSTIC_SELECTION_SCHEMAS
 BLOCKED_TRUE_FLAGS = (
     "release_ready",
     "can_publish_as_result",
@@ -210,6 +212,30 @@ def safety_flags() -> dict[str, bool]:
     }
 
 
+def selection_pack_delivery_failures(selection_pack: dict[str, Any]) -> list[str]:
+    schema = str(selection_pack.get("schema") or "")
+    if schema in ACCEPTED_SELECTION_SCHEMAS:
+        failed: list[str] = []
+        if selection_pack.get("delivery_status") != "accepted":
+            failed.append("selection_pack_delivery_status_not_accepted")
+        if selection_pack.get("delivery_allowed") is not True:
+            failed.append("selection_pack_delivery_allowed_not_true")
+        return failed
+    if schema == CANDIDATE_WAVE_SCHEMA:
+        failed = []
+        if selection_pack.get("delivery_status") != "blocked":
+            failed.append("selection_pack_candidate_wave_delivery_status_not_blocked")
+        if selection_pack.get("delivery_allowed") is not False:
+            failed.append("selection_pack_candidate_wave_delivery_allowed_not_false")
+        if selection_pack.get("presentation_status") not in {
+            "diagnostic_only_not_for_listen_pack",
+            "blocked_from_listen_pack",
+        }:
+            failed.append("selection_pack_candidate_wave_presentation_status_not_diagnostic")
+        return failed
+    return []
+
+
 def blocked_manifest(
     *,
     output_dir: Path,
@@ -296,12 +322,9 @@ def build_minus_cmp(
         failed.append("mid_pack_status_not_ready")
     if mid_pack.get("failed_checks") not in ([], None):
         failed.append("mid_pack_failed_checks_not_empty")
-    if selection_pack.get("schema") not in ACCEPTED_SELECTION_SCHEMAS:
+    if selection_pack.get("schema") not in SUPPORTED_SELECTION_SCHEMAS:
         failed.append("selection_pack_schema_unexpected")
-    if selection_pack.get("delivery_status") != "accepted":
-        failed.append("selection_pack_delivery_status_not_accepted")
-    if selection_pack.get("delivery_allowed") is not True:
-        failed.append("selection_pack_delivery_allowed_not_true")
+    failed.extend(selection_pack_delivery_failures(selection_pack))
     if selection_pack.get("failed_checks") not in ([], None):
         failed.append("selection_pack_failed_checks_not_empty")
     if not Path(mix_path).exists():

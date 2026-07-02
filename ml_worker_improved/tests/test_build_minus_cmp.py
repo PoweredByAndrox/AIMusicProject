@@ -117,8 +117,11 @@ def _candidate_wave_pack(tmp_path: Path) -> Path:
         root / "pack.json",
         {
             "schema": "short_candidate_wave_listen_pack_manifest.v1",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
+            "selection_status": "selected_for_diagnostic_ab",
+            "delivery_status": "blocked",
+            "delivery_allowed": False,
+            "presentation_status": "diagnostic_only_not_for_listen_pack",
+            "release_status": "not_release_ready",
             "release_ready": False,
             "can_publish_as_result": False,
             "selected_count": 1,
@@ -249,7 +252,7 @@ def test_build_minus_cmp_reads_real_selection_schema_and_source_audio(monkeypatc
     assert calls == [("old_full.flac", 48.0, 1.0), ("m001.flac", 48.0, 1.0)]
 
 
-def test_build_minus_cmp_accepts_candidate_wave_selection_schema(monkeypatch, tmp_path: Path) -> None:
+def test_build_minus_cmp_accepts_diagnostic_candidate_wave_selection_schema(monkeypatch, tmp_path: Path) -> None:
     mix = _write_audio(tmp_path / "mix.flac", freq=440.0)
     vocal = _write_audio(tmp_path / "vocal.flac", freq=550.0)
 
@@ -277,6 +280,29 @@ def test_build_minus_cmp_accepts_candidate_wave_selection_schema(monkeypatch, tm
     assert manifest["failed_checks"] == []
     rows = [json.loads(line) for line in (tmp_path / "cmp" / "rows.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows[0]["candidate_id"] == "cw001"
+
+
+def test_build_minus_cmp_blocks_stale_accepted_candidate_wave_pack(tmp_path: Path) -> None:
+    pack = _candidate_wave_pack(tmp_path)
+    payload = json.loads(pack.read_text(encoding="utf-8"))
+    payload["delivery_status"] = "accepted"
+    payload["delivery_allowed"] = True
+    payload["presentation_status"] = "accepted_for_listen_pack"
+    pack.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    manifest = build_minus_cmp(
+        mid_pack_json=_mid_pack(tmp_path),
+        selection_pack_json=pack,
+        output_dir=tmp_path / "cmp",
+        mix_path=_write_audio(tmp_path / "mix.flac", freq=440.0),
+        vocal_path=_write_audio(tmp_path / "vocal.flac", freq=550.0),
+        baseline_alias="old",
+    )
+
+    assert manifest["comparison_status"] == "blocked"
+    assert "selection_pack_candidate_wave_delivery_status_not_blocked" in manifest["failed_checks"]
+    assert "selection_pack_candidate_wave_delivery_allowed_not_false" in manifest["failed_checks"]
+    assert "selection_pack_candidate_wave_presentation_status_not_diagnostic" in manifest["failed_checks"]
 
 
 def test_build_minus_cmp_accepts_phase_repair_selection_schema(monkeypatch, tmp_path: Path) -> None:

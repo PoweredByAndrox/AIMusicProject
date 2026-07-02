@@ -73,13 +73,21 @@ def _cmp_report(tmp_path: Path, *, release_ready: bool = False) -> Path:
     )
 
 
-def _selection_pack(tmp_path: Path, *, schema: str = "short_listen_repair_selection_pack_manifest.v1") -> Path:
+def _selection_pack(
+    tmp_path: Path,
+    *,
+    schema: str = "short_listen_repair_selection_pack_manifest.v1",
+    delivery_status: str = "accepted",
+    delivery_allowed: bool = True,
+    presentation_status: str = "accepted_for_listen_pack",
+) -> Path:
     return _write_json(
         tmp_path / "rs" / "pack.json",
         {
             "schema": schema,
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
+            "delivery_status": delivery_status,
+            "delivery_allowed": delivery_allowed,
+            "presentation_status": presentation_status,
             "release_ready": False,
             "can_publish_as_result": False,
             "failed_checks": [],
@@ -134,7 +142,13 @@ def test_build_minus_cmp_switch_inputs_blocks_regressed_windows(tmp_path: Path) 
 def test_build_minus_cmp_switch_inputs_accepts_candidate_wave_pack_schema(tmp_path: Path) -> None:
     manifest = build_minus_cmp_switch_inputs(
         cmp_json=_cmp_report(tmp_path),
-        selection_pack_json=_selection_pack(tmp_path, schema="short_candidate_wave_listen_pack_manifest.v1"),
+        selection_pack_json=_selection_pack(
+            tmp_path,
+            schema="short_candidate_wave_listen_pack_manifest.v1",
+            delivery_status="blocked",
+            delivery_allowed=False,
+            presentation_status="diagnostic_only_not_for_listen_pack",
+        ),
         output_dir=tmp_path / "out",
         track_id="t001",
         mix_path=tmp_path / "mix.flac",
@@ -146,6 +160,29 @@ def test_build_minus_cmp_switch_inputs_accepts_candidate_wave_pack_schema(tmp_pa
     assert manifest["failed_checks"] == []
     assert manifest["alternate_candidate_count"] == 1
     assert manifest["improved_window_count"] == 1
+
+
+def test_build_minus_cmp_switch_inputs_blocks_stale_accepted_candidate_wave_pack(tmp_path: Path) -> None:
+    manifest = build_minus_cmp_switch_inputs(
+        cmp_json=_cmp_report(tmp_path),
+        selection_pack_json=_selection_pack(
+            tmp_path,
+            schema="short_candidate_wave_listen_pack_manifest.v1",
+            delivery_status="accepted",
+            delivery_allowed=True,
+            presentation_status="accepted_for_listen_pack",
+        ),
+        output_dir=tmp_path / "out",
+        track_id="t001",
+        mix_path=tmp_path / "mix.flac",
+        vocal_path=tmp_path / "voc.flac",
+        base_candidate_id="old",
+    )
+
+    assert manifest["input_status"] == "blocked"
+    assert "selection_pack_candidate_wave_delivery_status_not_blocked" in manifest["failed_checks"]
+    assert "selection_pack_candidate_wave_delivery_allowed_not_false" in manifest["failed_checks"]
+    assert "selection_pack_candidate_wave_presentation_status_not_diagnostic" in manifest["failed_checks"]
 
 
 def test_build_minus_cmp_switch_inputs_blocks_release_ready_cmp(tmp_path: Path) -> None:

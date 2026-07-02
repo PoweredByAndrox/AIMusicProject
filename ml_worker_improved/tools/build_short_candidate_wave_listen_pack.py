@@ -28,6 +28,13 @@ BLOCKED_NAME = "blocked.jsonl"
 SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
 START_TIME = time.monotonic()
+DIAGNOSTIC_DELIVERY_STATUS = "blocked"
+DIAGNOSTIC_PRESENTATION_STATUS = "diagnostic_only_not_for_listen_pack"
+DIAGNOSTIC_RELEASE_STATUS = "not_release_ready"
+DIAGNOSTIC_BLOCKERS = [
+    "candidate_wave_pack_is_diagnostic_only",
+    "requires_staged_aggregate_machine_gate_for_listen_delivery",
+]
 
 BLOCKED_TRUE_FLAGS = (
     "release_ready",
@@ -264,12 +271,15 @@ def copy_minus_audio(
             "windowed": windowed_judge,
         },
         "quality_warning_reasons": [str(reason) for reason in windowed_judge.get("reasons") or [] if str(reason)],
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
-        "release_status": "listen_preview_only",
+        "selection_status": "selected_for_diagnostic_ab",
+        "delivery_status": DIAGNOSTIC_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": DIAGNOSTIC_PRESENTATION_STATUS,
+        "release_status": DIAGNOSTIC_RELEASE_STATUS,
+        "delivery_blockers": list(DIAGNOSTIC_BLOCKERS),
         "release_ready": False,
         "can_publish_as_result": False,
+        "listenable": False,
         "semantic_quality_verified": False,
     }
 
@@ -387,8 +397,8 @@ def build_short_candidate_wave_listen_pack(
                 progress(progress_path, "copy_selected", index=index, candidate_id=cid)
 
     failed = stable_unique(failed)
-    accepted = bool(selected) and not failed
-    if not accepted:
+    selection_ready = bool(selected) and not failed
+    if not selection_ready:
         selected = []
         if audio_dir.exists():
             shutil.rmtree(audio_dir)
@@ -396,14 +406,16 @@ def build_short_candidate_wave_listen_pack(
     manifest = {
         "schema": "short_candidate_wave_listen_pack_manifest.v1",
         "pack_id": output_dir.name or "cw_listen",
-        "delivery_status": "accepted" if accepted else "blocked",
-        "delivery_allowed": accepted,
-        "presentation_status": "accepted_for_listen_pack" if accepted else "blocked_from_listen_pack",
-        "release_status": "listen_preview_only",
+        "selection_status": "selected_for_diagnostic_ab" if selection_ready else "blocked",
+        "delivery_status": DIAGNOSTIC_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": DIAGNOSTIC_PRESENTATION_STATUS if selection_ready else "blocked_from_listen_pack",
+        "release_status": DIAGNOSTIC_RELEASE_STATUS,
+        "delivery_blockers": list(DIAGNOSTIC_BLOCKERS) if selection_ready else [],
         "release_ready": False,
         "can_publish_as_result": False,
         "deliverable": False,
-        "listenable": accepted,
+        "listenable": False,
         "selected_count": len(selected),
         "blocked_candidate_count": len(blocked),
         "listen_audio_files": selected,

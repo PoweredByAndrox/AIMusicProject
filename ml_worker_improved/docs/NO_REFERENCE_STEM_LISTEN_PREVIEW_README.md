@@ -267,10 +267,14 @@ pair-incompatible rows or rows with warning reasons such as
 `phase_or_stereo_inconsistency` are excluded from replacement candidates.
 
 `tools/build_minus_cmp.py` can compare diagnostic mid-window clips against
-either `short_listen_repair_selection_pack_manifest.v1` or
-`short_candidate_wave_listen_pack_manifest.v1`. This lets the same comparison
-gate evaluate registered-model candidate-wave outputs without converting them
-into repair-selection artifacts or mixing candidates across unrelated tracks.
+accepted `short_listen_repair_selection_pack_manifest.v1` sources or diagnostic
+`short_candidate_wave_listen_pack_manifest.v1` sources. Candidate-wave inputs
+must remain `delivery_status=blocked`, `delivery_allowed=false`, and
+`presentation_status=diagnostic_only_not_for_listen_pack`; stale candidate-wave
+packs that still claim `accepted_for_listen_pack` are rejected. This lets the
+same comparison gate evaluate registered-model candidate-wave outputs without
+converting them into repair-selection artifacts or mixing candidates across
+unrelated tracks.
 
 For fresh candidate-wave outputs that already have `candidate_pool.jsonl` plus
 both no-reference minus judges, use
@@ -282,10 +286,14 @@ non-selected candidates to `blocked.jsonl`, and stores raw track ids,
 candidate ids, route ids, source paths, judge rows, sha256, and duration in
 `pack.json` / `selected.jsonl`. The route is packaging-only:
 `gpu_inference_skipped=true`, no inference/training/model changes are run, and
-`release_ready=false` / `can_publish_as_result=false` remain forced false. The
-resulting `short_candidate_wave_listen_pack_manifest.v1` remains
-staging/diagnostic material. Post-gate human-review routes reject it and require
-the staged aggregate pack plus an accepted machine gate.
+`release_ready=false` / `can_publish_as_result=false` remain forced false.
+Even when selection succeeds, the resulting
+`short_candidate_wave_listen_pack_manifest.v1` is diagnostic-only:
+`delivery_status=blocked`, `delivery_allowed=false`,
+`presentation_status=diagnostic_only_not_for_listen_pack`,
+`release_status=not_release_ready`, and `listenable=false`. The copied audio is
+for forensic A/B and same-window comparison only. Post-gate human-review routes
+reject it and require the staged aggregate pack plus an accepted machine gate.
 
 For a minus hard-case that already has failing middle/warning windows, first
 run `tools/build_minus_cmp.py` against the candidate-wave pack. Then rebuild the

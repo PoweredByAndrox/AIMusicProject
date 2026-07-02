@@ -145,9 +145,13 @@ def test_build_short_candidate_wave_listen_pack_selects_judge_accepted_minus(tmp
     )
 
     assert manifest["schema"] == "short_candidate_wave_listen_pack_manifest.v1"
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
-    assert manifest["presentation_status"] == "accepted_for_listen_pack"
+    assert manifest["selection_status"] == "selected_for_diagnostic_ab"
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "diagnostic_only_not_for_listen_pack"
+    assert manifest["release_status"] == "not_release_ready"
+    assert manifest["listenable"] is False
+    assert "requires_staged_aggregate_machine_gate_for_listen_delivery" in manifest["delivery_blockers"]
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
     assert manifest["selected_count"] == 1
@@ -155,9 +159,16 @@ def test_build_short_candidate_wave_listen_pack_selects_judge_accepted_minus(tmp
     row = manifest["listen_audio_files"][0]
     assert row["artifact_relative_path"] == "audio/min/m001.flac"
     assert row["stem_type"] == "minus"
+    assert row["selection_status"] == "selected_for_diagnostic_ab"
+    assert row["delivery_status"] == "blocked"
+    assert row["delivery_allowed"] is False
+    assert row["presentation_status"] == "diagnostic_only_not_for_listen_pack"
+    assert row["release_status"] == "not_release_ready"
+    assert row["listenable"] is False
     assert row["source_candidate_id"] == "both_long_candidate_hash_11111111111111111111111111111111"
     assert "long_candidate_hash" not in row["artifact_relative_path"]
     assert "very_long_raw_track" in json.dumps(row["source_row"], sort_keys=True)
+    assert "accepted_for_listen_pack" not in json.dumps(manifest, sort_keys=True)
     assert (tmp_path / "out" / "audio" / "min" / "m001.flac").exists()
 
 
