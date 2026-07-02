@@ -131,6 +131,23 @@ def write_repaired_dataset(dataset_dir: Path, rows: list[dict]) -> None:
     write_jsonl(dataset_dir / "repaired_audio_error_maps_index.jsonl", [])
 
 
+def add_window_scores(window: dict, *, accepted: bool) -> dict:
+    window.update(
+        {
+            "residual_energy": 0.01,
+            "mixture_consistency_error": 0.02,
+            "phase_collapse_score": 0.1 if accepted else 0.8,
+            "stereo_width_score": 0.3,
+            "vocal_bleed_proxy_score": 0.1 if accepted else 0.9,
+            "instrumental_bleed_proxy_score": 0.2,
+            "missing_detail_score": 0.1 if accepted else 0.7,
+            "transient_damage_score": 0.05,
+            "artifact_noise_score": 0.07,
+        }
+    )
+    return window
+
+
 def rows_by_id(rows: list[dict]) -> dict[str, dict]:
     return {str(row["row_id"]): row for row in rows}
 
@@ -249,6 +266,33 @@ def test_existing_source_judge_file_must_match_candidate_and_window(tmp_path: Pa
     assert "missing_exact_minus_window_judge_evidence" in minus_rows[row["window_id"]]["unsafe_reason_for_this_view"]
 
 
+def test_zero_acoustic_feature_rows_are_not_safe_for_stem_views(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    row = repaired_row(tmp_path, 10, stem_type="minus", accepted=False, pair_status="")
+    row["error_map_paths"] = {}
+    for name in (
+        "residual_energy",
+        "mixture_consistency_error",
+        "phase_collapse_score",
+        "stereo_width_score",
+        "vocal_bleed_proxy_score",
+        "instrumental_bleed_proxy_score",
+        "missing_detail_score",
+        "transient_damage_score",
+        "artifact_noise_score",
+    ):
+        row[name] = 0.0
+    write_repaired_dataset(dataset_dir, [row])
+
+    build_audio_error_training_views(dataset_dir=dataset_dir, output_dir=tmp_path / "views")
+    minus_rows = rows_by_id(read_jsonl(tmp_path / "views" / "minus_critic_training_view.jsonl"))
+
+    assert minus_rows[row["window_id"]]["safe_for_this_view"] is False
+    assert "missing_acoustic_feature_evidence" in minus_rows[row["window_id"]]["unsafe_reason_for_this_view"]
+
+
 def test_runtime_run_roots_add_strict_window_view_rows(tmp_path: Path) -> None:
     from tools.build_audio_error_training_views import build_audio_error_training_views
 
@@ -279,13 +323,24 @@ def test_runtime_run_roots_add_strict_window_view_rows(tmp_path: Path) -> None:
                 "track_id": "track-runtime",
                 "candidate_id": "cand-runtime",
                 "window_metrics": [
-                    {"start_sec": 0.0, "duration_sec": 1.0, "minus_decision": "accept_candidate", "minus_blockers": []},
-                    {
-                        "start_sec": 1.0,
-                        "duration_sec": 1.0,
-                        "minus_decision": "blocked_hard_case",
-                        "minus_blockers": ["severe_vocal_bleed_in_minus"],
-                    },
+                    add_window_scores(
+                        {
+                            "start_sec": 0.0,
+                            "duration_sec": 1.0,
+                            "minus_decision": "accept_candidate",
+                            "minus_blockers": [],
+                        },
+                        accepted=True,
+                    ),
+                    add_window_scores(
+                        {
+                            "start_sec": 1.0,
+                            "duration_sec": 1.0,
+                            "minus_decision": "blocked_hard_case",
+                            "minus_blockers": ["severe_vocal_bleed_in_minus"],
+                        },
+                        accepted=False,
+                    ),
                 ],
             }
         ],

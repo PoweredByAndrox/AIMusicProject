@@ -44,6 +44,7 @@ REQUIRED_ROW_FIELDS = {
     "unsafe_reason_for_this_view",
     "release_ready",
 }
+ACOUSTIC_FEATURE_METADATA_COLUMNS = {"route_id", "candidate_family", "stem_type", "window_start_sec", "window_end_sec", "window_duration_sec"}
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -73,6 +74,27 @@ def scalar_feature_present(row: dict[str, Any]) -> bool:
     return isinstance(features, dict) and bool(features)
 
 
+def error_map_present(row: dict[str, Any]) -> bool:
+    text = str(row.get("error_map_path") or "").strip()
+    return bool(text and Path(text).exists())
+
+
+def acoustic_feature_present(row: dict[str, Any]) -> bool:
+    features = row.get("feature_values")
+    if not isinstance(features, dict):
+        return False
+    for name, value in features.items():
+        if name in ACOUSTIC_FEATURE_METADATA_COLUMNS:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if abs(numeric) > 1.0e-12:
+            return True
+    return False
+
+
 def validate_window(row: dict[str, Any], row_key: str, errors: list[str]) -> None:
     try:
         if float(row.get("window_end_sec") or 0.0) <= float(row.get("window_start_sec") or 0.0):
@@ -98,8 +120,10 @@ def validate_safe_row(row: dict[str, Any], row_key: str, errors: list[str]) -> N
         errors.append(f"safe_row_missing_provenance_source_files:{row_key}")
     if row.get("unsafe_reason_for_this_view"):
         errors.append(f"safe_row_has_unsafe_reason:{row_key}")
-    if not row.get("error_map_path") and not scalar_feature_present(row):
+    if not error_map_present(row) and not scalar_feature_present(row):
         errors.append(f"safe_row_missing_error_map_or_features:{row_key}")
+    if not error_map_present(row) and not acoustic_feature_present(row):
+        errors.append(f"safe_row_missing_acoustic_feature_values:{row_key}")
 
 
 def validate_unsafe_row(row: dict[str, Any], row_key: str, errors: list[str]) -> None:

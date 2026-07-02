@@ -53,6 +53,7 @@ VIEW_READINESS_RULES = {
     "overall_accept": {"min_safe": 100, "min_positive": 1, "min_negative": 1},
 }
 RUN_MARKER_FILES = ("candidate_pool.jsonl", "minus_windowed_judge.jsonl", "vocal_windowed_judge.jsonl")
+ACOUSTIC_SCALAR_FEATURE_COLUMNS = tuple(name for name in SCALAR_FEATURE_COLUMNS if not name.startswith("window_"))
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -290,6 +291,28 @@ def has_error_map_or_scalar_features(row: dict[str, Any]) -> bool:
     return has_scalar_features(row)
 
 
+def has_acoustic_feature_evidence(row: dict[str, Any]) -> bool:
+    path = error_map_npz_path(row)
+    if path is not None and path.exists():
+        return True
+    for name in ACOUSTIC_SCALAR_FEATURE_COLUMNS:
+        if name in row and abs(as_float(row.get(name))) > 1.0e-12:
+            return True
+    return False
+
+
+def error_map_evidence_present(row: dict[str, Any]) -> bool:
+    path = error_map_npz_path(row)
+    return path is not None and path.exists()
+
+
+def view_feature_dict(row: dict[str, Any], *, map_cache: dict[str, dict[str, float]]) -> dict[str, Any]:
+    features = feature_dict(row, map_cache=map_cache)
+    features["acoustic_feature_evidence_present"] = 1.0 if has_acoustic_feature_evidence(row) else 0.0
+    features["error_map_evidence_present"] = 1.0 if error_map_evidence_present(row) else 0.0
+    return features
+
+
 def valid_window(row: dict[str, Any]) -> bool:
     try:
         return float(row.get("window_end_sec") or 0.0) > float(row.get("window_start_sec") or 0.0)
@@ -439,6 +462,8 @@ def common_reasons(row: dict[str, Any], *, stem_type: str | None = None) -> list
         reasons.append("missing_audio_file:minus_candidate_path")
     if not has_error_map_or_scalar_features(row):
         reasons.append("missing_error_maps_or_scalar_features")
+    elif not has_acoustic_feature_evidence(row):
+        reasons.append("missing_acoustic_feature_evidence")
     return stable_unique(reasons)
 
 
@@ -508,7 +533,7 @@ def base_view_row(
         "candidate_audio_path": candidate_audio_path,
         "mix_path": str(source_row.get("mix_path") or ""),
         "error_map_path": npz_text(source_row),
-        "feature_values": feature_dict(source_row, map_cache=map_cache),
+        "feature_values": view_feature_dict(source_row, map_cache=map_cache),
         "label": label if safe else None,
         "label_source": label_source if safe else "",
         "blocker_labels": list(blocker_labels if blocker_labels is not None else as_list(source_row.get("blockers"))),

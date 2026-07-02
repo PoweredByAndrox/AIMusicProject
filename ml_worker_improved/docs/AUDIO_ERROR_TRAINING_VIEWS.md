@@ -18,6 +18,12 @@ real `candidate_id`, real `route_id`, window boundaries, candidate audio path,
 mix path, error maps or scalar error features, and the relevant artifact source
 file.
 
+Scalar evidence must include at least one real acoustic score, or an existing
+error-map `.npz` must be available. Time/categorical fields such as `route_id`,
+`stem_type`, `window_start_sec`, and `window_end_sec` do not count as acoustic
+evidence by themselves. Rows that only contain those metadata fields remain
+diagnostic and are marked unsafe with `missing_acoustic_feature_evidence`.
+
 ## Views
 
 Outputs:
@@ -39,6 +45,15 @@ never a supervised label.
 
 Unsafe rows remain diagnostic rows with `safe_for_this_view=false` and
 `label=null`; they are not training labels.
+
+Every row's `feature_values` includes evidence flags:
+
+- `acoustic_feature_evidence_present`
+- `error_map_evidence_present`
+
+Target critic training excludes legacy or malformed safe rows whose
+`feature_values` do not contain acoustic evidence, even if an older view file
+marked them safe.
 
 ## Safety
 

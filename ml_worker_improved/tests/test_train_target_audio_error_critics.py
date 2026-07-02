@@ -185,6 +185,39 @@ def test_trainer_rejects_unsafe_unknown_route_and_synthetic_rows(tmp_path: Path)
     assert manifest["excluded_reason_counts"]["minus_critic"]["synthetic_candidate_id"] == 1
 
 
+def test_trainer_rejects_rows_without_acoustic_feature_values(tmp_path: Path) -> None:
+    from tools.train_target_audio_error_critics import train_target_audio_error_critics
+
+    rows = trainable_rows(tmp_path, "minus_critic")
+    zero_feature_row = target_view_row(tmp_path, "minus_critic", 30, label=0)
+    zero_feature_row["feature_values"] = {
+        "window_start_sec": 30.0,
+        "window_end_sec": 31.0,
+        "route_id": "route-a",
+        "candidate_family": "test",
+        "stem_type": "minus",
+    }
+    rows.append(zero_feature_row)
+    views_dir = tmp_path / "views"
+    write_views(views_dir, rows, trainable_rows(tmp_path, "vocal_critic"))
+
+    manifest = train_target_audio_error_critics(
+        views_dir=views_dir,
+        output_dir=tmp_path / "model",
+        targets=("minus", "vocal"),
+        model_kind="random_forest",
+        group_split="track_or_candidate",
+        shadow_only=True,
+        min_safe_rows=4,
+        min_positive=1,
+        min_negative=1,
+    )
+
+    assert manifest["minus_rows_available"] == 9
+    assert manifest["minus_rows_used"] == 8
+    assert manifest["excluded_reason_counts"]["minus_critic"]["missing_acoustic_feature_values"] == 1
+
+
 def test_trainer_skips_target_with_missing_negative_class(tmp_path: Path) -> None:
     from tools.train_target_audio_error_critics import train_target_audio_error_critics
 

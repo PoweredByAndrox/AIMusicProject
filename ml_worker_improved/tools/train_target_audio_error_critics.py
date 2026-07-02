@@ -71,6 +71,7 @@ SCALAR_FEATURE_COLUMNS = (
 )
 CATEGORICAL_FEATURE_COLUMNS = ("route_id", "candidate_family", "stem_type")
 TARGET_COLUMNS = ("accept_block_label",)
+ACOUSTIC_FEATURE_METADATA_COLUMNS = set(CATEGORICAL_FEATURE_COLUMNS) | {"window_start_sec", "window_end_sec", "window_duration_sec"}
 SAFETY_FLAGS = {
     "unsafe_rows_used": False,
     "pair_rows_used": False,
@@ -208,7 +209,18 @@ def target_row_exclusion_reasons(row: dict[str, Any], target: str) -> list[str]:
     features = row.get("feature_values")
     if not isinstance(features, dict) or not features:
         reasons.append("missing_feature_values")
+    elif not has_acoustic_feature_values(features):
+        reasons.append("missing_acoustic_feature_values")
     return sorted(set(reasons))
+
+
+def has_acoustic_feature_values(features: dict[str, Any]) -> bool:
+    for name, value in features.items():
+        if name in ACOUSTIC_FEATURE_METADATA_COLUMNS:
+            continue
+        if abs(as_float(value)) > 1.0e-12:
+            return True
+    return False
 
 
 def feature_dict(row: dict[str, Any], target: str) -> dict[str, Any]:

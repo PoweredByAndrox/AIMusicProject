@@ -113,3 +113,23 @@ def test_validator_rejects_safe_row_with_missing_provenance(tmp_path: Path) -> N
 
     assert result["ok"] is False
     assert any("safe_row_missing_candidate_id" in error for error in result["errors"])
+
+
+def test_validator_rejects_safe_row_without_acoustic_feature_values(tmp_path: Path) -> None:
+    from tools.validate_audio_error_training_views import validate_audio_error_training_views
+
+    row = base_view_row(2, label=0)
+    row["error_map_path"] = ""
+    row["feature_values"] = {
+        "window_start_sec": 2.0,
+        "window_end_sec": 3.0,
+        "route_id": "route-a",
+        "candidate_family": "test",
+        "stem_type": "minus",
+    }
+    write_views(tmp_path / "views", {"minus_critic": [row]})
+
+    result = validate_audio_error_training_views(tmp_path / "views")
+
+    assert result["ok"] is False
+    assert any("safe_row_missing_acoustic_feature_values" in error for error in result["errors"])
