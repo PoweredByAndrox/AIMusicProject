@@ -289,6 +289,82 @@ def test_instrumental_residual_vocal_is_companion_not_selected_vocal(tmp_path: P
     assert "selected_vocal_path" not in row
 
 
+def test_instrumental_product_alias_preserves_model_output_audio_path(tmp_path: Path) -> None:
+    candidate = execution_row(
+        tmp_path,
+        target_stem="instrumental",
+        model_id="becruily_instrumental_vocals",
+        vocal_residual_companion=True,
+    )
+    manifest_path = Path(candidate["candidate_manifest"]["path"])
+    audio_dir = manifest_path.parent
+    minus_path = audio_dir / "minus.flac"
+    instrumental_path = audio_dir / "instrumental.flac"
+    instrumental_path.write_bytes(b"instrumental model output")
+    manifest = read_json(manifest_path)
+    manifest["target_product_stem"] = "minus"
+    manifest["target_audio_path"] = str(instrumental_path)
+    manifest["target_product_audio_path"] = str(minus_path)
+    manifest["target_model_output_audio_path"] = str(instrumental_path)
+    manifest["role_safe_stem_contract"] = {
+        "source_manifest_target_stem": "instrumental",
+        "canonical_stem_type": "instrumental",
+        "user_facing_stem_role": "minus",
+        "manifest_stem_name": "instrumental",
+        "product_stem_type": "minus",
+        "model_output_stem_type": "instrumental",
+        "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+    }
+    manifest["target_stem_artifact"] = {
+        "path": str(instrumental_path),
+        "target_stem": "instrumental",
+        "source": "model_output",
+        "source_manifest_target_stem": "instrumental",
+        "canonical_stem_type": "instrumental",
+        "user_facing_stem_role": "minus",
+        "manifest_stem_name": "instrumental",
+        "product_stem_type": "minus",
+        "model_output_stem_type": "instrumental",
+        "product_audio_path": str(minus_path),
+        "model_output_audio_path": str(instrumental_path),
+        "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+    }
+    manifest["stems"]["instrumental"] = {
+        "path": str(instrumental_path),
+        "role": "target",
+        "source": "model_output",
+        "model_output": True,
+    }
+    manifest["stems"]["minus"] = {
+        "path": str(minus_path),
+        "role": "product_alias",
+        "alias_of": "instrumental",
+        "source_manifest_target_stem": "instrumental",
+        "canonical_stem_type": "instrumental",
+        "user_facing_stem_role": "minus",
+        "manifest_stem_name": "instrumental",
+        "product_stem_type": "minus",
+        "model_output_stem_type": "instrumental",
+        "product_audio_path": str(minus_path),
+        "model_output_audio_path": str(instrumental_path),
+        "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+    }
+    write_json(manifest_path, manifest)
+    execution_jsonl = write_jsonl(tmp_path / "execution.jsonl", [candidate])
+
+    result = build_inputs(execution_results_jsonls=[execution_jsonl])
+
+    row = result["rows"][0]
+    assert row["minus_path"] == str(minus_path)
+    assert row["instrumental_path"] == str(minus_path)
+    assert row["product_audio_path"] == str(minus_path)
+    assert row["model_output_audio_path"] == str(instrumental_path)
+    assert row["source_manifest_target_stem"] == "instrumental"
+    assert row["source_manifest_stem_type"] == "instrumental"
+    assert row["model_output_stem_type"] == "instrumental"
+    assert row["naming_contract"] == "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role"
+
+
 def test_candidate_ids_distinguish_same_model_different_minus_routes(tmp_path: Path) -> None:
     execution_jsonl = write_jsonl(
         tmp_path / "execution.jsonl",

@@ -124,6 +124,31 @@ def selected_minus_manifest_stem_name(*, source_target_stem: str, stem_paths: di
     return "minus"
 
 
+def selected_minus_entry(manifest: dict[str, Any], *, minus_path: str) -> dict[str, Any]:
+    entries = manifest_stem_entries(manifest)
+    normalized_minus_path = str(minus_path or "").replace("\\", "/").lower()
+    for stem_name in ("minus", "instrumental"):
+        entry = entries.get(stem_name)
+        stem_path = str((entry or {}).get("path") or "").replace("\\", "/").lower()
+        if stem_path and normalized_minus_path and stem_path == normalized_minus_path:
+            return dict(entry)
+    for stem_name in ("minus", "instrumental"):
+        entry = entries.get(stem_name)
+        if entry:
+            return dict(entry)
+    return {}
+
+
+def role_safe_contract(manifest: dict[str, Any]) -> dict[str, Any]:
+    value = manifest.get("role_safe_stem_contract")
+    return value if isinstance(value, dict) else {}
+
+
+def target_stem_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
+    value = manifest.get("target_stem_artifact")
+    return value if isinstance(value, dict) else {}
+
+
 def minus_role_metadata(
     *,
     candidate: dict[str, Any],
@@ -132,29 +157,71 @@ def minus_role_metadata(
     minus_path: str,
 ) -> dict[str, str]:
     source_target_stem = source_manifest_target_stem(candidate, manifest)
+    selected_entry = selected_minus_entry(manifest, minus_path=minus_path)
+    contract = role_safe_contract(manifest)
+    target_artifact = target_stem_artifact(manifest)
     manifest_stem_name = selected_minus_manifest_stem_name(
         source_target_stem=source_target_stem,
         stem_paths=stem_paths,
         minus_path=minus_path,
     )
-    canonical_stem_type = source_target_stem if source_target_stem in MINUS_TARGET_STEMS else manifest_stem_name
-    model_output_stem_type = manifest_stem_name or canonical_stem_type
+    manifest_stem_name = str(
+        selected_entry.get("manifest_stem_name")
+        or contract.get("manifest_stem_name")
+        or target_artifact.get("manifest_stem_name")
+        or manifest_stem_name
+    )
+    canonical_stem_type = str(
+        selected_entry.get("canonical_stem_type")
+        or contract.get("canonical_stem_type")
+        or target_artifact.get("canonical_stem_type")
+        or (source_target_stem if source_target_stem in MINUS_TARGET_STEMS else manifest_stem_name)
+    )
+    model_output_stem_type = str(
+        selected_entry.get("model_output_stem_type")
+        or contract.get("model_output_stem_type")
+        or target_artifact.get("model_output_stem_type")
+        or manifest_stem_name
+        or canonical_stem_type
+    )
     naming_contract = (
         INSTRUMENTAL_MINUS_NAMING_CONTRACT
         if model_output_stem_type == "instrumental" or source_target_stem == "instrumental"
-        else "source_manifest_audio_stem_mapped_to_minus_product_role"
+        else str(selected_entry.get("naming_contract") or "source_manifest_audio_stem_mapped_to_minus_product_role")
+    )
+    product_audio_path = str(
+        selected_entry.get("product_audio_path") or manifest.get("target_product_audio_path") or minus_path
+    )
+    model_output_audio_path = str(
+        selected_entry.get("model_output_audio_path")
+        or target_artifact.get("model_output_audio_path")
+        or manifest.get("target_model_output_audio_path")
+        or manifest.get("target_audio_path")
+        or minus_path
     )
     return {
         "source_manifest_target_stem": source_target_stem,
         "canonical_stem_type": canonical_stem_type,
-        "user_facing_stem_role": "minus",
+        "user_facing_stem_role": str(
+            selected_entry.get("user_facing_stem_role")
+            or contract.get("user_facing_stem_role")
+            or target_artifact.get("user_facing_stem_role")
+            or "minus"
+        ),
         "manifest_stem_name": manifest_stem_name,
-        "product_stem_type": "minus",
+        "product_stem_type": str(
+            selected_entry.get("product_stem_type")
+            or contract.get("product_stem_type")
+            or target_artifact.get("product_stem_type")
+            or "minus"
+        ),
         "judge_stem_type": "minus",
         "stem_type_source": "judge_product_role",
         "model_output_stem_type": model_output_stem_type,
         "source_manifest_stem_type": source_target_stem,
         "naming_contract": naming_contract,
+        "product_audio_path": product_audio_path,
+        "model_output_audio_path": model_output_audio_path,
     }
 
 

@@ -173,6 +173,82 @@ def source_stem_payload(source_manifest: dict[str, Any], stem_type: str) -> tupl
     return "", {}
 
 
+def source_role_safe_metadata(
+    *,
+    source_manifest: dict[str, Any],
+    payload: dict[str, Any],
+    stem_type: str,
+    source_key: str,
+    source_manifest_path: Path,
+    source_path: Path,
+) -> dict[str, str]:
+    contract = nested_dict(source_manifest, "role_safe_stem_contract")
+    target_artifact = nested_dict(source_manifest, "target_stem_artifact")
+    source_manifest_target_stem = str(
+        payload.get("source_manifest_target_stem")
+        or contract.get("source_manifest_target_stem")
+        or source_manifest.get("target_stem")
+        or source_key
+        or stem_type
+    ).strip().lower()
+    canonical_stem_type = str(
+        payload.get("canonical_stem_type")
+        or contract.get("canonical_stem_type")
+        or source_manifest_target_stem
+        or source_key
+        or stem_type
+    ).strip().lower()
+    product_stem_type = str(
+        payload.get("product_stem_type")
+        or contract.get("product_stem_type")
+        or source_manifest.get("target_product_stem")
+        or stem_type
+    ).strip().lower()
+    model_output_stem_type = str(
+        payload.get("model_output_stem_type")
+        or contract.get("model_output_stem_type")
+        or target_artifact.get("model_output_stem_type")
+        or canonical_stem_type
+        or source_key
+    ).strip().lower()
+    manifest_stem_name = str(
+        payload.get("manifest_stem_name")
+        or contract.get("manifest_stem_name")
+        or target_artifact.get("manifest_stem_name")
+        or source_key
+    ).strip().lower()
+    naming_contract = str(
+        payload.get("naming_contract")
+        or contract.get("naming_contract")
+        or target_artifact.get("naming_contract")
+        or "source_manifest_stem_matches_product_role"
+    )
+    return {
+        "source_manifest_target_stem": source_manifest_target_stem,
+        "canonical_stem_type": canonical_stem_type,
+        "user_facing_stem_role": str(
+            payload.get("user_facing_stem_role")
+            or contract.get("user_facing_stem_role")
+            or target_artifact.get("user_facing_stem_role")
+            or product_stem_type
+        ).strip().lower(),
+        "manifest_stem_name": manifest_stem_name,
+        "product_stem_type": product_stem_type,
+        "model_output_stem_type": model_output_stem_type,
+        "source_manifest_stem_type": source_manifest_target_stem,
+        "naming_contract": naming_contract,
+        "product_audio_path": str(payload.get("product_audio_path") or source_manifest_path),
+        "model_output_audio_path": str(
+            payload.get("model_output_audio_path")
+            or target_artifact.get("model_output_audio_path")
+            or source_manifest.get("target_model_output_audio_path")
+            or source_manifest.get("target_audio_path")
+            or source_manifest_path
+        ),
+        "copied_product_audio_path": str(source_path),
+    }
+
+
 def parse_override_stem_path(raw: str) -> tuple[str, Path]:
     if "=" not in raw:
         raise ValueError(f"override stem path must use stem=path: {raw}")
@@ -260,6 +336,14 @@ def build_stem_manifest_audio_pack(
                     "source_stem_key": source_key,
                     "source_audio_path": str(source_path),
                     "source_manifest_audio_path": str(source_manifest_path),
+                    **source_role_safe_metadata(
+                        source_manifest=source_manifest,
+                        payload=payload,
+                        stem_type=stem_type,
+                        source_key=source_key,
+                        source_manifest_path=source_manifest_path,
+                        source_path=source_path,
+                    ),
                     "audio_override_applied": stem_type in overrides,
                     "source_audio_path_resolution": path_resolution,
                     "listen_audio_path": str(listen_path),

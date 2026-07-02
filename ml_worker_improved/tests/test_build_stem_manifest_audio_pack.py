@@ -152,6 +152,106 @@ def test_stem_manifest_audio_pack_maps_mac_local_paths_to_artifact_mirror(tmp_pa
     assert stems["minus"]["source_audio_path_resolution"]["resolved_path"] == str(minus_path)
 
 
+def test_stem_manifest_audio_pack_preserves_minus_product_alias_contract(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    vocal_path = _write_audio(source_dir / "vocals.flac")
+    instrumental_path = _write_audio(source_dir / "instrumental.flac", amplitude=0.08)
+    minus_path = _write_audio(source_dir / "minus.flac", amplitude=0.08)
+    source_manifest = _write_json(
+        tmp_path / "stem_manifest.json",
+        {
+            "audio_path": str(tmp_path / "testing_stuff_music" / "source.mp3"),
+            "model_name": "becruily_instrumental_vocals",
+            "target_stem": "instrumental",
+            "target_product_stem": "minus",
+            "target_audio_path": str(instrumental_path),
+            "target_product_audio_path": str(minus_path),
+            "target_model_output_audio_path": str(instrumental_path),
+            "role_safe_stem_contract": {
+                "source_manifest_target_stem": "instrumental",
+                "canonical_stem_type": "instrumental",
+                "user_facing_stem_role": "minus",
+                "manifest_stem_name": "instrumental",
+                "product_stem_type": "minus",
+                "model_output_stem_type": "instrumental",
+                "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+            },
+            "target_stem_artifact": {
+                "path": str(instrumental_path),
+                "target_stem": "instrumental",
+                "source_manifest_target_stem": "instrumental",
+                "canonical_stem_type": "instrumental",
+                "user_facing_stem_role": "minus",
+                "manifest_stem_name": "instrumental",
+                "product_stem_type": "minus",
+                "model_output_stem_type": "instrumental",
+                "product_audio_path": str(minus_path),
+                "model_output_audio_path": str(instrumental_path),
+                "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+            },
+            "delivery_allowed": False,
+            "presentation_status": "diagnostic_candidate_not_for_listen_pack",
+            "release_status": "not_release_ready",
+            "release_ready": False,
+            "contract": {
+                "registered_model_candidate": True,
+                "application_reference_free": True,
+                "fallback_used": False,
+                "hidden_inference": False,
+                "per_track_hardcode_allowed": False,
+                "not_timestamp_hardcoded": True,
+            },
+            "execution_contract": {
+                "gpu_inference_required": True,
+                "gpu_inference_skipped": False,
+                "cuda_preflight": {"cuda_available": True, "resolved_device": "cuda"},
+            },
+            "stems": {
+                "vocals": {"path": str(vocal_path), "role": "companion"},
+                "instrumental": {"path": str(instrumental_path), "role": "target"},
+                "minus": {
+                    "path": str(minus_path),
+                    "role": "product_alias",
+                    "alias_of": "instrumental",
+                    "source_manifest_target_stem": "instrumental",
+                    "canonical_stem_type": "instrumental",
+                    "user_facing_stem_role": "minus",
+                    "manifest_stem_name": "instrumental",
+                    "product_stem_type": "minus",
+                    "model_output_stem_type": "instrumental",
+                    "product_audio_path": str(minus_path),
+                    "model_output_audio_path": str(instrumental_path),
+                    "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+                },
+            },
+        },
+    )
+
+    manifest = build_stem_manifest_audio_pack(
+        stem_manifest_json=source_manifest,
+        output_dir=tmp_path / "pack",
+        track_id="track-a",
+        stems=("minus",),
+    )
+
+    row = manifest["stems"][0]
+    assert row["stem_type"] == "minus"
+    assert row["source_stem_key"] == "minus"
+    assert row["source_manifest_target_stem"] == "instrumental"
+    assert row["canonical_stem_type"] == "instrumental"
+    assert row["user_facing_stem_role"] == "minus"
+    assert row["manifest_stem_name"] == "instrumental"
+    assert row["product_stem_type"] == "minus"
+    assert row["model_output_stem_type"] == "instrumental"
+    assert row["source_manifest_stem_type"] == "instrumental"
+    assert row["naming_contract"] == "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role"
+    assert row["product_audio_path"] == str(minus_path)
+    assert row["model_output_audio_path"] == str(instrumental_path)
+    assert row["source_manifest_audio_path"] == str(minus_path)
+    assert row["source_audio_path"] == str(minus_path)
+    assert Path(row["listen_audio_path"]).name == "minus.flac"
+
+
 def test_stem_manifest_audio_pack_blocks_release_ready_source(tmp_path: Path) -> None:
     manifest = build_stem_manifest_audio_pack(
         stem_manifest_json=_source_manifest(tmp_path, release_ready=True),

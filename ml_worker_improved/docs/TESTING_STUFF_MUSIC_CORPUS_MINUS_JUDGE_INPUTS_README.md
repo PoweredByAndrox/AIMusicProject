@@ -22,6 +22,9 @@ The bridge is diagnostic and fail-closed:
     selected from the manifest;
   - `user_facing_stem_role=minus` records the listener-facing role without
     renaming the underlying audio file;
+  - `product_audio_path` records the product-role minus file used for judging;
+  - `model_output_audio_path` records the canonical separator output file, for
+    example `instrumental.flac`;
 - writes `selected_vocal_path` only when the companion comes from a dedicated
   `target_stem=vocal`/`vocals` route. If a minus/instrumental route exposes
   `vocals.flac` only as a residual/source-conservation companion, the row uses

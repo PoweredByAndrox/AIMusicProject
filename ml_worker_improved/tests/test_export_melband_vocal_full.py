@@ -749,10 +749,24 @@ def test_main_listen_copy_uses_instrumental_for_single_stem_instrumental_contrac
 
     module.main()
 
+    manifest = json.loads((output_dir / "stem_manifest.json").read_text(encoding="utf-8"))
+    minus_alias_path = output_dir / "minus.flac"
+    instrumental_path = output_dir / "instrumental.flac"
+    assert minus_alias_path.exists()
+    assert minus_alias_path.read_bytes() == instrumental_path.read_bytes()
+    assert manifest["target_product_audio_path"] == str(minus_alias_path)
+    assert manifest["target_model_output_audio_path"] == str(instrumental_path)
+    assert manifest["target_stem_artifact"]["product_audio_path"] == str(minus_alias_path)
+    assert manifest["target_stem_artifact"]["model_output_audio_path"] == str(instrumental_path)
+    assert manifest["stems"]["minus"]["path"] == str(minus_alias_path)
+    assert manifest["stems"]["minus"]["product_audio_path"] == str(minus_alias_path)
+    assert manifest["stems"]["minus"]["model_output_audio_path"] == str(instrumental_path)
+    assert manifest["stems"]["minus"]["alias_of"] == "instrumental"
+
     listen_audio, _ = sf.read(str(listen_dir / "candidate.flac"), always_2d=True)
     assert float(np.max(np.abs(listen_audio - instrumental_audio))) < 1e-6
     candidate_map = json.loads((listen_dir / "candidate_map.json").read_text(encoding="utf-8"))
-    assert candidate_map["candidate.flac"].endswith("instrumental.flac")
+    assert candidate_map["candidate.flac"].endswith("minus.flac")
 
 
 def test_resolves_melband_outputs_case_insensitively(tmp_path: Path) -> None:
