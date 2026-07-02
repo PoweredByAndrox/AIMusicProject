@@ -24,16 +24,32 @@ HARD_CASE_BLOCKERS = {
     "severe_vocal_bleed_in_minus",
     "severe_phase_collapse",
     "severe_phase_comb_filtering",
+    "pitch_guard_full_region_stalled",
+    "scalar_score_only_pitch_guard_progress",
+    "trained_adapter_full_region_still_blocked",
+    "model_gap_requires_separator_training_objective",
+    "pitch_guard_damage_regression",
+}
+TRAINING_OBJECTIVE_BLOCKERS = {
+    "pitch_guard_full_region_stalled",
+    "scalar_score_only_pitch_guard_progress",
+    "trained_adapter_full_region_still_blocked",
+    "model_gap_requires_separator_training_objective",
+}
+ARTIFACT_SAFE_BLOCKERS = {
+    "pitch_guard_damage_regression",
 }
 MATRIX_TRIGGER_ROUTE = {
     "missing_safe_mode_candidate": "generate_minus_focused_variants",
     "severe_vocal_bleed_in_minus": "generate_minus_focused_variants",
     "severe_phase_collapse": "generate_phase_safe_variants",
     "severe_phase_comb_filtering": "generate_phase_safe_variants",
+    "pitch_guard_damage_regression": "generate_artifact_safe_variants",
 }
 MATRIX_TRIGGER_PRIORITY = (
     "severe_phase_collapse",
     "severe_phase_comb_filtering",
+    "pitch_guard_damage_regression",
     "severe_vocal_bleed_in_minus",
     "missing_safe_mode_candidate",
 )
@@ -122,6 +138,7 @@ def accepted_minus_count(rows: Iterable[dict[str, Any]]) -> int:
 def trigger_reasons_for(run_dir: Path) -> list[str]:
     run_manifest = read_json(run_dir / "run_manifest.json")
     minus_rows = read_jsonl(run_dir / "minus_windowed_judge.jsonl")
+    router_rows = read_jsonl(run_dir / "minus_hard_case_router.jsonl")
     candidate_rows = read_jsonl(run_dir / "candidate_pool.jsonl")
     selected_rows = read_jsonl(run_dir / "selected_candidates.jsonl")
     expansion = read_json(run_dir / "minus_route_expansion_manifest.json")
@@ -143,6 +160,19 @@ def trigger_reasons_for(run_dir: Path) -> list[str]:
                 "dominant_defect",
                 "failure_reason",
                 "judge_reason",
+            ),
+        ):
+            normalized = normalize_trigger(reason)
+            if normalized in HARD_CASE_BLOCKERS:
+                triggers.append(normalized)
+    for row in router_rows:
+        for reason in row_values(
+            row,
+            (
+                "blocker_type",
+                "failure_reason",
+                "route_block_reason",
+                "recommended_route",
             ),
         ):
             normalized = normalize_trigger(reason)
@@ -376,6 +406,14 @@ def build_hard_case_route_policy(
         configs,
         failed_model_names=matrix_failed_model_names,
     )
+    trigger_set = set(triggers)
+    training_objective_required = bool(trigger_set & TRAINING_OBJECTIVE_BLOCKERS)
+    artifact_safe_route_ids = matrix_selected_route_ids(
+        trigger_set & ARTIFACT_SAFE_BLOCKERS,
+        configs,
+        failed_model_names=matrix_failed_model_names,
+    )
+    artifact_safe_route_required = bool(trigger_set & ARTIFACT_SAFE_BLOCKERS)
 
     selected_route_ids: list[str] = []
     route_allowed = False
@@ -389,6 +427,16 @@ def build_hard_case_route_policy(
         route_block_reason = "unsupported_conditional_route_policy"
     elif not hard_case_detected:
         route_block_reason = "no_hard_case_trigger"
+    elif training_objective_required:
+        route_block_reason = "hard_case_requires_separator_training_objective"
+        route_reason = "train_separator_attribution_objective_required"
+    elif artifact_safe_route_ids:
+        selected_route_ids = [artifact_safe_route_ids[0]]
+        route_allowed = True
+        route_scope = "hard_case_only"
+        route_reason = "artifact_safe_route_for_damage_regression_blocker"
+    elif artifact_safe_route_required:
+        route_block_reason = "artifact_safe_route_not_available_for_damage_regression"
     elif matrix_triggers and matrix_route_ids:
         selected_route_ids = [matrix_route_ids[0]]
         route_allowed = True
@@ -415,6 +463,9 @@ def build_hard_case_route_policy(
         "matrix_candidate_score_trigger_reasons": matrix_triggers,
         "matrix_candidate_score_selected_route_ids": matrix_route_ids,
         "matrix_candidate_score_failed_model_names": matrix_failed_model_names,
+        "training_objective_required": training_objective_required,
+        "artifact_safe_route_required": artifact_safe_route_required,
+        "artifact_safe_candidate_route_ids": artifact_safe_route_ids,
         "selected_conditional_route_ids": selected_route_ids,
         "route_scope": route_scope,
         "route_reason": route_reason,
@@ -438,6 +489,9 @@ def write_policy_summary(path: Path, policy: dict[str, Any]) -> None:
         f"- matrix_candidate_score_trigger_reasons: {', '.join(policy.get('matrix_candidate_score_trigger_reasons') or [])}",
         f"- matrix_candidate_score_selected_route_ids: {', '.join(policy.get('matrix_candidate_score_selected_route_ids') or [])}",
         f"- matrix_candidate_score_failed_model_names: {', '.join(policy.get('matrix_candidate_score_failed_model_names') or [])}",
+        f"- training_objective_required: {str(policy.get('training_objective_required') is True).lower()}",
+        f"- artifact_safe_route_required: {str(policy.get('artifact_safe_route_required') is True).lower()}",
+        f"- artifact_safe_candidate_route_ids: {', '.join(policy.get('artifact_safe_candidate_route_ids') or [])}",
         f"- registry_profile: {policy.get('registry_profile') or ''}",
         f"- selected_conditional_route_ids: {', '.join(policy.get('selected_conditional_route_ids') or [])}",
         f"- route_scope: {policy.get('route_scope') or ''}",

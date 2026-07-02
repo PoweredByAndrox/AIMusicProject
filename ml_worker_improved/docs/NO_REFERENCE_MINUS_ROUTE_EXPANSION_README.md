@@ -81,6 +81,27 @@ compatibility, and warning-window comparison gates before any listen handoff.
 it never marks audio as release-ready. The policy derives hard-case triggers
 from blocked matrix `next_action`, result judge blockers, and self-judge proxy
 issues, then selects a locally available route from the registered job registry.
+It also consumes `minus_hard_case_router.jsonl` when present, so router-level
+blockers such as `pitch_guard_full_region_stalled`,
+`scalar_score_only_pitch_guard_progress`,
+`trained_adapter_full_region_still_blocked`,
+`model_gap_requires_separator_training_objective`, and
+`pitch_guard_damage_regression` stay machine-readable downstream instead of
+being flattened into scalar score progress.
+
+Full-region/model-gap blockers require a separator training objective and do
+not select another conditional route:
+
+```text
+training_objective_required=true
+route_allowed=false
+route_block_reason=hard_case_requires_separator_training_objective
+release_ready=false
+```
+
+Damage-regression blockers only select a route registered for
+`generate_artifact_safe_variants`; if none is available the policy blocks
+instead of falling back to a more aggressive minus-focused route.
 
 When a matrix-selected route is minus-only but a same-model `both` route is
 locally available, the policy selects the `both` route so the next candidate

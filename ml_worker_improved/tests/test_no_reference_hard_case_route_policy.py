@@ -163,6 +163,34 @@ def htdemucs_ft_both_config(*, available: bool = True) -> CandidateJobConfig:
     )
 
 
+def artifact_safe_minus_config(*, available: bool = True) -> CandidateJobConfig:
+    return CandidateJobConfig(
+        candidate_config_id="local_registered__artifact_safe_minus__minus",
+        route_id="local_registered__artifact_safe_minus__minus",
+        candidate_family="artifact_safe_existing_model",
+        target_mode="minus",
+        source_model_id="artifact_safe_minus",
+        source_tool="tools/run_registered_model_candidate.py",
+        route_family="artifact_safe",
+        entrypoint_type="python_script" if available else "unavailable",
+        command_template=("python", "/app/tools/run_registered_model_candidate.py"),
+        expected_outputs={"minus_path": ""},
+        gpu_required=True,
+        timeout_sec=900,
+        max_retries=0,
+        profile_allowed=("balanced", "exploration"),
+        safety_notes=("uses_existing_model_registry_entry", "no_model_download"),
+        supported_parameters=("source_audio_path", "output_dir", "model_id", "device", "target_stem"),
+        shared_execution_group_id="local_registered__artifact_safe_minus__minus",
+        produces_minus=True,
+        materialized_candidate_modes=("minus",),
+        hard_case_routes=("generate_artifact_safe_variants",),
+        available=available,
+        can_run_without_download=available,
+        can_run_without_registry_edit=True,
+    )
+
+
 def write_policy_inputs(
     run_dir: Path,
     *,
@@ -224,6 +252,10 @@ def write_policy_inputs(
             "release_ready": False,
         },
     )
+
+
+def write_minus_hard_case_router_rows(run_dir: Path, rows: list[dict]) -> None:
+    write_jsonl(run_dir / "minus_hard_case_router.jsonl", rows)
 
 
 def write_matrix_policy_input(path: Path, *, top_next_action: str, issue_counts: dict | None = None) -> Path:
@@ -451,6 +483,73 @@ def test_policy_detects_missing_safe_mode_candidate(tmp_path: Path) -> None:
 
     assert "missing_safe_mode_candidate" in policy["trigger_reasons"]
     assert policy["route_allowed"] is True
+
+
+def test_policy_consumes_router_training_objective_blockers_without_route(tmp_path: Path) -> None:
+    from tools.no_reference_hard_case_route_policy import build_hard_case_route_policy
+
+    write_policy_inputs(tmp_path, blockers=[])
+    training_blockers = [
+        "pitch_guard_full_region_stalled",
+        "scalar_score_only_pitch_guard_progress",
+        "trained_adapter_full_region_still_blocked",
+        "model_gap_requires_separator_training_objective",
+    ]
+    write_minus_hard_case_router_rows(
+        tmp_path,
+        [
+            {
+                "blocker_type": blocker,
+                "recommended_route": "train_separator_attribution_objective",
+                "candidate_id": "",
+            }
+            for blocker in training_blockers
+        ],
+    )
+
+    policy = build_hard_case_route_policy(
+        run_dir=tmp_path,
+        registry_configs=[htdemucs_6s_both_config()],
+        conditional_route_policy="hard_case_only",
+    )
+
+    assert policy["hard_case_detected"] is True
+    for blocker in training_blockers:
+        assert blocker in policy["trigger_reasons"]
+    assert policy["training_objective_required"] is True
+    assert policy["route_allowed"] is False
+    assert policy["selected_conditional_route_ids"] == []
+    assert policy["route_block_reason"] == "hard_case_requires_separator_training_objective"
+    assert policy["release_ready"] is False
+
+
+def test_policy_consumes_router_damage_regression_as_artifact_safe_route(tmp_path: Path) -> None:
+    from tools.no_reference_hard_case_route_policy import build_hard_case_route_policy
+
+    write_policy_inputs(tmp_path, blockers=[])
+    write_minus_hard_case_router_rows(
+        tmp_path,
+        [
+            {
+                "blocker_type": "pitch_guard_damage_regression",
+                "recommended_route": "generate_artifact_safe_variants",
+                "candidate_id": "pair-a",
+            }
+        ],
+    )
+
+    policy = build_hard_case_route_policy(
+        run_dir=tmp_path,
+        registry_configs=[htdemucs_6s_both_config(), artifact_safe_minus_config()],
+        conditional_route_policy="hard_case_only",
+    )
+
+    assert policy["hard_case_detected"] is True
+    assert "pitch_guard_damage_regression" in policy["trigger_reasons"]
+    assert policy["selected_conditional_route_ids"] == ["local_registered__artifact_safe_minus__minus"]
+    assert policy["route_reason"] == "artifact_safe_route_for_damage_regression_blocker"
+    assert policy["route_allowed"] is True
+    assert policy["release_ready"] is False
 
 
 def test_policy_does_not_select_without_hard_case_trigger(tmp_path: Path) -> None:
