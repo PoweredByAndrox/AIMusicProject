@@ -129,6 +129,15 @@ Scoring output:
 - `scored_vocal_critic_windows.jsonl`
 - `target_audio_error_critic_score_summary.json`
 
+Score-only rows are labeled diagnostic evidence, not training labels. The
+scorer preserves `label_source` and `score_only` on each scored window and writes
+a `score_only_audit` section in `target_audio_error_critic_score_summary.json`.
+If a score-only negative row is predicted as `accept_candidate`, the summary sets
+`score_only_blind_spot_detected=true` and the target status to
+`blocked_model_blind_spot`. This is a shadow-scoring failure signal for router
+diagnosis; it does not change thresholds, promote diagnostic rows, or mark any
+artifact as listen-ready.
+
 All artifacts keep `shadow_only=true`, `pair_rows_used=false`,
 `overall_rows_used=false`, `unsafe_rows_used=false`,
 `separator_training_started=false`, and `release_ready=false`.

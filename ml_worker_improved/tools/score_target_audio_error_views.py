@@ -34,6 +34,88 @@ SCORED_FILES = {
 }
 
 
+def top_counts(values: list[str], *, limit: int = 12) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value or "")
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit])
+
+
+def is_score_only_row(row: dict[str, Any], target: str) -> bool:
+    label_source = str(row.get("label_source") or "")
+    return label_source in set(TARGETS[target].get("score_only_label_sources", ()))
+
+
+def score_only_audit(target: str, rows: list[dict[str, Any]], scored_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    score_only_rows = 0
+    score_only_negative_rows = 0
+    score_only_positive_rows = 0
+    false_accept_rows = 0
+    false_reject_rows = 0
+    false_accept_sources: list[str] = []
+    false_accept_families: list[str] = []
+    false_accept_routes: list[str] = []
+    score_only_sources: list[str] = []
+    score_only_families: list[str] = []
+
+    for source_row, scored_row in zip(rows, scored_rows):
+        if not is_score_only_row(source_row, target):
+            continue
+        score_only_rows += 1
+        label = int(source_row.get("label"))
+        decision = str(scored_row.get("critic_decision") or "")
+        label_source = str(source_row.get("label_source") or "")
+        features = source_row.get("features") if isinstance(source_row.get("features"), dict) else {}
+        candidate_family = str(features.get("candidate_family") or source_row.get("candidate_family") or "")
+        route_id = str(source_row.get("route_id") or "")
+        score_only_sources.append(label_source)
+        score_only_families.append(candidate_family)
+        if label == 0:
+            score_only_negative_rows += 1
+            if decision == "accept_candidate":
+                false_accept_rows += 1
+                false_accept_sources.append(label_source)
+                false_accept_families.append(candidate_family)
+                false_accept_routes.append(route_id)
+        elif label == 1:
+            score_only_positive_rows += 1
+            if decision == "blocked_hard_case":
+                false_reject_rows += 1
+
+    false_accept_rate = 0.0
+    if score_only_negative_rows:
+        false_accept_rate = false_accept_rows / score_only_negative_rows
+    false_reject_rate = 0.0
+    if score_only_positive_rows:
+        false_reject_rate = false_reject_rows / score_only_positive_rows
+    if false_accept_rows:
+        integrity_status = "blocked_model_blind_spot"
+    elif score_only_negative_rows:
+        integrity_status = "passed_score_only_negative_audit"
+    elif score_only_rows:
+        integrity_status = "no_score_only_negative_rows"
+    else:
+        integrity_status = "no_score_only_rows"
+
+    return {
+        "target": target,
+        "score_only_rows_scored": score_only_rows,
+        "score_only_negative_rows": score_only_negative_rows,
+        "score_only_positive_rows": score_only_positive_rows,
+        "score_only_false_accept_rows": false_accept_rows,
+        "score_only_false_reject_rows": false_reject_rows,
+        "score_only_false_accept_rate": round(false_accept_rate, 6),
+        "score_only_false_reject_rate": round(false_reject_rate, 6),
+        "score_only_sources": top_counts(score_only_sources),
+        "score_only_candidate_families": top_counts(score_only_families),
+        "score_only_false_accept_sources": top_counts(false_accept_sources),
+        "score_only_false_accept_candidate_families": top_counts(false_accept_families),
+        "score_only_false_accept_routes": top_counts(false_accept_routes),
+        "score_only_integrity_status": integrity_status,
+    }
+
+
 def calibrated_model_path(target: str) -> str:
     return f"calibrated_{target}_audio_error_critic.joblib"
 
@@ -67,7 +149,7 @@ def apply_threshold_decisions(
         prediction["abstained"] = decision == "abstain"
 
 
-def scored_payload(row: dict[str, Any], prediction: dict[str, Any]) -> dict[str, Any]:
+def scored_payload(row: dict[str, Any], prediction: dict[str, Any], *, target: str) -> dict[str, Any]:
     return {
         "view_name": row["view_name"],
         "target_name": row["target_name"],
@@ -78,6 +160,8 @@ def scored_payload(row: dict[str, Any], prediction: dict[str, Any]) -> dict[str,
         "window_start_sec": row["window_start_sec"],
         "window_end_sec": row["window_end_sec"],
         "true_label": int(row["label"]),
+        "label_source": str(row.get("label_source") or ""),
+        "score_only": is_score_only_row(row, target),
         "predicted_accept_probability": prediction["predicted_accept_probability"],
         "predicted_block_probability": prediction["predicted_block_probability"],
         "predicted_blockers": prediction["predicted_blockers"],
@@ -113,10 +197,13 @@ def score_target_audio_error_views(
         "allow_abstain": bool(allow_abstain),
         "minus_rows_scored": 0,
         "vocal_rows_scored": 0,
+        "score_only_blind_spot_detected": False,
+        "score_only_audit": {},
         **SAFETY_FLAGS,
     }
     for target, cfg in TARGETS.items():
         rows_out: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         trained = manifest.get(f"{target}_critic_training_completed") is True
         model_path = model_dir / cfg["model_file"]
         if trained and model_path.exists():
@@ -129,9 +216,20 @@ def score_target_audio_error_views(
                 threshold_payload=(threshold_manifest.get("targets") or {}).get(target) if use_thresholds else None,
                 allow_abstain=allow_abstain,
             )
-            rows_out = [scored_payload(row, {**prediction, "calibration_source": calibration_source}) for row, prediction in zip(rows, predictions)]
+            rows_out = [
+                scored_payload(row, {**prediction, "calibration_source": calibration_source}, target=target)
+                for row, prediction in zip(rows, predictions)
+            ]
         write_jsonl(output_dir / SCORED_FILES[target], rows_out)
         summary[f"{target}_rows_scored"] = len(rows_out)
+        audit = score_only_audit(target, rows, rows_out)
+        summary["score_only_audit"][target] = audit
+        summary[f"{target}_score_only_rows_scored"] = audit["score_only_rows_scored"]
+        summary[f"{target}_score_only_negative_rows"] = audit["score_only_negative_rows"]
+        summary[f"{target}_score_only_false_accept_rows"] = audit["score_only_false_accept_rows"]
+        summary[f"{target}_score_only_integrity_status"] = audit["score_only_integrity_status"]
+        if audit["score_only_integrity_status"] == "blocked_model_blind_spot":
+            summary["score_only_blind_spot_detected"] = True
     write_json(output_dir / "target_audio_error_critic_score_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     return summary
