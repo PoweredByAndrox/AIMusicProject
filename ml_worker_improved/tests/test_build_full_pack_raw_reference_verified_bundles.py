@@ -423,7 +423,7 @@ def test_raw_reference_verified_bundles_records_build_failure_detail(tmp_path: P
     assert len(blocked[0]["failure_detail"]) <= 240
 
 
-def test_raw_reference_verified_bundles_hides_rejected_ground_truth_manifest(tmp_path: Path) -> None:
+def test_raw_reference_verified_bundles_hides_rejected_ground_truth_manifest_by_default(tmp_path: Path) -> None:
     export = _flstudio_export_with_rejected_reconstruction(tmp_path)
     raw_worklist = _raw_worklist(tmp_path, export)
 
@@ -432,7 +432,6 @@ def test_raw_reference_verified_bundles_hides_rejected_ground_truth_manifest(tmp
         output_dir=tmp_path / "verified",
         allowed_source_roots=[tmp_path / "golden_audio"],
         rights_status="project_owned",
-        require_full_mix_reconstruction=True,
     )
 
     assert manifest["verified_bundle_count"] == 0

@@ -14,9 +14,10 @@ Required per row:
 - `trainable=true`
 - `permission_status` in `owned`, `licensed`, `cleared`, `project_owned`
 - `human_verified=true` or `reference_verified=true`
-- human-only rows must carry `source_gate.accepted_machine_gate=true`; reference
-  rows must carry `source_gate.trainable_ground_truth=true` with accepted
-  full-mix reconstruction and `source_mix_1_to_1_claim_allowed=true`
+- human rows must carry `source_gate.accepted_machine_gate=true`; reference-only
+  rows must carry either `source_gate.trainable_ground_truth=true` with accepted
+  full-mix reconstruction and `source_mix_1_to_1_claim_allowed=true`, or
+  `source_gate.exact_reference_waveform_audit_accepted=true`
 - existing `source_audio_path`
 - existing `target_audio_path`
 - no `release_ready=true`
@@ -278,7 +279,10 @@ verified-bundle bridge must preserve those rows in `blocked.jsonl` and
 pack. `run_full_pack_aris_metadata_loop.py` can pass a formal collection handoff
 into that worklist with `--raw-reference-handoff-json`; it can run the verified
 bundle bridge inline only when the matching raw-reference allowed roots and
-rights status are supplied; otherwise it records
+rights status are supplied. The inline bridge requires accepted full-mix
+reconstruction by default; rejected reconstruction can be allowed only through
+the explicit diagnostic flag and must still be blocked by downstream intake.
+Otherwise it records
 `raw_reference_verified_bundle_status=not_requested`.
 When a raw candidate directory contains unrelated audio, the bridge may perform
 a mixed-directory diagnostic import so it can record `input_scope_contract`,

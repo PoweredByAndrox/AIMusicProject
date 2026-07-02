@@ -103,15 +103,18 @@ def row_unsafe_reasons(row: dict[str, Any]) -> list[str]:
         reasons.append("permission_not_trainable")
     if row.get("human_verified") is not True and row.get("reference_verified") is not True:
         reasons.append("not_human_or_reference_verified")
-    if row.get("reference_verified") is True:
-        if source_gate.get("trainable_ground_truth") is not True:
+    if row.get("human_verified") is True:
+        if source_gate.get("accepted_machine_gate") is not True:
+            reasons.append("missing_accepted_machine_gate_provenance")
+    elif row.get("reference_verified") is True:
+        has_trainable_ground_truth = source_gate.get("trainable_ground_truth") is True
+        has_exact_reference_audit = source_gate.get("exact_reference_waveform_audit_accepted") is True
+        if not (has_trainable_ground_truth or has_exact_reference_audit):
             reasons.append("missing_trainable_ground_truth_provenance")
-        if source_gate.get("full_mix_reconstruction_status") != "accepted":
+        if not has_exact_reference_audit and source_gate.get("full_mix_reconstruction_status") != "accepted":
             reasons.append("rejected_full_mix_reconstruction")
-        if source_gate.get("source_mix_1_to_1_claim_allowed") is not True:
+        if not has_exact_reference_audit and source_gate.get("source_mix_1_to_1_claim_allowed") is not True:
             reasons.append("source_mix_1_to_1_not_claimable")
-    elif source_gate.get("accepted_machine_gate") is not True:
-        reasons.append("missing_accepted_machine_gate_provenance")
     if row.get("release_ready") is True:
         reasons.append("input_row_release_ready_true")
     if row.get("delivery_allowed") is True:

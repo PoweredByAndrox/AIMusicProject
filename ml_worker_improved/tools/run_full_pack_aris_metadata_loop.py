@@ -513,7 +513,7 @@ def run_full_pack_aris_metadata_loop(
     raw_reference_allowed_source_roots: Sequence[Path] = (),
     raw_reference_recovery_material_candidate_roots: Sequence[Path] = (),
     raw_reference_rights_status: str = "",
-    raw_reference_require_full_mix_reconstruction: bool = False,
+    raw_reference_require_full_mix_reconstruction: bool = True,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     if min_unique_tracks <= 0:
@@ -1164,7 +1164,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--raw-reference-allowed-source-root", type=Path, action="append", default=[])
     parser.add_argument("--raw-reference-recovery-material-candidate-root", type=Path, action="append", default=[])
     parser.add_argument("--raw-reference-rights-status", default="")
-    parser.add_argument("--raw-reference-require-full-mix-reconstruction", action="store_true")
+    parser.add_argument(
+        "--raw-reference-require-full-mix-reconstruction",
+        dest="raw_reference_require_full_mix_reconstruction",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--raw-reference-allow-diagnostic-rejected-full-mix-reconstruction",
+        dest="raw_reference_require_full_mix_reconstruction",
+        action="store_false",
+    )
     return parser.parse_args(argv)
 
 

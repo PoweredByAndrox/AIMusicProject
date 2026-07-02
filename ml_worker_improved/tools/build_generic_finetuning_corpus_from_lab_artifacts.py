@@ -357,6 +357,33 @@ def reference_verified(payload: dict[str, Any]) -> bool:
     return False
 
 
+def accepted_reference_audit(payload: dict[str, Any]) -> bool:
+    for key in ("exact_reference_audit", "exact_reference_listen_audit"):
+        contract = payload.get(key)
+        if isinstance(contract, dict) and (
+            contract.get("verified") is True
+            or str(contract.get("delivery_status") or contract.get("status") or "").lower() == "accepted"
+        ):
+            return True
+    return False
+
+
+def reference_source_gate(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "accepted_machine_gate": accepted_machine_gate_contract(payload),
+        "reference_verified": reference_verified(payload),
+        "exact_reference_waveform_audit_accepted": accepted_reference_audit(payload),
+    }
+
+
+def reference_training_provenance_allowed(row: dict[str, Any]) -> bool:
+    source_gate = row.get("source_gate") if isinstance(row.get("source_gate"), dict) else {}
+    return (
+        source_gate.get("trainable_ground_truth") is True
+        or source_gate.get("exact_reference_waveform_audit_accepted") is True
+    )
+
+
 def deep_failure_labels(payload: Any) -> list[str]:
     labels: list[str] = []
 
@@ -517,6 +544,7 @@ def inventory_row(path: Path, artifact_root: Path, payload: dict[str, Any]) -> d
         "accepted_machine_gate_contract": accepted_machine_gate_contract(payload),
         "blocked_like": blocked_like(payload, failure_labels),
         "reference_verified": reference_verified(payload),
+        "source_gate": reference_source_gate(payload),
         "source_audio_path": source_audio_path(payload),
         "selected_audio_path": audio_path,
         "selected_audio_exists": bool(audio_file and audio_file.exists()),
@@ -589,16 +617,14 @@ def audio_training_example(
         "model_id": row["model_id"],
         "rating": feedback.rating,
         "human_score": feedback.human_score,
-        "human_verified": True,
+        "human_verified": feedback.human_verified is True,
+        "reference_verified": row["reference_verified"],
         "permission_status": permission_status,
         "split": feedback.split,
         "notes": feedback.notes,
         "trainable": permission_status in TRAINABLE_PERMISSION_STATUSES,
         "training_target": "audio_separator_or_stem_adapter",
-        "source_gate": {
-            "accepted_machine_gate": row["accepted_machine_gate_contract"],
-            "reference_verified": row["reference_verified"],
-        },
+        "source_gate": row["source_gate"],
         "safety": {
             "not_release_artifact": True,
             "requires_eval_before_promotion": True,
@@ -842,7 +868,7 @@ def build_corpus(
         if row["accepted_contract"]:
             positive_feedback = feedback and feedback.human_verified and feedback.rating in POSITIVE_RATINGS
             if positive_feedback and row["selected_audio_exists"]:
-                if not (row["accepted_machine_gate_contract"] or row["reference_verified"]):
+                if not row["accepted_machine_gate_contract"]:
                     excluded_rows.append(
                         excluded_example(row, "accepted_but_missing_accepted_machine_gate_provenance", feedback)
                     )
@@ -862,11 +888,20 @@ def build_corpus(
                     split="train",
                     notes="reference_verified_manifest",
                 )
-                candidate = audio_training_example(row, synthetic_feedback, permission_default=permission_default)
-                if candidate["trainable"]:
-                    audio_rows.append(candidate)
+                if not reference_training_provenance_allowed(row):
+                    excluded_rows.append(
+                        excluded_example(
+                            row,
+                            "reference_verified_but_missing_trainable_ground_truth_provenance",
+                            synthetic_feedback,
+                        )
+                    )
                 else:
-                    excluded_rows.append(excluded_example(row, "permission_not_trainable", synthetic_feedback))
+                    candidate = audio_training_example(row, synthetic_feedback, permission_default=permission_default)
+                    if candidate["trainable"]:
+                        audio_rows.append(candidate)
+                    else:
+                        excluded_rows.append(excluded_example(row, "permission_not_trainable", synthetic_feedback))
             else:
                 excluded_rows.append(excluded_example(row, "accepted_but_not_human_or_reference_verified", feedback))
 

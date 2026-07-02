@@ -411,7 +411,7 @@ def build_full_pack_raw_reference_verified_bundles(
     output_dir: Path,
     allowed_source_roots: Sequence[Path],
     rights_status: str,
-    require_full_mix_reconstruction: bool = False,
+    require_full_mix_reconstruction: bool = True,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -547,7 +547,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--allowed-source-root", type=Path, action="append", required=True)
     parser.add_argument("--rights-status", choices=sorted(ALLOWED_RIGHTS), required=True)
-    parser.add_argument("--require-full-mix-reconstruction", action="store_true")
+    parser.add_argument(
+        "--require-full-mix-reconstruction",
+        dest="require_full_mix_reconstruction",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--allow-diagnostic-rejected-full-mix-reconstruction",
+        dest="require_full_mix_reconstruction",
+        action="store_false",
+        help="Diagnostic-only escape hatch; produced bundles must still pass downstream intake before training.",
+    )
     return parser.parse_args(argv)
 
 

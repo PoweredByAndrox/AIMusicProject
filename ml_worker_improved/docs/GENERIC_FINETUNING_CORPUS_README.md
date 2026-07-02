@@ -610,8 +610,11 @@ Before a merged corpus enters GPU training, validate it with
 `tools/validate_verified_audio_training_corpus.py`. This gate requires every
 training row to have existing source/target audio, trainable permission, and
 either accepted-machine-gated human verification or reference verification with
-`source_gate.trainable_ground_truth=true`. It also blocks track leakage across
-split labels and never marks any artifact release-ready.
+`source_gate.trainable_ground_truth=true` or an accepted exact-reference
+waveform audit recorded as `source_gate.exact_reference_waveform_audit_accepted=true`.
+Reference metadata such as `reference_contract.verified=true` is not enough by
+itself. It also blocks track leakage across split labels and never marks any
+artifact release-ready.
 
 After a shared adapter matrix finishes, use
 `tools/build_train_ready_audio_model_decision.py` to decide whether the TRAIN

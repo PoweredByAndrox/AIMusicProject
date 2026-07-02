@@ -76,6 +76,32 @@ def accepted_machine_gate_vocal_manifest(tmp_path: Path) -> Path:
     )
 
 
+def accepted_reference_contract_manifest(tmp_path: Path, *, exact_reference_audit: bool = False) -> Path:
+    mix = tmp_path / "audio" / "reference_contract_mix.flac"
+    audio = tmp_path / "audio" / "reference_contract_vocal.flac"
+    mix.parent.mkdir(parents=True, exist_ok=True)
+    mix.write_bytes(b"mix")
+    audio.write_bytes(b"reference-vocal")
+    payload = {
+        "track_id": "reference-contract-track",
+        "stem_type": "vocal",
+        "delivery_status": "accepted",
+        "delivery_allowed": True,
+        "presentation_status": "accepted_for_listen_pack",
+        "release_status": "listen_preview_only",
+        "source_audio_path": str(mix),
+        "selected_vocal_path": str(audio),
+        "base_candidate_id": "reference_contract_vocal",
+        "reference_contract": {"verified": True},
+    }
+    if exact_reference_audit:
+        payload["exact_reference_audit"] = {"status": "accepted", "delivery_status": "accepted"}
+    return write_json(
+        tmp_path / "lab" / "reference_contract" / "reference_contract_manifest.json",
+        payload,
+    )
+
+
 def blocked_minus_manifest(tmp_path: Path) -> Path:
     audio = tmp_path / "audio" / "bad_minus.flac"
     audio.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +313,38 @@ def test_rejected_ground_truth_reconstruction_is_not_audio_trainable(tmp_path: P
     excluded = read_jsonl(tmp_path / "out" / "excluded_examples.jsonl")
     assert excluded[0]["exclude_reason"] == "ground_truth_reconstruction_not_trainable"
     assert excluded[0]["source_gate"]["trainable_ground_truth"] is False
+
+
+def test_reference_verified_metadata_without_trainable_source_gate_is_excluded(tmp_path: Path) -> None:
+    accepted_reference_contract_manifest(tmp_path, exact_reference_audit=False)
+
+    manifest = build_corpus(
+        artifact_root=tmp_path / "lab",
+        output_dir=tmp_path / "out",
+        human_feedback_jsonls=[],
+        permission_default="owned",
+    )
+
+    assert manifest["summary"]["audio_training_examples"] == 0
+    excluded = read_jsonl(tmp_path / "out" / "excluded_examples.jsonl")
+    assert excluded[0]["exclude_reason"] == "reference_verified_but_missing_trainable_ground_truth_provenance"
+
+
+def test_exact_reference_audit_is_explicit_reference_training_provenance(tmp_path: Path) -> None:
+    accepted_reference_contract_manifest(tmp_path, exact_reference_audit=True)
+
+    manifest = build_corpus(
+        artifact_root=tmp_path / "lab",
+        output_dir=tmp_path / "out",
+        human_feedback_jsonls=[],
+        permission_default="owned",
+    )
+
+    assert manifest["summary"]["audio_training_examples"] == 1
+    rows = read_jsonl(tmp_path / "out" / "audio_training_examples.jsonl")
+    assert rows[0]["human_verified"] is False
+    assert rows[0]["reference_verified"] is True
+    assert rows[0]["source_gate"]["exact_reference_waveform_audit_accepted"] is True
 
 
 def test_hard_eval_rows_are_not_controller_training_examples_by_default(tmp_path: Path) -> None:

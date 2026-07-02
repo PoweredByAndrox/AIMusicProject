@@ -112,6 +112,65 @@ def test_reference_verified_row_without_trainable_ground_truth_gate_fails_closed
     assert "rejected_full_mix_reconstruction" in rows[0]["unsafe_reasons"]
 
 
+def test_human_verified_row_uses_machine_gate_even_when_reference_flag_is_present(tmp_path: Path) -> None:
+    examples = _write_jsonl(
+        tmp_path / "examples.jsonl",
+        [
+            _row(
+                tmp_path,
+                "humanref",
+                "track-humanref",
+                human_verified=True,
+                reference_verified=True,
+                source_gate={
+                    "accepted_machine_gate": True,
+                    "reference_verified": True,
+                },
+            ),
+        ],
+    )
+
+    manifest = validate_verified_audio_training_corpus(
+        audio_training_examples_jsonl=examples,
+        output_dir=tmp_path / "out",
+        min_unique_tracks=1,
+    )
+
+    rows = _read_jsonl(Path(manifest["row_report_jsonl"]))
+    assert manifest["corpus_validation_status"] == "passed"
+    assert rows[0]["safe_for_training"] is True
+
+
+def test_reference_verified_row_with_exact_reference_audit_gate_passes(tmp_path: Path) -> None:
+    examples = _write_jsonl(
+        tmp_path / "examples.jsonl",
+        [
+            _row(
+                tmp_path,
+                "exactref",
+                "track-exactref",
+                human_verified=False,
+                reference_verified=True,
+                source_gate={
+                    "accepted_machine_gate": False,
+                    "reference_verified": True,
+                    "exact_reference_waveform_audit_accepted": True,
+                },
+            ),
+        ],
+    )
+
+    manifest = validate_verified_audio_training_corpus(
+        audio_training_examples_jsonl=examples,
+        output_dir=tmp_path / "out",
+        min_unique_tracks=1,
+    )
+
+    rows = _read_jsonl(Path(manifest["row_report_jsonl"]))
+    assert manifest["corpus_validation_status"] == "passed"
+    assert rows[0]["safe_for_training"] is True
+
+
 def test_dirty_or_unverified_rows_fail_closed(tmp_path: Path) -> None:
     examples = _write_jsonl(
         tmp_path / "examples.jsonl",

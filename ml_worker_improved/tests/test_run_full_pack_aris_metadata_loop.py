@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from tools.run_full_pack_aris_metadata_loop import run_full_pack_aris_metadata_loop
+from tools.run_full_pack_aris_metadata_loop import parse_args, run_full_pack_aris_metadata_loop
 
 
 FULL_STEMS = ["vocal", "minus", "drums", "bass", "other", "guitar", "piano"]
@@ -18,6 +18,46 @@ REQUIRED_GATES = [
     "minus_quality_audit_passed_without_warnings",
     "required_stem_train_ready_model_evidence",
 ]
+
+
+def test_raw_reference_full_mix_reconstruction_is_required_by_default() -> None:
+    args = parse_args(
+        [
+            "--machine-gate-json",
+            "machine.json",
+            "--repair-queue-json",
+            "repair.json",
+            "--full-pack-loop-plan-json",
+            "plan.json",
+            "--reference-gap-plan-json",
+            "gap.json",
+            "--existing-audio-training-examples-jsonl",
+            "audio.jsonl",
+            "--output-dir",
+            "out",
+        ]
+    )
+
+    assert args.raw_reference_require_full_mix_reconstruction is True
+
+    diagnostic_args = parse_args(
+        [
+            "--machine-gate-json",
+            "machine.json",
+            "--repair-queue-json",
+            "repair.json",
+            "--full-pack-loop-plan-json",
+            "plan.json",
+            "--reference-gap-plan-json",
+            "gap.json",
+            "--existing-audio-training-examples-jsonl",
+            "audio.jsonl",
+            "--output-dir",
+            "out",
+            "--raw-reference-allow-diagnostic-rejected-full-mix-reconstruction",
+        ]
+    )
+    assert diagnostic_args.raw_reference_require_full_mix_reconstruction is False
 
 
 def _write_json(path: Path, payload: dict) -> Path:
@@ -198,6 +238,10 @@ def _candidate_without_permission(tmp_path: Path, *, track_id: str, stem: str) -
                 "verified": True,
                 "source": "FL Studio split mixer tracks plus full mix supplied by user",
             },
+            "full_mix_reconstruction_contract": {
+                "status": "accepted",
+                "can_claim_source_mix_1_to_1": True,
+            },
             "mix": {"path": "source_mix.flac"},
             "stems": {stem: {"path": f"stems/{stem}.flac"}},
         },
@@ -314,6 +358,10 @@ def _verified_clean_bundle(root: Path, *, stem: str) -> Path:
             "ground_truth_contract": {
                 "verified": True,
                 "source": "FL Studio split mixer tracks plus full mix supplied by user",
+            },
+            "full_mix_reconstruction_contract": {
+                "status": "accepted",
+                "can_claim_source_mix_1_to_1": True,
             },
             "mix": {"path": "source_mix.flac"},
             "stems": {stem: {"path": f"stems/{stem}.flac"}},
