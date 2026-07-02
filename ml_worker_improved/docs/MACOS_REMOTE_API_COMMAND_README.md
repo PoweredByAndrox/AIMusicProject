@@ -29,6 +29,7 @@ Current local-network contract:
   configured home path above is valid only because it is an SMB-mounted Windows
   project share;
 - forbidden result roots are
+  `/Users/andrejviluha/aimusic_local_artifacts`,
   `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,
   `/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
   `/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, and

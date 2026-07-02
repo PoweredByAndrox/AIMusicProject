@@ -24,6 +24,7 @@ function ConvertTo-RemoteSingleQuoted {
 }
 
 $ForbiddenMacLocalArtifactRoots = @(
+    "/Users/andrejviluha/aimusic_local_artifacts",
     "/Users/andrejviluha/aimusic_local_artifacts/host_artifacts",
     "/Users/andrejviluha/aimusic_local_artifacts/mac_api",
     "/Users/andrejviluha/win_artifacts",

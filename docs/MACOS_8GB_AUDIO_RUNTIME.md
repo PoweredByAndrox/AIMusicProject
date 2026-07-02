@@ -145,6 +145,7 @@ Windows project share, then rerun with output roots directly under:
 ```
 
 The forbidden future result roots are
+`/Users/andrejviluha/aimusic_local_artifacts`,
 `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,
 `/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
 `/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, and

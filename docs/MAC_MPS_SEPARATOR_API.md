@@ -24,6 +24,7 @@ powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
 - Outputs must stay under the configured shared artifacts root:
   `/Users/andrejviluha/AIMusicProject_win/artifacts`.
 - Forbidden future result roots are
+  `/Users/andrejviluha/aimusic_local_artifacts`,
   `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,
   `/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
   `/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, and

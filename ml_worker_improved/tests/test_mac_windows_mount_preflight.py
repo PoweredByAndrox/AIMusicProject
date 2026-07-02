@@ -47,6 +47,23 @@ def test_mount_preflight_blocks_output_outside_allowed_project_roots(tmp_path: P
     assert preflight["can_write_route_artifacts"] is False
 
 
+def test_mount_preflight_blocks_mac_local_artifacts_parent(tmp_path: Path) -> None:
+    module = _load_module()
+    mount = tmp_path / "AIMusicProject_win"
+    mount.mkdir()
+
+    preflight = module.preflight_mac_windows_project_mount(
+        mac_windows_project_mount=mount,
+        output_path="/Users/andrejviluha/aimusic_local_artifacts/scratch/r001",
+        windows_project_root=r"D:\AIMusicProject",
+    )
+
+    assert preflight["preflight_status"] == "blocked"
+    assert preflight["blocked_reason"] == "mac_output_path_uses_forbidden_local_artifact_root"
+    assert preflight["forbidden_mac_local_artifact_root"] == "/Users/andrejviluha/aimusic_local_artifacts"
+    assert preflight["can_write_route_artifacts"] is False
+
+
 def test_mount_preflight_records_windows_path_and_removes_probe(tmp_path: Path) -> None:
     module = _load_module()
     mount = tmp_path / "win_project"

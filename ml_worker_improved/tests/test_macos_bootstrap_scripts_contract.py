@@ -37,6 +37,7 @@ class TestMacosBootstrapScriptsContract(unittest.TestCase):
         self.assertIn("IdentitiesOnly=yes", ssh_text)
         self.assertIn("BatchMode=yes", ssh_text)
         self.assertIn("/Users/andrejviluha/AIMusicProject_win", ssh_text)
+        self.assertIn('"/Users/andrejviluha/aimusic_local_artifacts"', ssh_text)
         self.assertIn("aimusic_local_artifacts/host_artifacts", ssh_text)
         self.assertIn("Forbidden Mac-local result artifact root", ssh_text)
         self.assertIn("$MacProjectRoot/artifacts", ssh_text)
@@ -57,6 +58,7 @@ class TestMacosBootstrapScriptsContract(unittest.TestCase):
         for doc in (runtime_doc, remote_api_doc):
             self.assertIn("powershell -ExecutionPolicy Bypass -File scripts\\macos-bootstrap-workspace-mount.ps1", doc)
             self.assertIn("id_ed25519_phone", doc)
+            self.assertIn("/Users/andrejviluha/aimusic_local_artifacts", doc)
             self.assertIn("/Users/andrejviluha/aimusic_local_artifacts/host_artifacts", doc)
             self.assertIn("/Users/andrejviluha/win_artifacts", doc)
             self.assertIn("forbidden", doc.lower())

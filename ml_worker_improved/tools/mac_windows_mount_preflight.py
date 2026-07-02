@@ -13,6 +13,7 @@ DEFAULT_WINDOWS_PROJECT_ROOT = r"D:\AIMusicProject"
 ALLOWED_PROJECT_ARTIFACT_ROOTS = ("artifacts", "lab_artifacts", "artifact_rag")
 PROBE_DIR_NAME = ".aimusic_mount_probe"
 FORBIDDEN_MAC_LOCAL_ARTIFACT_ROOTS = (
+    "/Users/andrejviluha/aimusic_local_artifacts",
     "/Users/andrejviluha/aimusic_local_artifacts/host_artifacts",
     "/Users/andrejviluha/aimusic_local_artifacts/mac_api",
     "/Users/andrejviluha/win_artifacts",
