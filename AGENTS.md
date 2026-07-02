@@ -5,6 +5,32 @@
 
 Работай в режиме **forced source-of-truth execution**.
 
+==================================================
+ALWAYS-APPLY ARIS SKILL SELECTION ROUTER RULE
+==================================================
+
+Перед любой нетривиальной задачей, где могут понадобиться ARIS skills, workflow-skills или project-local skills, сначала используй `aris-skill-router`.
+
+Обязательный contract:
+- сначала прочитай `docs/ARIS_skills_usage_map_ru.md`;
+- затем выведи `ARIS Skill Selection Block`;
+- выбирай 3-7 skills максимум;
+- если `docs/ARIS_skills_usage_map_ru.md` содержит broader preset на 8+ skills, урезай его до минимальной полезной цепочки 3-7;
+- если выбранный skill недоступен в текущей сессии, явно напиши unavailable/fallback/coverage loss/confidence impact;
+- для каждого selected skill укажи: name, зачем он нужен, когда будет применён, expected output;
+- перечисли минимум 3 tempting but rejected skills и почему они сейчас не нужны;
+- зафиксируй execution order, stop conditions и verification gates;
+- после selection block читай `SKILL.md` только выбранных skills перед их выполнением;
+- не подключай skills пачкой "на всякий случай";
+- не используй research-heavy skills для простого bugfix;
+- не запускай `auto-review-loop` до reproduction / source-of-truth evidence;
+- не используй architecture/refactor skills, пока root cause не доказывает архитектурную проблему;
+- не используй fallback/retry/sleep/silent catch как fix, если это не доказано architecture-correct;
+- one patch = one hypothesis;
+- если hypothesis failed, сначала запиши failed-hypothesis note, потом пробуй следующую.
+
+Этот selection block не заменяет forced source-of-truth pass, Code Index/CodeGraph routing, tests, validation или code review. Он определяет минимальную цепочку skills до выполнения работы.
+
 Твоя задача:
 НЕ опираться на память, summaries, старые отчёты или поверхностный просмотр.
 Сначала ты обязан прочитать код, тесты, docs и артефакты, и только потом делать выводы.
