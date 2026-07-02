@@ -23,6 +23,10 @@ Current local-network contract:
 
 - Windows share: `AIMusicProject` -> `D:\AIMusicProject`;
 - Mac mount path: `/Users/andrejviluha/AIMusicProject_win`;
+- `scripts\macos-ssh.ps1` exports `AIMUSIC_MAC_PROJECT_ROOT`,
+  `AIMUSIC_MAC_ARTIFACT_ROOT`, `AIMUSIC_MAC_LAB_ARTIFACTS_ROOT`, and
+  `AIMUSIC_MAC_ARTIFACT_RAG_ROOT` for ad-hoc `-RemoteCommand` runs, so result
+  artifacts can be written directly into the mounted Windows project workspace;
 - SMB account: `MacAudioApi` with write access to the project artifact roots;
 - a Mac route must not write production artifacts to Mac-local home paths,
   `/tmp`, or Apple-container scratch as the final artifact location; the

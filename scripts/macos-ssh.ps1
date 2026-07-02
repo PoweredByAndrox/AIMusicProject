@@ -23,10 +23,21 @@ function ConvertTo-RemoteSingleQuoted {
     return "'" + $Value.Replace("'", "'""'""'") + "'"
 }
 
+function Join-RemotePosixPath {
+    param(
+        [string]$Root,
+        [string]$Child
+    )
+    return $Root.TrimEnd("/") + "/" + $Child.TrimStart("/")
+}
+
 $ForbiddenMacLocalArtifactRoots = @(
     "/Users/andrejviluha/aimusic_local_artifacts",
     "/Users/andrejviluha/aimusic_local_artifacts/host_artifacts",
     "/Users/andrejviluha/aimusic_local_artifacts/mac_api",
+    '$HOME/aimusic_local_artifacts',
+    '${HOME}/aimusic_local_artifacts',
+    '~/aimusic_local_artifacts',
     "/Users/andrejviluha/win_artifacts",
     "/Users/andrejviluha/artifacts",
     "/tmp/artifacts"
@@ -74,11 +85,18 @@ if ([string]::IsNullOrWhiteSpace($RemoteCommand)) {
     exit $LASTEXITCODE
 }
 
+$MacArtifactRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "artifacts"
+$MacLabArtifactsRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "lab_artifacts"
+$MacArtifactRagRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "artifact_rag"
+
 $forbiddenRoot = Get-ForbiddenMacLocalArtifactRoot -Command $RemoteCommand
 if (-not [string]::IsNullOrWhiteSpace($forbiddenRoot)) {
     throw "Forbidden Mac-local result artifact root in RemoteCommand: $forbiddenRoot. Write result artifacts directly under $MacProjectRoot/artifacts, $MacProjectRoot/lab_artifacts, or $MacProjectRoot/artifact_rag."
 }
 
 $remoteRoot = ConvertTo-RemoteSingleQuoted -Value $MacProjectRoot
-& ssh @sshArgs "cd $remoteRoot && $RemoteCommand"
+$remoteArtifactRoot = ConvertTo-RemoteSingleQuoted -Value $MacArtifactRoot
+$remoteLabArtifactsRoot = ConvertTo-RemoteSingleQuoted -Value $MacLabArtifactsRoot
+$remoteArtifactRagRoot = ConvertTo-RemoteSingleQuoted -Value $MacArtifactRagRoot
+& ssh @sshArgs "cd $remoteRoot && export AIMUSIC_MAC_PROJECT_ROOT=$remoteRoot && export AIMUSIC_MAC_ARTIFACT_ROOT=$remoteArtifactRoot && export AIMUSIC_MAC_LAB_ARTIFACTS_ROOT=$remoteLabArtifactsRoot && export AIMUSIC_MAC_ARTIFACT_RAG_ROOT=$remoteArtifactRagRoot && $RemoteCommand"
 exit $LASTEXITCODE

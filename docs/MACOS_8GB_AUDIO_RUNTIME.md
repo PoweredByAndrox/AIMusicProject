@@ -125,6 +125,13 @@ Mac command -> /Users/andrejviluha/AIMusicProject_win/<artifact-root>/<short-id>
 /Users/andrejviluha/AIMusicProject_win -> SMB share -> D:\AIMusicProject
 ```
 
+The reusable Windows wrapper `scripts\macos-ssh.ps1` exports canonical Mac-side
+roots into every `-RemoteCommand`: `AIMUSIC_MAC_PROJECT_ROOT`,
+`AIMUSIC_MAC_ARTIFACT_ROOT`, `AIMUSIC_MAC_LAB_ARTIFACTS_ROOT`, and
+`AIMUSIC_MAC_ARTIFACT_RAG_ROOT`. Ad-hoc Mac commands must write result
+artifacts through those env roots, or through the same direct paths under
+`/Users/andrejviluha/AIMusicProject_win`.
+
 Current verified mount contract:
 
 - Windows project path: `D:\AIMusicProject`
