@@ -238,7 +238,7 @@ def test_missing_expected_manifest_fails_after_command_without_fallback() -> Non
         assert "expected_manifest_missing" in failure_manifest.read_text(encoding="utf-8")
 
 
-def test_registered_multistem_instrumental_job_materializes_minus_target_manifest() -> None:
+def test_registered_multistem_instrumental_job_rejects_stem_sum_minus_materialization() -> None:
     executor = _load_executor_module()
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
@@ -282,31 +282,24 @@ def test_registered_multistem_instrumental_job_materializes_minus_target_manifes
                 encoding="utf-8",
             )
 
-        manifest = executor.run_registered_model_candidate(
-            model_id="demo_multistem_instrumental_model",
-            source_audio_path=source_path,
-            output_dir=root / "candidate",
-            registry=_demo_registry(root),
-            command_runner=fake_runner,
-            target_stem="minus",
+        with pytest.raises(RuntimeError, match="summing non-vocal stem outputs is not allowed"):
+            executor.run_registered_model_candidate(
+                model_id="demo_multistem_instrumental_model",
+                source_audio_path=source_path,
+                output_dir=root / "candidate",
+                registry=_demo_registry(root),
+                command_runner=fake_runner,
+                target_stem="minus",
+            )
+
+        execution_manifest = json.loads(
+            (root / "candidate" / "registry_candidate_execution_manifest.json").read_text(encoding="utf-8")
         )
-
-        assert manifest["status"] == "completed"
-        assert manifest["candidate_manifest"]["target_stem"] == "minus"
-        target_audio_path = Path(manifest["candidate_manifest"]["target_audio_path"])
-        assert target_audio_path.exists()
-
-        target_audio, observed_sample_rate = sf.read(target_audio_path, always_2d=True)
-        assert observed_sample_rate == sample_rate
-        np.testing.assert_allclose(target_audio, drums + bass + other, atol=1e-4)
-
-        candidate_manifest = json.loads((root / "candidate" / "stem_manifest.json").read_text(encoding="utf-8"))
-        assert candidate_manifest["target_stem"] == "minus"
-        assert candidate_manifest["stems"]["minus"]["path"] == str(target_audio_path)
-        assert candidate_manifest["stems"]["instrumental"]["path"] == str(target_audio_path)
-        assert candidate_manifest["target_stem_artifact"]["source"] == "sum_non_vocal_stems"
-        assert candidate_manifest["delivery_allowed"] is False
-        assert candidate_manifest["release_ready"] is False
+        assert execution_manifest["status"] == "failed"
+        assert execution_manifest["reason"] == "target_stem_materialization_failed"
+        assert execution_manifest["error"]["message"].startswith(
+            "minus target requires an explicit minus or instrumental model output"
+        )
 
 
 def test_hq_full_stem_minus_target_skips_melody_export_step() -> None:
@@ -336,20 +329,24 @@ def test_hq_full_stem_minus_target_skips_melody_export_step() -> None:
                 encoding="utf-8",
             )
 
-        manifest = executor.run_registered_model_candidate(
-            model_id="demo_hq_full_stem_exporter",
-            source_audio_path=source_path,
-            output_dir=root / "candidate",
-            registry=_demo_registry(root),
-            command_runner=fake_runner,
-            device="cuda",
-            target_stem="minus",
-        )
+        with pytest.raises(RuntimeError, match="summing non-vocal stem outputs is not allowed"):
+            executor.run_registered_model_candidate(
+                model_id="demo_hq_full_stem_exporter",
+                source_audio_path=source_path,
+                output_dir=root / "candidate",
+                registry=_demo_registry(root),
+                command_runner=fake_runner,
+                device="cuda",
+                target_stem="minus",
+            )
 
-        assert manifest["status"] == "completed"
         assert "--no-melody-stem" in executed_commands[0]
-        assert manifest["candidate_manifest"]["target_stem"] == "minus"
-        assert manifest["candidate_manifest"]["target_source"] == "sum_non_vocal_stems"
+
+        execution_manifest = json.loads(
+            (root / "candidate" / "registry_candidate_execution_manifest.json").read_text(encoding="utf-8")
+        )
+        assert execution_manifest["status"] == "failed"
+        assert execution_manifest["reason"] == "target_stem_materialization_failed"
 
 
 def test_hq_full_stem_vocal_target_skips_melody_export_step() -> None:

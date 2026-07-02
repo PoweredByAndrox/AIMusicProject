@@ -28,6 +28,9 @@ unsupported CLI parameters, missing entrypoints, or forbidden cleanup/download
 routes are marked unavailable. If the available minus route families are only
 `htdemucs_ft` / `htdemucs_6s`, the summary reports
 `route_space_limited=true`.
+Registry entries count as minus-capable only when they explicitly expose
+`minus` or `instrumental`. Non-vocal stem outputs such as `drums`, `bass`,
+`guitar`, `piano`, or `other` are not treated as a valid minus route.
 
 ## Expansion
 

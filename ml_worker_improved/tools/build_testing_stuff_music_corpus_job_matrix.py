@@ -45,7 +45,10 @@ MINUS_BASELINE_REQUIRED_PATHS = (
     "/app/vendor/bs_roformer_instrumental_resurrection_manual/bs_roformer_instrumental_resurrection_unwa.ckpt",
     "/app/vendor/music_source_separation_training",
 )
-MINUS_MATERIALIZATION_REQUIRED_OUTPUT_STEMS = {"drums", "bass", "other"}
+STEM_LANE_MINUS_EXPORTERS = (
+    "export_hq_stems_full.py",
+    "run_registered_non_vocal_candidate.py",
+)
 
 
 def stable_json(payload: dict[str, Any]) -> str:
@@ -106,11 +109,6 @@ def entry_known_labels(entry: ModelRegistryEntry) -> set[str]:
         entry.family.lower(),
         *(alias.lower() for alias in entry.aliases),
     }
-
-
-def entry_can_materialize_minus(entry: ModelRegistryEntry) -> bool:
-    output_stems = {normalize_stem(stem) for stem in entry.output_stems}
-    return MINUS_MATERIALIZATION_REQUIRED_OUTPUT_STEMS.issubset(output_stems)
 
 
 def registry_entry_suggestion_dict(
@@ -607,28 +605,17 @@ def registry_suggestions(
         suggestion.to_dict()
         for suggestion in candidate_suggestions
         if not (evaluated & entry_known_labels(registry.get(str(suggestion.model_id))))
+        and not (target_stem == "minus" and entry_is_stem_lane_minus_route(registry.get(str(suggestion.model_id))))
     ]
-    planned_model_ids = {str(suggestion.get("model_id") or "") for suggestion in suggestion_dicts}
-    if normalize_stem(target_stem) == "minus":
-        for entry in registry.entries:
-            if entry.model_id in planned_model_ids:
-                continue
-            if evaluated & entry_known_labels(entry):
-                continue
-            if not entry_can_materialize_minus(entry):
-                continue
-            suggestion_dicts.append(
-                registry_entry_suggestion_dict(
-                    registry=registry,
-                    entry=entry,
-                    reason=(
-                        f"{entry.model_id} exposes drums/bass/other outputs; "
-                        "run_registered_model_candidate can materialize minus from non-vocal stems"
-                    ),
-                )
-            )
     suggestion_dicts.sort(key=suggestion_dict_sort_key)
     return suggestion_dicts[: max(0, int(max_models_per_stem))]
+
+
+def entry_is_stem_lane_minus_route(entry: ModelRegistryEntry | None) -> bool:
+    if entry is None:
+        return False
+    command_text = " ".join(str(part) for part in entry.command_template).lower()
+    return any(exporter in command_text for exporter in STEM_LANE_MINUS_EXPORTERS)
 
 
 def jobs_for_row(

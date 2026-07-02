@@ -59,7 +59,6 @@ from tools.stem_contamination_common import (
     NON_VOCAL_STEMS,
     STEMS,
     VERDICTS,
-    build_minus_from_non_vocal_stems,
     missing_required_stems,
     validate_no_artifact_rag_output,
 )
@@ -1402,7 +1401,7 @@ def build_candidate_manifest(candidate_id: str, output_dir: Path) -> dict[str, A
         "verdict": "blocked_unknown",
         "output_dir": str(output_dir),
         "required_stems": list(STEMS),
-        "minus_rebuilt_from_non_vocal_stems": True,
+        "minus_rebuilt_from_non_vocal_stems": False,
         "delivery_allowed": False,
         "presentation_status": "blocked_from_listen_pack",
     }
@@ -3417,7 +3416,7 @@ def _is_model_split_v2(candidate: Mapping[str, Any]) -> bool:
 
 
 def _candidate_minus_source(candidate: Mapping[str, Any]) -> str:
-    return str(candidate.get("minus_source") or ("minus_lane" if _is_model_split_v2(candidate) else "rebuilt_non_vocal_stems"))
+    return str(candidate.get("minus_source") or "minus_lane")
 
 
 def _stereo_width(audio: np.ndarray) -> float:
@@ -4994,7 +4993,7 @@ def execute_recipe_candidate(
             "score_path": str(candidate_dir / "score.json"),
             "profile": _profile_name(candidate),
             "minus_source": _candidate_minus_source(candidate),
-            "minus_rebuilt_from_non_vocal_stems": bool(candidate.get("minus_rebuilt_from_non_vocal_stems", True)),
+            "minus_rebuilt_from_non_vocal_stems": bool(candidate.get("minus_rebuilt_from_non_vocal_stems", False)),
         }
     )
     command_template = candidate.get("command_template")
@@ -5337,12 +5336,45 @@ def execute_recipe_candidate(
             _write_json(candidate_dir / "manifest.json", manifest)
             return manifest
 
-    minus_rebuilt_from_non_vocal_stems = bool(candidate.get("minus_rebuilt_from_non_vocal_stems", True))
+    minus_rebuilt_from_non_vocal_stems = bool(candidate.get("minus_rebuilt_from_non_vocal_stems", False))
     if _is_model_split_v2(candidate) or str(candidate.get("minus_source") or "") == "minus_lane":
         minus_rebuilt_from_non_vocal_stems = False
     if minus_rebuilt_from_non_vocal_stems:
-        minus_path = build_minus_from_non_vocal_stems({stem: Path(path) for stem, path in stem_paths.items()}, stems_dir / "minus.flac")
-        stem_paths["minus"] = str(minus_path)
+        next_action = choose_next_action(
+            {"verdict": "blocked_missing_stem", "reason": "stem_derived_minus_is_not_allowed"}
+        )
+        manifest.update(
+            {
+                "execution_status": "completed",
+                "candidate_untrusted": True,
+                "verdict": "blocked_missing_stem",
+                "missing_stems": ["minus"],
+                "stem_paths": stem_paths,
+                "reconstruction_repair": reconstruction_repair,
+                "minus_vocal_debleed": minus_vocal_debleed,
+                "vocal_projection_debleed": vocal_projection_debleed,
+                "stem_merges": stem_merges,
+                "post_minus_vocal_debleed": post_minus_vocal_debleed,
+                "target_specific_composition": target_specific_composition,
+                "next_action": next_action,
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
+                "minus_source": _candidate_minus_source(candidate),
+                "minus_rebuilt_from_non_vocal_stems": False,
+                "blocker_reason": "stem_derived_minus_is_not_allowed",
+            }
+        )
+        _write_json(
+            candidate_dir / "score.json",
+            {
+                "verdict": "blocked_missing_stem",
+                "missing_stems": ["minus"],
+                "blocker_reason": "stem_derived_minus_is_not_allowed",
+                "next_action": next_action,
+            },
+        )
+        _write_json(candidate_dir / "manifest.json", manifest)
+        return manifest
     elif not stem_paths.get("minus"):
         damage_score = score_model_split_v2_damage_gates(
             candidate=candidate,

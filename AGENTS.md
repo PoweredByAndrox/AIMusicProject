@@ -48,6 +48,7 @@ RALPH-AI delivery contract:
 - Produce: выдавать можно только artifact со статусом `delivery_status=accepted`, `delivery_allowed=true`, `presentation_status=accepted_for_listen_pack`;
 - Halt/iterate: если exact/reference gate failed, продолжать model routing / training / repair loop или фиксировать explicit rejection reason, но не отдавать загрязненный candidate ради результата;
 - diagnostic artifacts допустимы только как forensic/debug evidence с явным blocked/rejected статусом и не считаются результатом для прослушивания.
+- Production/system audio loops must use `testing_stuff_music` as the working corpus; `testing_flstudio_music`/FL Studio reference bundles are legacy forensic/benchmark-only and must not drive system routing, training, or listen-result claims unless the user explicitly requests that legacy benchmark.
 
 Обязательный contract:
 - не добавлять per-track hardcodes: имена треков, фиксированные timestamps, ручные EQ/threshold values или special-case ветки допустимы только как diagnostic artifacts, но не как production route;
@@ -56,6 +57,7 @@ RALPH-AI delivery contract:
 - использовать quality-controlled model routing: несколько candidates, segment-level router, proxy metrics, issue diagnostics, feedback priors, provenance-safe reuse и repeatable Docker-only artifacts;
 - если качество недостаточно, добавлять production-grade route/candidate с явным contract, manifest provenance, proxy scoring, tests и docs; proxy/model-routing paths (`--pure-base`, `--ir-instrumental-minus-path`, `--external-vocal-candidate`, `quality_consistent_ir_router`, provenance-safe reuse rejection) допустимы только как проверяемые архитектурные входы, а не как скрытая подмена baseline;
 - для clean-minus baseline не использовать `build_vocal_guided_minus.py` как основной путь; baseline должен идти через documented separation model route (`export_instrumental_resurrection_minus.py`) и self-only/pure-base repair, если repair вообще нужен;
+- минус должен строиться dedicated minus/instrumental model route; запрещено выдавать или оценивать как production minus сумму non-vocal stem outputs из stem model (`drums+bass+other+...`) — такие файлы допустимы только как stem-lane diagnostic/source-conservation evidence, потому что stem model и minus model являются разными lane/model responsibilities;
 - для vocal stem использовать обобщаемый adaptive route: BS/FT/IR-residual/external candidates, debleed gates, segment-router, issue reports и feedback store; backing vocals считаются vocal content;
 - если качество недостаточно, улучшать общую архитектуру/метрики/router/scoring/tests/docs, а не добавлять ручной фикс под один файл.
 

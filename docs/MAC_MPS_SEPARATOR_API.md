@@ -20,6 +20,7 @@ powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
   - `htdemucs_6s`
   - `mdx23c_vocals`
   - `melband_roformer_vocals`
+  - `becruily_instrumental_vocals`
   - `scnet_xl_ihf_musdb18`
 - Outputs must stay under the configured shared artifacts root:
   `/Users/andrejviluha/AIMusicProject_win/artifacts`.
@@ -93,6 +94,10 @@ Invoke-WebRequest -UseBasicParsing -Uri "http://192.168.0.138:8765/jobs/<job_id>
   `artifacts/mac_api/api_mdx003`.
 - `melband_roformer_vocals`: verified through the API on a 12 second slice under
   `artifacts/mac_api/api_mel002`.
+- `becruily_instrumental_vocals`: dedicated instrumental/minus checkpoint route
+  through the shared MelBand exporter. It must expose `instrumental.flac`
+  directly from the Becruily instrumental checkpoint; it must not materialize
+  minus from stem-model outputs.
 - `scnet_xl_ihf_musdb18`: verified through the API on a 12 second slice under
   `artifacts/mac_api/api_scnet002`; this route is slow on 8GB MPS and uses a
   longer exporter timeout.

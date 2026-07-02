@@ -29,6 +29,7 @@ def execution_row(
     status: str = "completed",
     include_vocal_companion: bool = True,
     include_minus_stem: bool = True,
+    target_source: str = "model_output",
 ) -> dict:
     audio_dir = tmp_path / track_id / target_stem / (output_subdir or model_id)
     minus_path = audio_dir / "minus.flac"
@@ -54,6 +55,10 @@ def execution_row(
             "model_name": model_id,
             "audio_path": f"/host/{track_id}.mp3",
             "target_stem": target_stem,
+            "target_stem_artifact": {
+                "path": str(target_audio_path),
+                "source": target_source,
+            },
             "stems": stems,
             "execution_contract": {
                 "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
@@ -78,6 +83,7 @@ def execution_row(
             "path": str(manifest_path),
             "target_audio_path": str(target_audio_path),
             "target_stem": target_stem,
+            "target_source": target_source,
         },
         "delivery_allowed": False,
         "release_ready": False,
@@ -131,6 +137,21 @@ def test_skips_minus_candidate_without_vocal_companion(tmp_path: Path) -> None:
     assert result["summary"]["skipped_candidates"][0]["skip_reason"] == "missing_vocal_companion_path"
     assert result["summary"]["delivery_allowed"] is False
     assert result["summary"]["release_ready"] is False
+
+
+def test_rejects_stem_derived_minus_candidate_before_judge_rows(tmp_path: Path) -> None:
+    execution_jsonl = write_jsonl(
+        tmp_path / "execution.jsonl",
+        [execution_row(tmp_path, target_source="sum_non_vocal_stems")],
+    )
+
+    result = build_inputs(execution_results_jsonls=[execution_jsonl])
+
+    assert result["rows"] == []
+    assert result["summary"]["candidate_count"] == 0
+    assert result["summary"]["skipped_candidate_count"] == 1
+    assert result["summary"]["skipped_candidates"][0]["skip_reason"] == "stem_derived_minus_candidate_rejected"
+    assert result["summary"]["skipped_candidates"][0]["target_source"] == "sum_non_vocal_stems"
 
 
 def test_builds_minus_rows_from_vocal_instrumental_execution_manifest(tmp_path: Path) -> None:

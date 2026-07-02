@@ -7,9 +7,9 @@ runner for six-stem separation candidates.
 
 - The six generated stems are mandatory: `vocals`, `drums`, `bass`, `guitar`,
   `piano`, and `other`.
-- In the default profile, `minus` is rebuilt from non-vocal stems.
-- In `model_split_v2`, `minus` must come from a dedicated minus/instrumental
-  lane and cannot be accepted as the sum of the six-stem non-vocal outputs.
+- `minus` must come from a dedicated minus/instrumental lane. It cannot be
+  accepted or rebuilt as the sum of six-stem non-vocal outputs in any
+  production profile.
 - Candidates are untrusted by default.
 - `human_review` is not a verdict or next action.
 - Unknown evidence blocks automatically.
@@ -36,10 +36,11 @@ Candidates may declare:
 ```
 
 When present, the runner computes `mix - sum(vocals, drums, bass, guitar,
-piano, other)` before rebuilding `minus`, and writes that residual into the
-declared non-vocal stem. This is not threshold relaxation: the same
-reconstruction gate still runs after repair. If repair is missing, unsafe,
-shape-mismatched, or insufficient, the candidate remains blocked.
+piano, other)` and writes that residual into the declared non-vocal stem. This
+is not threshold relaxation and it never rebuilds production `minus`: the same
+reconstruction gate still runs after repair, and a dedicated minus/instrumental
+lane remains required. If repair is missing, unsafe, shape-mismatched, or
+insufficient, the candidate remains blocked.
 
 Allowed repair targets are non-vocal stems only. `vocals` and `minus` are not
 valid conservation-repair targets.
@@ -64,10 +65,11 @@ Late default candidates may declare:
 ```
 
 The runner applies this only after a six-stem candidate exists. It transfers the
-declared vocal-band component from non-vocal stems into `vocals`, then rebuilds
-`minus` from the updated non-vocal stems. The six-stem sum is preserved before
-the unchanged reconstruction gate runs. This route does not relax contamination
-thresholds: it must still pass the explicit `minus` / `vocals` check.
+declared vocal-band component from non-vocal stems into `vocals`, but it does
+not rebuild `minus` from those stems. A dedicated minus/instrumental lane is
+still required, and the unchanged reconstruction gate runs afterward. This
+route does not relax contamination thresholds: it must still pass the explicit
+`minus` / `vocals` check.
 
 Late default candidates may also declare:
 
@@ -80,9 +82,9 @@ Late default candidates may also declare:
 }
 ```
 
-This projects each target non-vocal stem onto the current `vocals` waveform,
-moves the correlated component back into `vocals`, and then rebuilds `minus`.
-It is meant for leaked vocal waveform in individual non-vocal stems, not for
+This projects each target non-vocal stem onto the current `vocals` waveform and
+moves the correlated component back into `vocals`. It is meant for leaked vocal
+waveform in individual non-vocal stems, not for building a production minus or
 acceptance by metric bypass. The same reconstruction and full forbidden-source
 matrix gates still run after the transfer.
 
@@ -145,8 +147,9 @@ blocking as unavailable.
 The default from-scratch candidates are target-specific, not a Demucs-only
 shortcut. Each default candidate starts with a Demucs `htdemucs_6s` six-stem
 route, then replaces `vocals` with a specialized vocal/instrumental model route
-when that route is available in the Docker image. `minus` is still rebuilt from
-the final non-vocal stems after all target-specific routes finish.
+when that route is available in the Docker image. If no dedicated
+minus/instrumental lane writes `minus` or mapped `instrumental`, the candidate
+blocks instead of rebuilding `minus` from non-vocal stems.
 
 ## Model-Split V2 Profile
 
@@ -427,19 +430,17 @@ Supported roles:
 
 - `six_stems`: must write `vocals`, `drums`, `bass`, `guitar`, `piano`,
   `other`; these initialize the full candidate set.
-- `vocals`: must write `vocals`; this can replace the six-stem vocal output
-  before `minus` is rebuilt.
+- `vocals`: must write `vocals`; this can replace the six-stem vocal output.
 - `minus`: must write `minus`, or write a declared source such as
   `instrumental` through `output_map`; this is required for `model_split_v2`
   delivery minus.
 - `non_vocal_stems`: must write `drums`, `bass`, `guitar`, `piano`, `other`;
-  this can replace the instrumental stem set before `minus` is rebuilt.
+  this can replace the instrumental stem set for stem delivery only.
 
 If a declared route misses one of its required outputs, the candidate blocks as
-`blocked_missing_stem`. In the default profile, `minus` is still rebuilt from
-the final non-vocal stems. In `model_split_v2`, missing minus-lane output blocks
-instead of falling back to rebuilt minus. The full forbidden-source matrix still
-decides delivery after profile-specific gates pass.
+`blocked_missing_stem`. Missing minus-lane output always blocks instead of
+falling back to rebuilt minus. The full forbidden-source matrix still decides
+delivery after profile-specific gates pass.
 
 Route outputs are normalized to the current window's sample rate, frame count,
 and channel count before they are copied into the final candidate stem set. This

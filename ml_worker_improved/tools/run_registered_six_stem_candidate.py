@@ -226,8 +226,6 @@ def run_registered_six_stem_candidate(
         model_id,
         "--device",
         device,
-        "--target-stem",
-        "minus",
     ]
     runner(command, timeout_sec)
 

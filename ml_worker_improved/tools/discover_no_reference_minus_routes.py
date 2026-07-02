@@ -84,9 +84,18 @@ def forbidden_reason_for(config: CandidateJobConfig) -> str:
     return ""
 
 
+def normalize_registry_stem(stem: str) -> str:
+    value = str(stem or "").strip().lower()
+    if value in {"instrumental", "instrumentals"}:
+        return "instrumental"
+    if value in {"minus", "clean_minus"}:
+        return "minus"
+    return value
+
+
 def entry_supports_minus(entry: ModelRegistryEntry) -> bool:
-    stems = {stem.lower() for stem in (*entry.target_stems, *entry.output_stems)}
-    return bool(stems & {"minus", "instrumental", "other", "drums", "bass", "guitar", "piano"})
+    stems = {normalize_registry_stem(stem) for stem in (*entry.target_stems, *entry.output_stems)}
+    return bool(stems & {"minus", "instrumental"})
 
 
 def route_type_for(config: CandidateJobConfig) -> str:

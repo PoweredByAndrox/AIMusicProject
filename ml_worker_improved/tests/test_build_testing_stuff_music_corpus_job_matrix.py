@@ -384,7 +384,7 @@ def test_blocked_minus_registry_prior_selects_next_unblocked_registry_candidate(
     }
 
 
-def test_minus_matrix_includes_four_stem_models_that_can_materialize_minus(tmp_path: Path) -> None:
+def test_minus_matrix_rejects_four_stem_models_that_would_materialize_minus(tmp_path: Path) -> None:
     source_audio = tmp_path / "Song One.mp3"
     source_audio.write_bytes(b"audio-placeholder")
     plan_jsonl = write_jsonl(tmp_path / "testing_stuff_music_corpus_plan.jsonl", [corpus_row(source_audio)])
@@ -415,13 +415,10 @@ def test_minus_matrix_includes_four_stem_models_that_can_materialize_minus(tmp_p
         route_priors_jsonl=route_priors_jsonl,
     )
 
-    row = next(row for row in result["rows"] if row["model_id"] == "demo_four_stem_model")
-    assert row["target_stem"] == "minus"
-    assert row["job_status"] == "queued"
-    assert row["execution_ready"] is True
-    assert row["route_contract"] == "registered_model_candidate_manifest_required"
-    assert "--target-stem" in row["command"]
-    assert row["command"][row["command"].index("--target-stem") + 1] == "minus"
+    assert result["summary"]["total_jobs"] == 1
+    assert result["summary"]["queued"] == 0
+    assert result["summary"]["blocked_route_prior"] == 1
+    assert all(row["model_id"] != "demo_four_stem_model" for row in result["rows"])
 
 
 def test_family_level_minus_prior_is_treated_as_evaluated_before_selection(tmp_path: Path) -> None:

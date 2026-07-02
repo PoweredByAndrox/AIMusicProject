@@ -164,6 +164,7 @@ def test_candidate_untrusted_by_default(tmp_path: Path) -> None:
     assert manifest["candidate_id"] == "c001"
     assert manifest["candidate_untrusted"] is True
     assert manifest["verdict"] == "blocked_unknown"
+    assert manifest["minus_rebuilt_from_non_vocal_stems"] is False
 
 
 def test_cli_enables_live_progress_echo_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:

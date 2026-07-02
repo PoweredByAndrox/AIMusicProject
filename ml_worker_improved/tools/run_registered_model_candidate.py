@@ -287,10 +287,9 @@ def ensure_target_stem_artifact(
         if matched_name != normalized_target:
             artifact["manifest_stem_alias_of"] = matched_name
     elif normalized_target == "minus":
-        artifact = materialize_minus_from_non_vocal_stems(
-            stems=stems,
-            manifest_dir=manifest_dir,
-            output_dir=output_dir,
+        raise RuntimeError(
+            "minus target requires an explicit minus or instrumental model output; "
+            "summing non-vocal stem outputs is not allowed for the production minus lane"
         )
     else:
         raise RuntimeError(f"target stem is missing from candidate manifest: {normalized_target}")

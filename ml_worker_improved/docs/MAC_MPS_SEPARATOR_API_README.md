@@ -4,6 +4,14 @@
 API. It may run model export commands on the Mac, but it cannot publish listen
 or release artifacts.
 
+Supported route ids:
+
+- `htdemucs_6s`
+- `mdx23c_vocals`
+- `melband_roformer_vocals`
+- `becruily_instrumental_vocals`
+- `scnet_xl_ihf_musdb18`
+
 Mac artifact output is fail-closed:
 
 - `--artifacts-root` must point into the mounted Windows project workspace,

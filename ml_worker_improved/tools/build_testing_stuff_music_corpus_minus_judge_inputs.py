@@ -27,6 +27,11 @@ SUMMARY_MD_NAME = "no_reference_minus_windowed_judge_candidates_summary.md"
 FORBIDDEN_ACTIONS = ["present_as_listen_result", "mark_release_ready", "start_training"]
 MINUS_TARGET_STEMS = {"minus", "instrumental"}
 VOCAL_TARGET_STEMS = {"vocal", "vocals"}
+FORBIDDEN_MINUS_TARGET_SOURCES = {
+    "sum_non_vocal_stems",
+    "rebuilt_non_vocal_stems",
+    "stage1_non_vocal_sum",
+}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -50,6 +55,23 @@ def explicit_minus_path(stem_paths: dict[str, str]) -> str:
 
 def explicit_vocal_path(stem_paths: dict[str, str]) -> str:
     return stem_paths.get("vocals") or stem_paths.get("vocal") or ""
+
+
+def manifest_target_source(manifest: dict[str, Any]) -> str:
+    target_artifact = manifest.get("target_stem_artifact")
+    if isinstance(target_artifact, dict) and target_artifact.get("source"):
+        return str(target_artifact["source"])
+    return str(manifest.get("target_source") or "")
+
+
+def candidate_target_source(candidate: dict[str, Any], manifest: dict[str, Any]) -> str:
+    execution_result = candidate.get("execution_result")
+    execution_candidate = (
+        execution_result.get("candidate_manifest")
+        if isinstance(execution_result, dict) and isinstance(execution_result.get("candidate_manifest"), dict)
+        else {}
+    )
+    return str(execution_candidate.get("target_source") or manifest_target_source(manifest) or "")
 
 
 def candidate_sort_key(candidate: dict[str, Any]) -> tuple[str, str, str]:
@@ -100,6 +122,13 @@ def build_minus_row(
         return None, {"track_id": str(candidate.get("track_id") or ""), "skip_reason": "candidate_manifest_missing"}
 
     manifest = read_json(manifest_path)
+    target_source = candidate_target_source(candidate, manifest).lower()
+    if target_source in FORBIDDEN_MINUS_TARGET_SOURCES:
+        return None, {
+            "track_id": str(candidate.get("track_id") or ""),
+            "skip_reason": "stem_derived_minus_candidate_rejected",
+            "target_source": target_source,
+        }
     stem_paths = manifest_stem_paths(manifest)
     minus_path = explicit_minus_path(stem_paths)
     if target_stem in MINUS_TARGET_STEMS:

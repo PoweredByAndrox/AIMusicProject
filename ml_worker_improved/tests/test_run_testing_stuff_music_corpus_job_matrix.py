@@ -240,7 +240,7 @@ def test_blocks_real_gpu_job_when_cuda_is_unavailable(tmp_path: Path, monkeypatc
     assert "cuda_unavailable" in result["rows"][0]["preflight"]["reasons"]
 
 
-def test_completed_registered_job_propagates_target_manifest_fields(tmp_path: Path) -> None:
+def test_completed_registered_job_rejects_stem_derived_minus_manifest(tmp_path: Path) -> None:
     row = job_row(tmp_path, target_stem="minus", model_id="minus_a")
     row["command"].extend(["--target-stem", "minus"])
     jobs_path = write_jsonl(tmp_path / "jobs.jsonl", [row])
@@ -294,12 +294,15 @@ def test_completed_registered_job_propagates_target_manifest_fields(tmp_path: Pa
     )
 
     candidate_manifest = result["rows"][0]["candidate_manifest"]
-    assert result["rows"][0]["execution_status"] == "completed"
+    assert result["rows"][0]["execution_status"] == "failed_policy_rejected"
+    assert result["summary"]["failed_jobs"] == 1
+    assert result["manifest"]["execution_status"] == "failed"
     assert candidate_manifest["exists"] is True
     assert candidate_manifest["target_stem"] == "minus"
     assert candidate_manifest["target_audio_path"] == str(target_audio_path)
     assert candidate_manifest["target_source"] == "sum_non_vocal_stems"
     assert candidate_manifest["target_source_stems"] == ["drums", "bass", "other"]
+    assert result["rows"][0]["error"]["type"] == "PolicyRejected"
 
 
 def test_executes_minus_phase_repair_job_contract(tmp_path: Path) -> None:

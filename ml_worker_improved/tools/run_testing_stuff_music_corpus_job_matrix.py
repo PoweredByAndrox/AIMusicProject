@@ -33,6 +33,11 @@ MINUS_PHASE_REPAIR_ENTRYPOINT = "/app/tools/run_no_reference_minus_phase_repair.
 REGISTERED_ROUTE_CONTRACT = "registered_model_candidate_manifest_required"
 DIRECT_MINUS_ROUTE_CONTRACT = "documented_clean_minus_baseline"
 MINUS_PHASE_REPAIR_ROUTE_CONTRACT = "no_reference_minus_phase_repair_candidate"
+FORBIDDEN_MINUS_TARGET_SOURCES = {
+    "sum_non_vocal_stems",
+    "rebuilt_non_vocal_stems",
+    "stage1_non_vocal_sum",
+}
 
 
 def stable_json(payload: dict[str, Any]) -> str:
@@ -199,6 +204,12 @@ def merge_target_manifest_fields(state: dict[str, Any], candidate_manifest: dict
     if candidate_manifest.get("target_stem"):
         state["target_stem"] = str(candidate_manifest["target_stem"])
     return state
+
+
+def is_forbidden_minus_target_source(candidate_state: dict[str, Any]) -> bool:
+    target_stem = str(candidate_state.get("target_stem") or "").lower()
+    target_source = str(candidate_state.get("target_source") or "").lower()
+    return target_stem in {"minus", "instrumental"} and target_source in FORBIDDEN_MINUS_TARGET_SOURCES
 
 
 def enriched_candidate_manifest_state(row: dict[str, Any]) -> dict[str, Any]:
@@ -450,6 +461,28 @@ def execute_one_job(
         candidate_state = enriched_candidate_manifest_state(row)
         if not candidate_state["exists"]:
             raise RuntimeError(f"expected candidate manifest was not created: {candidate_state['path']}")
+        if is_forbidden_minus_target_source(candidate_state):
+            execution_row.update(
+                {
+                    "execution_status": "failed_policy_rejected",
+                    "execution_elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    "candidate_manifest": candidate_state,
+                    "error": {
+                        "type": "PolicyRejected",
+                        "message": (
+                            "minus target requires an explicit minus or instrumental model output; "
+                            f"target_source={candidate_state.get('target_source')} is not allowed"
+                        ),
+                    },
+                }
+            )
+            progress.append(
+                "job_end",
+                status="failed_policy_rejected",
+                execution_job_key=execution_row["execution_job_key"],
+                error=execution_row["error"],
+            )
+            return execution_row
     except Exception as exc:
         execution_row.update(
             {
@@ -487,6 +520,7 @@ def build_summary(
     dry_run: bool,
 ) -> dict[str, Any]:
     execution_counts = Counter(str(row.get("execution_status") or "unknown") for row in execution_rows)
+    failed_jobs = int(execution_counts.get("failed", 0)) + int(execution_counts.get("failed_policy_rejected", 0))
     attempted_jobs = sum(1 for row in execution_rows if bool(row.get("execution_started")))
     acceleration_modes = sorted(
         {str(row.get("expected_acceleration_mode") or "") for row in selected_rows if row.get("expected_acceleration_mode")}
@@ -501,7 +535,7 @@ def build_summary(
         "dry_run": bool(dry_run),
         "dry_run_jobs": int(execution_counts.get("dry_run", 0)),
         "completed_jobs": int(execution_counts.get("completed", 0)),
-        "failed_jobs": int(execution_counts.get("failed", 0)),
+        "failed_jobs": failed_jobs,
         "attempted_jobs": attempted_jobs,
         "not_run_fail_fast_jobs": int(execution_counts.get("not_run_fail_fast", 0)),
         "blocked_preflight_jobs": int(execution_counts.get("blocked_preflight_contract", 0))

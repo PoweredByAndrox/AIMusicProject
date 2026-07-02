@@ -16,6 +16,9 @@ The bridge is diagnostic and fail-closed:
   vocal companion path, and optional stem paths such as `melody`;
 - skips minus candidates whose manifest is missing, whose minus path is absent,
   or whose vocal companion path is absent;
+- skips legacy or tampered minus candidates whose manifest provenance says the
+  target source was `sum_non_vocal_stems`, `rebuilt_non_vocal_stems`, or
+  `stage1_non_vocal_sum`;
 - writes no audio and runs no inference;
 - records `expected_acceleration_mode=external_only_cpu_dsp_scoring`;
 - sets `gpu_inference_skipped=true` with an explicit skip reason;

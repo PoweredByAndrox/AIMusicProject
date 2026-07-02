@@ -73,12 +73,11 @@ registry, relax thresholds, or mark anything `release_ready`.
   plans registered `instrumental` candidates for `minus`. Route-prior-blocked
   registered candidates are treated as already evaluated, so the planner chooses
   the next unblocked registry candidate instead of re-queueing a known bad
-  route. Four-stem models that expose `drums`, `bass`, and `other` outputs are
-  eligible for `minus` planning even when their registry target list does not
-  contain `instrumental`, because `run_registered_model_candidate.py`
-  materializes `minus.flac` from non-vocal stems and records that provenance. If
-  the requested target stem cannot be exposed, execution fails closed instead of
-  presenting the manifest as a valid candidate.
+  route. Stem-lane models that expose only `drums`, `bass`, `other`, `guitar`,
+  or `piano` are not eligible production minus candidates. The registered
+  runner fails closed unless the candidate manifest exposes an explicit `minus`
+  or `instrumental` model output; summing non-vocal stem outputs is diagnostic
+  source-conservation evidence only.
 - Every job requires downstream gates before any listen or delivery decision:
   candidate manifest contract, mode-specific score matrix, artifact status
   contract, and stem-specific QC gates.

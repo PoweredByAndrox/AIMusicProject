@@ -35,8 +35,14 @@ DEFAULT_MODEL_NAME = "htdemucs_6s"
 DEMUX_ROUTE_IDS = {"htdemucs_6s", "demucs_htdemucs_6s"}
 MDX23C_ROUTE_ID = "mdx23c_vocals"
 MELBAND_ROUTE_ID = "melband_roformer_vocals"
+BECRUILY_INSTRUMENTAL_ROUTE_ID = "becruily_instrumental_vocals"
 SCNET_ROUTE_ID = "scnet_xl_ihf_musdb18"
-SUPPORTED_ROUTE_IDS = DEMUX_ROUTE_IDS | {MDX23C_ROUTE_ID, MELBAND_ROUTE_ID, SCNET_ROUTE_ID}
+SUPPORTED_ROUTE_IDS = DEMUX_ROUTE_IDS | {
+    MDX23C_ROUTE_ID,
+    MELBAND_ROUTE_ID,
+    BECRUILY_INSTRUMENTAL_ROUTE_ID,
+    SCNET_ROUTE_ID,
+}
 SCNET_MPS_TIMEOUT_SEC = "900"
 
 
@@ -207,6 +213,26 @@ def build_separator_export_command(
                 ),
                 "--model-path",
                 str(_vendor_path(config, "mel_band_roformer_vocal_model_weights", "MelBandRoformer.ckpt")),
+                "--device-id",
+                "0",
+            ]
+        )
+    elif normalized_route == BECRUILY_INSTRUMENTAL_ROUTE_ID:
+        command.extend(
+            [
+                str(tools_dir / "export_melband_vocal_full.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--repo-path",
+                str(_vendor_path(config, "mel_band_roformer_vocal_model")),
+                "--config-path",
+                str(_vendor_path(config, "becruily_instrumental", "config_instrumental_becruily.yaml")),
+                "--model-path",
+                str(_vendor_path(config, "becruily_instrumental", "mel_band_roformer_instrumental_becruily.ckpt")),
+                "--manifest-model-id",
+                BECRUILY_INSTRUMENTAL_ROUTE_ID,
+                "--manifest-model-display-name",
+                "Becruily MelBand RoFormer instrumental checkpoint",
                 "--device-id",
                 "0",
             ]

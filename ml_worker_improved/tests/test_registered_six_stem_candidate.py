@@ -40,11 +40,6 @@ def write_registered_manifest(output_dir: Path, stems: dict[str, Path]) -> Path:
                     stem: {"path": str(path)}
                     for stem, path in stems.items()
                 },
-                "target_stem_artifact": {
-                    "target_stem": "minus",
-                    "path": str(output_dir / "minus.flac"),
-                    "source": "sum_non_vocal_stems",
-                },
             }
         ),
         encoding="utf-8",
@@ -56,9 +51,6 @@ def write_registered_manifest(output_dir: Path, stems: dict[str, Path]) -> Path:
                 "candidate_manifest": {
                     "path": str(stem_manifest),
                     "exists": True,
-                    "target_stem": "minus",
-                    "target_audio_path": str(output_dir / "minus.flac"),
-                    "target_source": "sum_non_vocal_stems",
                 },
             }
         ),
@@ -102,8 +94,8 @@ def test_registered_six_stem_candidate_copies_required_stems(tmp_path: Path) -> 
 
     assert manifest["generation_status"] == "completed"
     assert manifest["model_id"] == "hybrid_htdemucs_ft_bs_roformer_6s"
-    assert commands[0][commands[0].index("--target-stem") + 1] == "minus"
-    assert manifest["registered_target_source"] == "sum_non_vocal_stems"
+    assert "--target-stem" not in commands[0]
+    assert manifest["registered_target_source"] == ""
     assert manifest["required_stems"] == list(STEMS)
     assert "minus" not in manifest["stem_paths"]
     for stem in STEMS:
@@ -157,9 +149,6 @@ def test_registered_six_stem_candidate_accepts_hyb001_shaped_extra_stems(tmp_pat
                     "candidate_manifest": {
                         "path": str(stem_manifest),
                         "exists": True,
-                        "target_stem": "minus",
-                        "target_audio_path": str(minus_path),
-                        "target_source": "sum_non_vocal_stems",
                     },
                 }
             ),
@@ -176,7 +165,7 @@ def test_registered_six_stem_candidate_accepts_hyb001_shaped_extra_stems(tmp_pat
     )
 
     assert manifest["generation_status"] == "completed"
-    assert manifest["registered_target_source"] == "sum_non_vocal_stems"
+    assert manifest["registered_target_source"] == ""
     assert set(manifest["stem_paths"]) == set(STEMS)
 
 
@@ -228,9 +217,6 @@ def test_registered_six_stem_candidate_merges_declared_melody_into_guitar(tmp_pa
                     "candidate_manifest": {
                         "path": str(stem_manifest),
                         "exists": True,
-                        "target_stem": "minus",
-                        "target_audio_path": str(minus_path),
-                        "target_source": "sum_non_vocal_stems",
                     },
                 }
             ),
@@ -311,9 +297,6 @@ def test_registered_six_stem_candidate_blocks_unmapped_declared_extra_stem(tmp_p
                     "candidate_manifest": {
                         "path": str(stem_manifest),
                         "exists": True,
-                        "target_stem": "minus",
-                        "target_audio_path": str(minus_path),
-                        "target_source": "sum_non_vocal_stems",
                     },
                 }
             ),

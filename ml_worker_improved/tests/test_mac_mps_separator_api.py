@@ -104,6 +104,32 @@ def test_mac_api_mdx23c_route_uses_local_vendor_paths(tmp_path):
     assert "--timeout-sec" not in command
 
 
+def test_mac_api_becruily_instrumental_route_uses_dedicated_minus_checkpoint(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="becruily_instrumental_vocals",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    vendor_root = tmp_path / "project" / "ml_worker_improved" / "vendor"
+    assert env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] == "1"
+    assert "tools/export_melband_vocal_full.py" in command[1].replace("\\", "/")
+    assert "--config-path" in command
+    assert str(vendor_root / "becruily_instrumental" / "config_instrumental_becruily.yaml") in command
+    assert "--model-path" in command
+    assert str(vendor_root / "becruily_instrumental" / "mel_band_roformer_instrumental_becruily.ckpt") in command
+    assert "--manifest-model-id" in command
+    assert command[command.index("--manifest-model-id") + 1] == "becruily_instrumental_vocals"
+
+
 def test_mac_api_scnet_route_uses_extended_mps_timeout(tmp_path):
     module = _load_module()
     config = module.MacMpsApiConfig(
