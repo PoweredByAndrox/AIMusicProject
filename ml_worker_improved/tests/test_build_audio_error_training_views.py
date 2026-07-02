@@ -748,6 +748,119 @@ def test_blocked_listen_preview_manifest_does_not_add_positive_rows(tmp_path: Pa
     assert not (output_dir / "accepted_preview_sources").exists()
 
 
+def test_ralph_manifests_add_minus_score_only_hardcase_rows(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+    from tools.train_target_audio_error_critics import load_target_rows
+
+    dataset_dir = tmp_path / "dataset"
+    write_repaired_dataset(dataset_dir, [])
+    assets = write_assets(tmp_path, "ralph")
+    rejected_minus = tmp_path / "audio" / "ralph_focus_minus.wav"
+    rejected_minus.write_bytes(b"audio-placeholder")
+    manifest_path = tmp_path / "ralph" / "ralph_minus_improvement_manifest.json"
+    write_json(
+        manifest_path,
+        {
+            "schema_version": "ralph_minus_improvement_manifest.v1",
+            "delivery_status": "blocked",
+            "delivery_allowed": False,
+            "presentation_status": "blocked_from_listen_pack",
+            "selected_candidate": "hybrid_detail_safe",
+            "focus_evaluation_used_for_delivery": False,
+            "focus_window_source": str(tmp_path / "focus.jsonl"),
+            "inputs": {
+                "raw_audio_path": assets["mix_path"],
+                "primary_vocals_path": assets["vocal_candidate_path"],
+                "normalized_inputs": {
+                    "raw_audio_path": assets["mix_path"],
+                    "primary_vocals_path": assets["vocal_candidate_path"],
+                },
+            },
+            "candidates": [
+                {
+                    "candidate_name": "hybrid_detail_safe",
+                    "artifact_path": assets["minus_candidate_path"],
+                    "evaluation": {
+                        "status": "accepted",
+                        "blockers": [],
+                        "focus_evaluation": {
+                            "windows": [
+                                {
+                                    "track_id": "track-ralph",
+                                    "start_sec": 100.0,
+                                    "end_sec": 105.0,
+                                    "vocal_residue_corr": 0.08,
+                                    "vocal_projection_ratio_db": -21.0,
+                                    "rms_drift_db_vs_base": -0.01,
+                                    "presence_band_ratio_drift_db": -0.02,
+                                    "air_band_ratio_drift_db": -0.03,
+                                    "critic_decision": "ralph_residual_focus",
+                                }
+                            ]
+                        },
+                    },
+                },
+                {
+                    "candidate_name": "focus_window_guarded",
+                    "artifact_path": str(rejected_minus),
+                    "evaluation": {
+                        "status": "rejected",
+                        "blockers": [
+                            {
+                                "label": "insufficient_vocal_residue_improvement",
+                                "reason": "candidate_does_not_reduce_vocal_proxy_enough",
+                            }
+                        ],
+                        "focus_evaluation": {
+                            "windows": [
+                                {
+                                    "track_id": "track-ralph",
+                                    "start_sec": 100.0,
+                                    "end_sec": 105.0,
+                                    "vocal_residue_corr": 0.09,
+                                    "vocal_projection_ratio_db": -20.0,
+                                    "rms_drift_db_vs_base": -0.05,
+                                    "presence_band_ratio_drift_db": -0.04,
+                                    "air_band_ratio_drift_db": -0.02,
+                                    "critic_decision": "ralph_residual_focus",
+                                    "predicted_blockers": ["ralph_top_vocal_residue_window"],
+                                }
+                            ]
+                        },
+                    },
+                },
+            ],
+        },
+    )
+
+    output_dir = tmp_path / "views"
+    manifest = build_audio_error_training_views(
+        dataset_dir=dataset_dir,
+        output_dir=output_dir,
+        ralph_manifests=[manifest_path],
+    )
+    minus_rows = read_jsonl(output_dir / "minus_critic_training_view.jsonl")
+    strict_rows = load_target_rows(output_dir, "minus")["usable_rows"]
+    score_rows = load_target_rows(output_dir, "minus", include_score_only_rows=True)["usable_rows"]
+
+    assert manifest["ralph_manifest_rows_added"] == 2
+    assert [row["label"] for row in minus_rows] == [0, 1]
+    assert strict_rows == []
+    assert len(score_rows) == 2
+    assert all(row["source_judge_file"] == "no_reference_minus_windowed_judge.jsonl" for row in minus_rows)
+    assert all(row["source_candidate_family"] == "ralph_minus_improvement" for row in minus_rows)
+    assert all(row["safe_for_this_view"] is True for row in minus_rows)
+    assert all(row["feature_values"]["acoustic_feature_evidence_present"] == 1.0 for row in minus_rows)
+    assert all(row["feature_values"]["vocal_bleed_proxy_score"] > 0.0 for row in minus_rows)
+    assert minus_rows[0]["blocker_labels"] == ["insufficient_vocal_residue_improvement"]
+    assert minus_rows[0]["source_evidence"]["source"] == "ralph_minus_improvement_manifest"
+    assert minus_rows[0]["source_evidence"]["focus_evaluation_used_for_delivery"] is False
+    evidence_file = Path(minus_rows[0]["source_run_dir"]) / minus_rows[0]["source_judge_file"]
+    evidence_rows = read_jsonl(evidence_file)
+    assert len(evidence_rows) == 2
+    assert evidence_rows[0]["window_metrics"][0]["ralph_window_evidence"]["vocal_residue_corr"] == 0.08
+
+
 def test_runtime_run_roots_normalize_mac_project_artifact_paths(tmp_path: Path, monkeypatch) -> None:
     from tools.build_audio_error_training_views import build_audio_error_training_views
 

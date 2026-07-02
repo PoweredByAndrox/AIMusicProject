@@ -46,6 +46,12 @@ they may be scored by an already trained shadow critic to localize current
 candidate windows, but they do not train the critic because they are not exact
 target windowed judge labels.
 
+RALPH minus improvement hardcase rows imported through
+`build_audio_error_training_views.py --ralph-manifests` use the same score-only
+label source. They preserve RALPH residual/detail-drift provenance for shadow
+scoring and router diagnosis, but they are excluded from strict target critic
+training for the same reason.
+
 ## Reliability Controls
 
 MODEL-2C makes false accept the primary safety metric.

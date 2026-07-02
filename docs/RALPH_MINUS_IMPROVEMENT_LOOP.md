@@ -67,6 +67,13 @@ generalized router input, not as per-track hardcoded timestamps. This candidate 
 still subject to the same RALPH policy; if it reduces vocal residue by creating a
 detail/RMS dip, it remains rejected and must not be promoted to a listen pack.
 
+RALPH manifests can be fed back into `tools/build_audio_error_training_views.py`
+with `--ralph-manifests`. This converts candidate focus-window evidence into
+`minus_critic` score-only rows with
+`source_judge_file=no_reference_minus_windowed_judge.jsonl`. The rows preserve
+the RALPH window metrics and delivery status as provenance, but they are not
+strict separator-training labels and rejected/blocked audio remains diagnostic.
+
 ## Runtime
 
 Run only inside Docker:

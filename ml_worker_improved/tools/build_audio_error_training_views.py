@@ -42,7 +42,8 @@ MANIFEST_FILE = "audio_error_training_views_manifest.json"
 SUMMARY_FILE = "audio_error_training_views_summary.md"
 OWNED_OUTPUT_FILES = (MANIFEST_FILE, SUMMARY_FILE, *VIEW_FILES.values())
 ACCEPTED_PREVIEW_SOURCE_DIR = "accepted_preview_sources"
-OWNED_OUTPUT_DIRS = (ACCEPTED_PREVIEW_SOURCE_DIR,)
+RALPH_SOURCE_DIR = "ralph_manifest_sources"
+OWNED_OUTPUT_DIRS = (ACCEPTED_PREVIEW_SOURCE_DIR, RALPH_SOURCE_DIR)
 
 STEM_JUDGE_FILES = {
     "minus": ("minus_windowed_judge.jsonl", "minus_judge.jsonl", "no_reference_minus_windowed_judge.jsonl"),
@@ -288,6 +289,31 @@ def runtime_scalar_features(stem_type: str, window: dict[str, Any]) -> dict[str,
     }
 
 
+def ralph_drift_damage(window: dict[str, Any]) -> float:
+    return max(
+        clip01(max(0.0, -as_float(window.get("rms_drift_db_vs_base")))),
+        clip01(max(0.0, -as_float(window.get("presence_band_ratio_drift_db")))),
+        clip01(max(0.0, -as_float(window.get("air_band_ratio_drift_db")))),
+    )
+
+
+def ralph_scalar_features(window: dict[str, Any]) -> dict[str, float]:
+    vocal_bleed = clip01(abs(as_float(window.get("vocal_residue_corr"))))
+    missing_detail = ralph_drift_damage(window)
+    residual_energy = max(vocal_bleed, missing_detail)
+    return {
+        "residual_energy": residual_energy,
+        "mixture_consistency_error": vocal_bleed,
+        "phase_collapse_score": 0.0,
+        "stereo_width_score": 0.0,
+        "vocal_bleed_proxy_score": vocal_bleed,
+        "instrumental_bleed_proxy_score": 0.0,
+        "missing_detail_score": missing_detail,
+        "transient_damage_score": 0.0,
+        "artifact_noise_score": 0.0,
+    }
+
+
 def manifest_ref_path(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if isinstance(value, dict):
@@ -498,6 +524,175 @@ def accepted_listen_preview_rows(listen_preview_manifests: Sequence[Path], outpu
                     }
                 ],
             )
+    return rows
+
+
+def ralph_input_paths(manifest: dict[str, Any]) -> dict[str, str]:
+    inputs = manifest.get("inputs") if isinstance(manifest.get("inputs"), dict) else {}
+    normalized = inputs.get("normalized_inputs") if isinstance(inputs.get("normalized_inputs"), dict) else {}
+    merged = {**inputs, **normalized}
+    return {
+        "mix_path": normalize_runtime_path(merged.get("raw_audio_path")),
+        "vocal_candidate_path": normalize_runtime_path(merged.get("primary_vocals_path") or merged.get("secondary_vocals_path")),
+        "base_minus_path": normalize_runtime_path(merged.get("base_minus_path")),
+        "guide_minus_path": normalize_runtime_path(merged.get("guide_minus_path")),
+    }
+
+
+def ralph_candidate_windows(manifest: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    del manifest
+    evaluation = candidate.get("evaluation") if isinstance(candidate.get("evaluation"), dict) else {}
+    focus = evaluation.get("focus_evaluation") if isinstance(evaluation.get("focus_evaluation"), dict) else {}
+    summary = evaluation.get("summary") if isinstance(evaluation.get("summary"), dict) else {}
+    for value in (
+        focus.get("windows"),
+        summary.get("top_vocal_residue_windows"),
+    ):
+        if isinstance(value, list) and value:
+            return [window for window in value if isinstance(window, dict)]
+    return []
+
+
+def label_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        labels: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                labels.append(str(item.get("label") or ""))
+            else:
+                labels.append(str(item or ""))
+        return stable_unique(labels)
+    if isinstance(value, dict):
+        return stable_unique([str(value.get("label") or "")])
+    return stable_unique(as_list(value))
+
+
+def ralph_blockers(evaluation: dict[str, Any]) -> list[str]:
+    status = str(evaluation.get("status") or "").strip().lower()
+    if status == "accepted":
+        return []
+    return label_values(evaluation.get("blockers"))
+
+
+def ralph_decision(evaluation: dict[str, Any]) -> str:
+    return "accept_candidate" if str(evaluation.get("status") or "").strip().lower() == "accepted" else "blocked_hard_case"
+
+
+def ralph_window_evidence(window: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "vocal_residue_corr": as_float(window.get("vocal_residue_corr")),
+        "vocal_projection_ratio_db": as_float(window.get("vocal_projection_ratio_db")),
+        "rms_drift_db_vs_base": as_float(window.get("rms_drift_db_vs_base")),
+        "presence_band_ratio_drift_db": as_float(window.get("presence_band_ratio_drift_db")),
+        "air_band_ratio_drift_db": as_float(window.get("air_band_ratio_drift_db")),
+        "critic_decision": str(window.get("critic_decision") or ""),
+        "predicted_blockers": label_values(window.get("predicted_blockers")),
+        "focus_reason": str(window.get("focus_reason") or ""),
+    }
+
+
+def ralph_manifest_rows(ralph_manifests: Sequence[Path], output_dir: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    source_root = output_dir / RALPH_SOURCE_DIR
+    for manifest_index, manifest_path in enumerate(ralph_manifests, start=1):
+        manifest = read_json(manifest_path)
+        inputs = ralph_input_paths(manifest)
+        source_dir = source_root / f"rm{manifest_index:03d}"
+        source_judge_file = source_dir / ACCEPTED_PREVIEW_MINUS_JUDGE_FILE
+        source_judge_rows: list[dict[str, Any]] = []
+        filters = manifest.get("focus_window_filters") if isinstance(manifest.get("focus_window_filters"), dict) else {}
+        candidates = manifest.get("candidates")
+        if not isinstance(candidates, list):
+            continue
+        for candidate_index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            evaluation = candidate.get("evaluation") if isinstance(candidate.get("evaluation"), dict) else {}
+            candidate_name = str(candidate.get("candidate_name") or evaluation.get("candidate_name") or f"ralph_candidate_{candidate_index:03d}")
+            minus_path = normalize_runtime_path(candidate.get("artifact_path"))
+            blockers = ralph_blockers(evaluation)
+            decision = ralph_decision(evaluation)
+            window_metrics: list[dict[str, Any]] = []
+            for window_index, window in enumerate(ralph_candidate_windows(manifest, candidate)):
+                start, end = window_bounds({}, window)
+                if end <= start:
+                    continue
+                track_id = str(window.get("track_id") or filters.get("track_id") or "ralph_focus")
+                scalar_features = ralph_scalar_features(window)
+                evidence = ralph_window_evidence(window)
+                judge_window = {
+                    "track_id": track_id,
+                    "start_sec": start,
+                    "end_sec": end,
+                    "minus_decision": decision,
+                    "minus_blockers": blockers,
+                    **scalar_features,
+                    "ralph_window_evidence": evidence,
+                }
+                window_metrics.append(judge_window)
+                rows.append(
+                    {
+                        "dataset_id": "ralph_manifest_hardcase",
+                        "track_id": track_id,
+                        "run_id": Path(str(manifest_path.parent)).name,
+                        "window_id": "__".join(
+                            [
+                                track_id or "missing_track_id",
+                                candidate_name or "missing_candidate_id",
+                                "minus",
+                                f"rm{manifest_index:03d}",
+                                f"{candidate_index:03d}",
+                                f"{window_index:04d}",
+                            ]
+                        ),
+                        "window_start_sec": start,
+                        "window_end_sec": end,
+                        "mix_path": inputs["mix_path"],
+                        "vocal_candidate_path": inputs["vocal_candidate_path"],
+                        "minus_candidate_path": minus_path,
+                        "candidate_id": candidate_name,
+                        "route_id": candidate_name,
+                        "stem_type": "minus",
+                        "blockers": blockers,
+                        "judge_decision": decision,
+                        "pair_compatibility_status": "",
+                        **scalar_features,
+                        "error_map_paths": {},
+                        "train_split": "train",
+                        "safe_for_training": False,
+                        "unsafe_reason": "ralph_manifest_score_only_source_row",
+                        "target_views": ["minus_critic"],
+                        "source_run_dir": str(source_dir),
+                        "source_candidate_family": "ralph_minus_improvement",
+                        "candidate_family": "ralph_minus_improvement",
+                        "source_judge_file": ACCEPTED_PREVIEW_MINUS_JUDGE_FILE,
+                        "source_pair_file": "",
+                        "source_selected_file": normalize_runtime_path(manifest.get("focus_window_source")),
+                        "selected_candidate_evidence": candidate_name == str(manifest.get("selected_candidate") or ""),
+                        "hardcase": True,
+                        "repair_source_files": stable_unique([str(manifest_path), normalize_runtime_path(manifest.get("focus_window_source"))]),
+                        "source_evidence": {
+                            "source": "ralph_minus_improvement_manifest",
+                            "delivery_status": str(manifest.get("delivery_status") or ""),
+                            "delivery_allowed": bool(manifest.get("delivery_allowed")),
+                            "presentation_status": str(manifest.get("presentation_status") or ""),
+                            "candidate_status": str(evaluation.get("status") or ""),
+                            "focus_evaluation_used_for_delivery": bool(manifest.get("focus_evaluation_used_for_delivery")),
+                            "ralph_window_evidence": evidence,
+                        },
+                        **SAFETY_FLAGS,
+                    }
+                )
+            if window_metrics:
+                source_judge_rows.append(
+                    {
+                        "track_id": str(window_metrics[0].get("track_id") or filters.get("track_id") or "ralph_focus"),
+                        "candidate_id": candidate_name,
+                        "window_metrics": window_metrics,
+                    }
+                )
+        if source_judge_rows:
+            write_jsonl(source_judge_file, source_judge_rows)
     return rows
 
 
@@ -867,7 +1062,7 @@ def base_view_row(
         or ""
     )
     hardcase = source_row.get("hardcase") is True or (label == 0 and bool(resolved_blockers))
-    return {
+    payload = {
         "view_name": view_name,
         "target_name": target_name,
         "row_id": view_row_id(index, source_row),
@@ -899,6 +1094,9 @@ def base_view_row(
         "unsafe_reason_for_this_view": ";".join(stable_unique(unsafe_reasons)),
         "release_ready": False,
     }
+    if isinstance(source_row.get("source_evidence"), dict):
+        payload["source_evidence"] = source_row["source_evidence"]
+    return payload
 
 
 def target_views_for(row: dict[str, Any]) -> set[str]:
@@ -1082,6 +1280,7 @@ def build_audio_error_training_views(
     output_dir: Path,
     run_roots: Sequence[Path] = (),
     listen_preview_manifests: Sequence[Path] = (),
+    ralph_manifests: Sequence[Path] = (),
 ) -> dict[str, Any]:
     manifest_path = dataset_dir / REPAIRED_MANIFEST
     rows_path = dataset_dir / REPAIRED_ROWS
@@ -1097,7 +1296,8 @@ def build_audio_error_training_views(
     repaired_rows = list(iter_jsonl(rows_path))
     runtime_rows = runtime_window_rows(run_roots)
     accepted_preview_rows = accepted_listen_preview_rows(listen_preview_manifests, output_dir)
-    source_rows = repaired_rows + runtime_rows + accepted_preview_rows
+    ralph_rows = ralph_manifest_rows(ralph_manifests, output_dir)
+    source_rows = repaired_rows + runtime_rows + accepted_preview_rows + ralph_rows
     map_cache: dict[str, dict[str, float]] = {}
     source_cache: dict[str, list[dict[str, Any]]] = {}
     views: dict[str, list[dict[str, Any]]] = {view_name: [] for view_name in VIEW_FILES}
@@ -1142,8 +1342,10 @@ def build_audio_error_training_views(
         "repaired_rows_total": len(repaired_rows),
         "source_run_rows_added": len(runtime_rows),
         "accepted_listen_preview_rows_added": len(accepted_preview_rows),
+        "ralph_manifest_rows_added": len(ralph_rows),
         "run_roots": [str(path) for path in run_roots],
         "listen_preview_manifests": [str(path) for path in listen_preview_manifests],
+        "ralph_manifests": [str(path) for path in ralph_manifests],
         "source_rows_safe_for_training": sum(1 for row in repaired_rows if row.get("safe_for_training") is True),
         "source_rows_unsafe": sum(1 for row in repaired_rows if row.get("safe_for_training") is not True),
         "source_repair_report": {
@@ -1172,6 +1374,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-roots", type=Path, nargs="*", default=[])
     parser.add_argument("--listen-preview-manifests", type=Path, nargs="*", default=[])
+    parser.add_argument("--ralph-manifests", type=Path, nargs="*", default=[])
     return parser.parse_args(argv)
 
 
@@ -1182,6 +1385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         run_roots=args.run_roots,
         listen_preview_manifests=args.listen_preview_manifests,
+        ralph_manifests=args.ralph_manifests,
     )
     print(json.dumps(manifest, ensure_ascii=False, sort_keys=True), flush=True)
     return 0

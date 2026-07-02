@@ -79,6 +79,17 @@ post-render self-judge manifest, derives short exact-window evidence under
 `accepted_preview_sources/lpNNN/no_reference_minus_windowed_judge.jsonl`, and
 adds those windows only to `minus_critic`.
 
+RALPH minus improvement manifests can be supplied with `--ralph-manifests`.
+They are imported as score-only no-reference hardcase rows, not as strict
+training labels. The builder converts each candidate's RALPH focus windows into
+short evidence files under
+`ralph_manifest_sources/rmNNN/no_reference_minus_windowed_judge.jsonl`, maps
+RALPH vocal-residue/detail-drift metrics into the existing acoustic feature
+columns, and preserves raw RALPH window evidence in `source_evidence`. Target
+critic scoring can use these rows because `score_target_audio_error_views.py`
+loads score-only rows, while strict target critic training still excludes them
+because their label source is not `minus_windowed_judge.jsonl`.
+
 This route does not create pair or overall labels. Even when a selector file is
 present, accepted listen-preview rows carry `target_views=["minus_critic"]`, so
 `pair_critic` and `overall_accept` remain empty unless separate pair/overall
@@ -117,14 +128,17 @@ docker compose run --rm --no-deps ml-worker python tools/build_audio_error_train
   --dataset-dir /app/lab_artifacts/audio_error_grounding/dataset_001_repaired \
   --output-dir /app/lab_artifacts/audio_error_grounding/dataset_001_training_views \
   --run-roots /app/lab_artifacts/audio_error_grounding/negative_harvest_batch_001 \
-  --listen-preview-manifests /host_artifacts/loop/it076/deliv/r001/no_reference_minus_listen_preview_manifest.json
+  --listen-preview-manifests /host_artifacts/loop/it076/deliv/r001/no_reference_minus_listen_preview_manifest.json \
+  --ralph-manifests /host_artifacts/loop/it077/ralph/r001/ralph_minus_improvement_manifest.json
 ```
 
 Omit `--run-roots` for repaired-dataset-only accounting. Include harvest/runtime
 run roots when strict negative windows need to be added from real autonomous
 runtime artifacts. Include `--listen-preview-manifests` only for accepted
 listen-preview manifests that already passed post-render self-judge and selector
-checks; blocked manifests add zero rows.
+checks; blocked manifests add zero rows. Include `--ralph-manifests` to score
+localized RALPH hardcase windows from accepted or blocked RALPH runs without
+promoting them to strict labels or listen results.
 
 Validate:
 
