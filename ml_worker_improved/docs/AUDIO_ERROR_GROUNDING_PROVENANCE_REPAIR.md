@@ -95,6 +95,12 @@ boundaries, and error maps are present. If a previously unsafe row has proven
 provenance but no error map, the repair command computes maps into the repaired
 output directory.
 
+For instrumental/minus runtime rows, `vocal_companion_path` or
+`vocal_analysis_path` may satisfy the vocal-side analysis audio requirement for
+error-map extraction. This preserves source-conservation evidence for minus
+diagnostics, but it is not a production vocal result and must not be promoted to
+`selected_vocal_path`.
+
 ## Validate
 
 ```bash

@@ -230,6 +230,66 @@ def test_build_audio_error_grounding_dataset_writes_rows_maps_and_manifest(tmp_p
     assert len(maps_index) == 2
 
 
+def assert_minus_grounding_uses_analysis_audio(tmp_path: Path, *, path_field: str) -> None:
+    run_dir = create_run(tmp_path)
+    (run_dir / "vocal_windowed_judge.jsonl").unlink()
+    candidates = read_jsonl(run_dir / "candidate_pool.jsonl")
+    analysis_path = candidates[0].pop("vocal_path")
+    candidates[0].pop("selected_vocal_path", None)
+    candidates[0][path_field] = analysis_path
+    if path_field == "vocal_companion_path":
+        candidates[0]["vocal_companion_role"] = "residual_companion"
+        candidates[0]["vocal_companion_source"] = "residual_from_raw_minus_instrumental"
+    write_jsonl(run_dir / "candidate_pool.jsonl", candidates)
+    minus_rows = read_jsonl(run_dir / "minus_windowed_judge.jsonl")
+    for row in minus_rows:
+        row.pop("vocal_path", None)
+        row.pop("selected_vocal_path", None)
+        row[path_field] = analysis_path
+        if path_field == "vocal_companion_path":
+            row["vocal_companion_role"] = "residual_companion"
+            row["vocal_companion_source"] = "residual_from_raw_minus_instrumental"
+    write_jsonl(run_dir / "minus_windowed_judge.jsonl", minus_rows)
+    output_dir = tmp_path / "dataset"
+
+    manifest = build_audio_error_grounding_dataset(
+        run_roots=[run_dir],
+        output_dir=output_dir,
+        window_sec=0.5,
+        hop_sec=0.5,
+        map_max_bins=16,
+        map_max_frames=8,
+        max_waveform_samples=64,
+    )
+
+    rows = read_jsonl(output_dir / "audio_error_window_dataset.jsonl")
+    assert manifest["windows_total"] == 1
+    assert manifest["safe_for_training_count"] == 1
+    assert manifest["error_maps_written"] == 1
+    assert rows[0]["safe_for_training"] is True
+    assert rows[0]["unsafe_reason"] == ""
+    assert rows[0]["vocal_candidate_path"] == analysis_path
+    assert rows[0]["vocal_analysis_path"] == analysis_path
+    if path_field == "vocal_companion_path":
+        assert rows[0]["vocal_companion_path"] == analysis_path
+        assert rows[0]["vocal_companion_role"] == "residual_companion"
+        assert rows[0]["vocal_companion_source"] == "residual_from_raw_minus_instrumental"
+    else:
+        assert rows[0]["vocal_companion_path"] == ""
+        assert rows[0]["vocal_companion_role"] == ""
+        assert rows[0]["vocal_companion_source"] == ""
+    assert rows[0]["error_map_paths"]["npz"].endswith(".npz")
+    assert Path(rows[0]["error_map_paths"]["npz"]).exists()
+
+
+def test_minus_grounding_uses_vocal_analysis_path(tmp_path: Path) -> None:
+    assert_minus_grounding_uses_analysis_audio(tmp_path, path_field="vocal_analysis_path")
+
+
+def test_minus_grounding_uses_vocal_companion_path(tmp_path: Path) -> None:
+    assert_minus_grounding_uses_analysis_audio(tmp_path, path_field="vocal_companion_path")
+
+
 def test_missing_audio_is_kept_but_marked_unsafe(tmp_path: Path) -> None:
     run_dir = create_run(tmp_path, missing_minus=True)
     output_dir = tmp_path / "dataset"
