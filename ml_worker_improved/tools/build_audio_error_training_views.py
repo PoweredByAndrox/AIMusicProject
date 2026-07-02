@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -40,6 +41,8 @@ VIEW_FILES = {
 MANIFEST_FILE = "audio_error_training_views_manifest.json"
 SUMMARY_FILE = "audio_error_training_views_summary.md"
 OWNED_OUTPUT_FILES = (MANIFEST_FILE, SUMMARY_FILE, *VIEW_FILES.values())
+ACCEPTED_PREVIEW_SOURCE_DIR = "accepted_preview_sources"
+OWNED_OUTPUT_DIRS = (ACCEPTED_PREVIEW_SOURCE_DIR,)
 
 STEM_JUDGE_FILES = {
     "minus": ("minus_windowed_judge.jsonl", "minus_judge.jsonl", "no_reference_minus_windowed_judge.jsonl"),
@@ -53,6 +56,7 @@ VIEW_READINESS_RULES = {
     "overall_accept": {"min_safe": 100, "min_positive": 1, "min_negative": 1},
 }
 RUN_MARKER_FILES = ("candidate_pool.jsonl", "minus_windowed_judge.jsonl", "vocal_windowed_judge.jsonl")
+ACCEPTED_PREVIEW_MINUS_JUDGE_FILE = "no_reference_minus_windowed_judge.jsonl"
 ACOUSTIC_SCALAR_FEATURE_COLUMNS = tuple(name for name in SCALAR_FEATURE_COLUMNS if not name.startswith("window_"))
 PROJECT_PATH_MOUNT_PREFIXES = (
     ("D:/AIMusicProject/artifacts", "AIMUSIC_ARTIFACTS_MOUNT", "/host_artifacts"),
@@ -108,6 +112,10 @@ def prepare_output_dir(output_dir: Path) -> None:
         path = output_dir / name
         if path.exists():
             path.unlink()
+    for name in OWNED_OUTPUT_DIRS:
+        path = output_dir / name
+        if path.exists():
+            shutil.rmtree(path)
 
 
 def find_run_dirs(run_roots: Sequence[Path]) -> list[Path]:
@@ -278,6 +286,219 @@ def runtime_scalar_features(stem_type: str, window: dict[str, Any]) -> dict[str,
         name: as_float(window.get(name)) if name in window else no_reference_features[name]
         for name in ACOUSTIC_SCALAR_FEATURE_COLUMNS
     }
+
+
+def manifest_ref_path(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if isinstance(value, dict):
+        return normalize_runtime_path(value.get("path"))
+    return normalize_runtime_path(value)
+
+
+def accepted_listen_preview_manifest(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("delivery_allowed") is True
+        and str(payload.get("delivery_status") or "") == "accepted"
+        and str(payload.get("presentation_status") or "") == "accepted_for_listen_pack"
+        and str(payload.get("stem_type") or payload.get("score_mode") or "") == "minus"
+    )
+
+
+def listen_preview_scalar_features(
+    *,
+    segment: dict[str, Any],
+    listen_manifest: dict[str, Any],
+    accepted_row: dict[str, Any],
+    result_row: dict[str, Any],
+) -> dict[str, float]:
+    metrics = segment.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+    severities = segment.get("issue_severities")
+    if not isinstance(severities, dict):
+        severities = {}
+    gate = listen_manifest.get("minus_musical_detail_preservation_gate")
+    gate_metrics = gate.get("metrics") if isinstance(gate, dict) and isinstance(gate.get("metrics"), dict) else {}
+    accepted_gate = accepted_row.get("minus_musical_detail_preservation_gate")
+    accepted_gate_metrics = (
+        accepted_gate.get("metrics")
+        if isinstance(accepted_gate, dict) and isinstance(accepted_gate.get("metrics"), dict)
+        else {}
+    )
+
+    mixture_consistency = clip01(
+        result_row.get("mixture_consistency_score")
+        or accepted_gate_metrics.get("mixture_consistency_score")
+        or gate_metrics.get("mixture_consistency_score")
+    )
+    if mixture_consistency <= 0.0:
+        mixture_consistency = clip01(gate_metrics.get("mixture_consistency_score"))
+    phase_stability = clip01(result_row.get("instrumental_phase_consistency_score") or gate_metrics.get("phase_stereo_stability"))
+    spectral_balance = clip01(gate_metrics.get("spectral_balance"))
+    instrumental_integrity = clip01(gate_metrics.get("instrumental_integrity"))
+    source_corr_damage = 1.0 - clip01(metrics.get("source_candidate_corr_abs"))
+    source_delta = clip01(metrics.get("source_candidate_delta_rms_ratio"))
+    vocal_corr = clip01(metrics.get("vocal_stem_corr_abs"))
+    vocal_projection = clip01(severities.get("vocal_projection"))
+    vocal_bleed = max(clip01(result_row.get("vocal_leakage_in_minus_score")), vocal_corr, vocal_projection)
+    instrumental_bleed = clip01(result_row.get("instrumental_leakage_in_vocal_score"))
+    artifact_noise = max_score(
+        result_row,
+        ("robotic_artifact_score", "silence_hallucination_score", "thin_vocal_score"),
+    )
+    transient_damage = max(clip01(result_row.get("transient_damage_score")), clip01(gate_metrics.get("transient_damage_score")))
+    missing_detail = max(
+        clip01(severities.get("air_loss")),
+        clip01(severities.get("presence_loss")),
+        clip01(severities.get("low_rms_ratio")),
+        1.0 - spectral_balance if spectral_balance > 0.0 else 0.0,
+        1.0 - instrumental_integrity if instrumental_integrity > 0.0 else 0.0,
+        source_delta * 0.5,
+    )
+    mixture_error = max(1.0 - mixture_consistency if mixture_consistency > 0.0 else 0.0, source_corr_damage)
+    phase_collapse = 1.0 - phase_stability if phase_stability > 0.0 else 0.0
+    residual_energy = max(
+        mixture_error,
+        phase_collapse,
+        vocal_bleed,
+        instrumental_bleed,
+        missing_detail,
+        transient_damage,
+        artifact_noise,
+    )
+    return {
+        "residual_energy": residual_energy,
+        "mixture_consistency_error": mixture_error,
+        "phase_collapse_score": phase_collapse,
+        "stereo_width_score": phase_stability,
+        "vocal_bleed_proxy_score": vocal_bleed,
+        "instrumental_bleed_proxy_score": instrumental_bleed,
+        "missing_detail_score": missing_detail,
+        "transient_damage_score": transient_damage,
+        "artifact_noise_score": artifact_noise,
+    }
+
+
+def segment_window_bounds(segment: dict[str, Any]) -> tuple[float, float]:
+    window = segment.get("window_sec")
+    if isinstance(window, list) and len(window) >= 2:
+        return round(as_float(window[0]), 6), round(as_float(window[1]), 6)
+    return window_bounds(segment, segment)
+
+
+def load_result_judge_row(listen_manifest: dict[str, Any]) -> dict[str, Any]:
+    path = manifest_ref_path(listen_manifest, "source_result_judge_jsonl")
+    if not path:
+        return {}
+    for row in iter_jsonl(Path(path)):
+        if str(row.get("candidate_id") or "") == str(listen_manifest.get("candidate_id") or ""):
+            return row
+    return {}
+
+
+def accepted_listen_preview_rows(listen_preview_manifests: Sequence[Path], output_dir: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    source_root = output_dir / ACCEPTED_PREVIEW_SOURCE_DIR
+    for manifest_index, manifest_path in enumerate(listen_preview_manifests, start=1):
+        listen_manifest = read_json(manifest_path)
+        if not accepted_listen_preview_manifest(listen_manifest):
+            continue
+        accepted_rows = listen_manifest.get("accepted_listen_preview_rows")
+        accepted_row = accepted_rows[0] if isinstance(accepted_rows, list) and accepted_rows and isinstance(accepted_rows[0], dict) else {}
+        candidate_id = str(listen_manifest.get("candidate_id") or accepted_row.get("candidate_id") or "")
+        self_judge_path = manifest_ref_path(listen_manifest, "source_self_judge_manifest")
+        self_judge_manifest = read_json(Path(self_judge_path)) if self_judge_path else {}
+        segments = self_judge_manifest.get("segments")
+        if not isinstance(segments, list):
+            continue
+        result_row = load_result_judge_row(listen_manifest)
+        source_dir = source_root / f"lp{manifest_index:03d}"
+        source_judge_file = source_dir / ACCEPTED_PREVIEW_MINUS_JUDGE_FILE
+        judge_windows: list[dict[str, Any]] = []
+        for segment_index, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                continue
+            start, end = segment_window_bounds(segment)
+            if end <= start:
+                continue
+            scalar_features = listen_preview_scalar_features(
+                segment=segment,
+                listen_manifest=listen_manifest,
+                accepted_row=accepted_row,
+                result_row=result_row,
+            )
+            blockers = stable_unique(as_list(segment.get("issues")) + as_list(accepted_row.get("minus_blockers")) + as_list(listen_manifest.get("minus_blockers")))
+            decision = str(accepted_row.get("minus_decision") or listen_manifest.get("minus_decision") or result_row.get("minus_decision") or "accept_candidate")
+            judge_window = {
+                "start_sec": start,
+                "end_sec": end,
+                "minus_decision": decision,
+                "minus_blockers": blockers,
+                **scalar_features,
+            }
+            judge_windows.append(judge_window)
+            window_id = "__".join(
+                [
+                    str(listen_manifest.get("track_id") or "missing_track_id"),
+                    candidate_id or "missing_candidate_id",
+                    "minus",
+                    f"alp{manifest_index:03d}",
+                    f"{segment_index:04d}",
+                ]
+            )
+            rows.append(
+                {
+                    "dataset_id": "accepted_listen_preview",
+                    "track_id": str(listen_manifest.get("track_id") or accepted_row.get("track_id") or ""),
+                    "run_id": str(listen_manifest.get("manifest_type") or "no_reference_minus_listen_preview"),
+                    "window_id": window_id,
+                    "window_start_sec": start,
+                    "window_end_sec": end,
+                    "mix_path": normalize_runtime_path(listen_manifest.get("mix_path")),
+                    "vocal_candidate_path": normalize_runtime_path(listen_manifest.get("vocal_path")),
+                    "minus_candidate_path": normalize_runtime_path(listen_manifest.get("selected_minus_path") or listen_manifest.get("minus_path") or listen_manifest.get("instrumental_path")),
+                    "candidate_id": candidate_id,
+                    "route_id": str(listen_manifest.get("judge_mode") or "no_reference_minus_listen_preview"),
+                    "stem_type": "minus",
+                    "blockers": blockers,
+                    "judge_decision": decision,
+                    "pair_compatibility_status": "",
+                    **scalar_features,
+                    "error_map_paths": {},
+                    "train_split": "train",
+                    "safe_for_training": False,
+                    "unsafe_reason": "accepted_listen_preview_source_row_not_repaired_dataset",
+                    "target_views": ["minus_critic"],
+                    "source_run_dir": str(source_dir),
+                    "source_candidate_family": "accepted_listen_preview_minus",
+                    "candidate_family": "accepted_listen_preview_minus",
+                    "source_judge_file": ACCEPTED_PREVIEW_MINUS_JUDGE_FILE,
+                    "source_pair_file": "",
+                    "source_selected_file": manifest_ref_path(listen_manifest, "source_selector_jsonl"),
+                    "selected_candidate_evidence": True,
+                    "repair_source_files": stable_unique(
+                        [
+                            str(manifest_path),
+                            self_judge_path,
+                            manifest_ref_path(listen_manifest, "source_result_judge_jsonl"),
+                            manifest_ref_path(listen_manifest, "source_selector_jsonl"),
+                        ]
+                    ),
+                    **SAFETY_FLAGS,
+                }
+            )
+        if judge_windows:
+            write_jsonl(
+                source_judge_file,
+                [
+                    {
+                        "track_id": str(listen_manifest.get("track_id") or accepted_row.get("track_id") or ""),
+                        "candidate_id": candidate_id,
+                        "window_metrics": judge_windows,
+                    }
+                ],
+            )
+    return rows
 
 
 def runtime_window_rows(run_roots: Sequence[Path]) -> list[dict[str, Any]]:
@@ -680,6 +901,16 @@ def base_view_row(
     }
 
 
+def target_views_for(row: dict[str, Any]) -> set[str]:
+    values = stable_unique(str(value) for value in as_list(row.get("target_views")) if str(value or ""))
+    return set(values)
+
+
+def row_targets_view(row: dict[str, Any], view_name: str) -> bool:
+    targets = target_views_for(row)
+    return not targets or view_name in targets
+
+
 def build_stem_view_row(
     index: int,
     row: dict[str, Any],
@@ -753,7 +984,9 @@ def build_overall_view_row(index: int, row: dict[str, Any], *, map_cache: dict[s
     reasons = common_reasons(row, stem_type=None)
     if not selected_candidate_evidence(row):
         reasons.append("missing_selected_candidate_evidence")
-    if is_real_value(row.get("pair_compatibility_status")) and not is_real_value(row.get("source_pair_file")):
+    if not is_real_value(row.get("pair_compatibility_status")):
+        reasons.append("missing_pair_compatibility_status")
+    if not is_real_value(row.get("source_pair_file")):
         reasons.append("missing_exact_pair_compatibility_evidence")
     if label is None:
         reasons.append("missing_artifact_proven_accept_or_block_label")
@@ -843,7 +1076,13 @@ def write_summary(path: Path, manifest: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def build_audio_error_training_views(*, dataset_dir: Path, output_dir: Path, run_roots: Sequence[Path] = ()) -> dict[str, Any]:
+def build_audio_error_training_views(
+    *,
+    dataset_dir: Path,
+    output_dir: Path,
+    run_roots: Sequence[Path] = (),
+    listen_preview_manifests: Sequence[Path] = (),
+) -> dict[str, Any]:
     manifest_path = dataset_dir / REPAIRED_MANIFEST
     rows_path = dataset_dir / REPAIRED_ROWS
     maps_index_path = dataset_dir / REPAIRED_MAPS_INDEX
@@ -857,14 +1096,15 @@ def build_audio_error_training_views(*, dataset_dir: Path, output_dir: Path, run
     repair_report = read_json(repair_report_path)
     repaired_rows = list(iter_jsonl(rows_path))
     runtime_rows = runtime_window_rows(run_roots)
-    source_rows = repaired_rows + runtime_rows
+    accepted_preview_rows = accepted_listen_preview_rows(listen_preview_manifests, output_dir)
+    source_rows = repaired_rows + runtime_rows + accepted_preview_rows
     map_cache: dict[str, dict[str, float]] = {}
     source_cache: dict[str, list[dict[str, Any]]] = {}
     views: dict[str, list[dict[str, Any]]] = {view_name: [] for view_name in VIEW_FILES}
 
     for index, row in enumerate(source_rows):
         stem_type = str(row.get("stem_type") or "")
-        if stem_type in ("minus", "vocal"):
+        if stem_type in ("minus", "vocal") and row_targets_view(row, f"{stem_type}_critic"):
             views[f"{stem_type}_critic"].append(
                 build_stem_view_row(
                     index,
@@ -874,8 +1114,10 @@ def build_audio_error_training_views(*, dataset_dir: Path, output_dir: Path, run
                     source_cache=source_cache,
                 )
             )
-        views["pair_critic"].append(build_pair_view_row(index, row, map_cache=map_cache))
-        views["overall_accept"].append(build_overall_view_row(index, row, map_cache=map_cache))
+        if row_targets_view(row, "pair_critic"):
+            views["pair_critic"].append(build_pair_view_row(index, row, map_cache=map_cache))
+        if row_targets_view(row, "overall_accept"):
+            views["overall_accept"].append(build_overall_view_row(index, row, map_cache=map_cache))
 
     for view_name, filename in VIEW_FILES.items():
         rows = sorted(
@@ -899,7 +1141,9 @@ def build_audio_error_training_views(*, dataset_dir: Path, output_dir: Path, run
         "rows_total": len(source_rows),
         "repaired_rows_total": len(repaired_rows),
         "source_run_rows_added": len(runtime_rows),
+        "accepted_listen_preview_rows_added": len(accepted_preview_rows),
         "run_roots": [str(path) for path in run_roots],
+        "listen_preview_manifests": [str(path) for path in listen_preview_manifests],
         "source_rows_safe_for_training": sum(1 for row in repaired_rows if row.get("safe_for_training") is True),
         "source_rows_unsafe": sum(1 for row in repaired_rows if row.get("safe_for_training") is not True),
         "source_repair_report": {
@@ -927,12 +1171,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-roots", type=Path, nargs="*", default=[])
+    parser.add_argument("--listen-preview-manifests", type=Path, nargs="*", default=[])
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    manifest = build_audio_error_training_views(dataset_dir=args.dataset_dir, output_dir=args.output_dir, run_roots=args.run_roots)
+    manifest = build_audio_error_training_views(
+        dataset_dir=args.dataset_dir,
+        output_dir=args.output_dir,
+        run_roots=args.run_roots,
+        listen_preview_manifests=args.listen_preview_manifests,
+    )
     print(json.dumps(manifest, ensure_ascii=False, sort_keys=True), flush=True)
     return 0
 

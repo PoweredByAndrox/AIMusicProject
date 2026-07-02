@@ -40,8 +40,10 @@ evidence. They do not require `pair_compatibility_status`.
 
 `pair_critic` requires proven pair compatibility evidence.
 
-`overall_accept` requires selected-candidate evidence. `final_status` alone is
-never a supervised label.
+`overall_accept` requires selected-candidate evidence plus exact pair
+compatibility evidence. `final_status` alone is never a supervised label, and a
+selected minus/vocal candidate without pair evidence cannot become an overall
+acceptance label.
 
 Unsafe rows remain diagnostic rows with `safe_for_this_view=false` and
 `label=null`; they are not training labels.
@@ -68,6 +70,20 @@ Runtime judge rows may be self-contained. If `candidate_pool.jsonl` contains a
 matching `(track_id, candidate_id)` row, its candidate metadata is preferred.
 Otherwise the builder imports paths, route aliases such as `minus_route_id`, and
 candidate family fields from the judge row itself.
+
+Accepted no-reference minus listen-preview manifests can be supplied with
+`--listen-preview-manifests`. They are accepted only when the manifest says
+`delivery_status=accepted`, `delivery_allowed=true`, and
+`presentation_status=accepted_for_listen_pack`. The builder reads the referenced
+post-render self-judge manifest, derives short exact-window evidence under
+`accepted_preview_sources/lpNNN/no_reference_minus_windowed_judge.jsonl`, and
+adds those windows only to `minus_critic`.
+
+This route does not create pair or overall labels. Even when a selector file is
+present, accepted listen-preview rows carry `target_views=["minus_critic"]`, so
+`pair_critic` and `overall_accept` remain empty unless separate pair/overall
+evidence exists. The derived source rows remain non-delivery metadata with
+`release_ready=false` and no training/model side effects.
 
 `hardcase=true` marks blocked/error windows for downstream mining. Imported
 runtime rows keep `hardcase_holdout=false` unless the source row explicitly
@@ -100,12 +116,15 @@ Build:
 docker compose run --rm --no-deps ml-worker python tools/build_audio_error_training_views.py \
   --dataset-dir /app/lab_artifacts/audio_error_grounding/dataset_001_repaired \
   --output-dir /app/lab_artifacts/audio_error_grounding/dataset_001_training_views \
-  --run-roots /app/lab_artifacts/audio_error_grounding/negative_harvest_batch_001
+  --run-roots /app/lab_artifacts/audio_error_grounding/negative_harvest_batch_001 \
+  --listen-preview-manifests /host_artifacts/loop/it076/deliv/r001/no_reference_minus_listen_preview_manifest.json
 ```
 
 Omit `--run-roots` for repaired-dataset-only accounting. Include harvest/runtime
 run roots when strict negative windows need to be added from real autonomous
-runtime artifacts.
+runtime artifacts. Include `--listen-preview-manifests` only for accepted
+listen-preview manifests that already passed post-render self-judge and selector
+checks; blocked manifests add zero rows.
 
 Validate:
 

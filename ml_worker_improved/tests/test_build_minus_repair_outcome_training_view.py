@@ -137,6 +137,119 @@ def test_builder_extracts_matrix_rows_and_route_family(tmp_path: Path) -> None:
     assert row["safe_for_repair_outcome_training"] is True
 
 
+def test_builder_extracts_accepted_listen_preview_repair_outcome(tmp_path: Path) -> None:
+    from tools.build_minus_repair_outcome_training_view import build_minus_repair_outcome_training_view
+
+    manifest_path = tmp_path / "deliv" / "no_reference_minus_listen_preview_manifest.json"
+    write_json(
+        manifest_path,
+        {
+            "manifest_type": "no_reference_minus_listen_preview",
+            "candidate_id": "base-minus-air-detail-r003",
+            "delivery_allowed": True,
+            "delivery_status": "accepted",
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "source_self_judge_manifest": {"path": "/host_artifacts/loop/it076/self/a003/manifest.json"},
+            "source_result_judge_jsonl": {"path": "/host_artifacts/loop/it076/deliv/r001/no_reference_result_judge/no_reference_result_judge.jsonl"},
+            "source_selector_jsonl": {"path": "/host_artifacts/loop/it076/deliv/r001/no_reference_candidate_selector/no_reference_candidate_selection.jsonl"},
+            "accepted_listen_preview_rows": [
+                {
+                    "track_id": "raw_audio",
+                    "candidate_id": "base-minus-air-detail-r003",
+                    "minus_decision": "accept_candidate",
+                    "minus_path": "/host_artifacts/loop/it076/adr/r003/m001.flac",
+                    "minus_score": 0.848816,
+                    "overall_no_reference_score": 0.843633,
+                    "confidence": 0.827996,
+                    "window_count": 3197,
+                    "minus_blockers": [],
+                    "minus_musical_detail_preservation_gate": {
+                        "status": "proxy_pass",
+                        "blockers": [],
+                        "metrics": {
+                            "instrumental_integrity": 0.747069,
+                            "transient_preservation": 1.0,
+                            "spectral_balance": 1.0,
+                            "phase_stereo_stability": 0.901177,
+                            "mixture_consistency_score": 0.747069,
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    build_minus_repair_outcome_training_view(
+        output_dir=tmp_path / "out",
+        listen_preview_manifests=[manifest_path],
+    )
+
+    manifest = read_json(tmp_path / "out" / "manifest.json")
+    rows = read_jsonl(tmp_path / "out" / "rows.jsonl")
+    assert manifest["delivery_allowed"] is False
+    assert manifest["audio_written"] is False
+    assert manifest["listen_preview_manifests"] == [str(manifest_path)]
+    assert manifest["summary"]["accepted_rows"] == 1
+    assert manifest["summary"]["can_train_repair_outcome_model"] is False
+    assert "insufficient_positive_repair_rows" in manifest["summary"]["readiness_blockers"]
+    row = rows[0]
+    assert row["source_kind"] == "listen_preview_manifest_row"
+    assert row["route_family"] == "accepted_listen_preview_repair_chain"
+    assert row["label"] == 1
+    assert row["safe_for_repair_outcome_training"] is True
+    assert row["accepted_for_repair_gate"] is True
+    assert row["candidate_audio_path"].endswith("/adr/r003/m001.flac")
+    assert row["listen_preview_delivery_allowed"] is True
+    assert row["listen_preview_presentation_status"] == "accepted_for_listen_pack"
+    assert row["feature_values"]["score"] == 0.848816
+    assert row["feature_values"]["detail_gate_instrumental_integrity"] == 0.747069
+    assert row["delivery_allowed"] is False
+
+
+def test_blocked_listen_preview_manifest_is_not_positive_label(tmp_path: Path) -> None:
+    from tools.build_minus_repair_outcome_training_view import build_minus_repair_outcome_training_view
+
+    manifest_path = tmp_path / "deliv" / "blocked_preview.json"
+    write_json(
+        manifest_path,
+        {
+            "manifest_type": "no_reference_minus_listen_preview",
+            "candidate_id": "candidate-a",
+            "delivery_allowed": False,
+            "delivery_status": "blocked",
+            "presentation_status": "diagnostic_self_judge_not_for_listen_pack",
+            "accepted_listen_preview_rows": [
+                {
+                    "track_id": "track-a",
+                    "candidate_id": "candidate-a",
+                    "minus_decision": "accept_candidate",
+                    "minus_path": "/host_artifacts/loop/it076/adr/r003/m001.flac",
+                    "minus_score": 0.7,
+                    "minus_musical_detail_preservation_gate": {
+                        "status": "proxy_pass",
+                        "blockers": [],
+                        "metrics": {"instrumental_integrity": 0.8},
+                    },
+                }
+            ],
+        },
+    )
+
+    build_minus_repair_outcome_training_view(
+        output_dir=tmp_path / "out",
+        listen_preview_manifests=[manifest_path],
+    )
+
+    manifest = read_json(tmp_path / "out" / "manifest.json")
+    rows = read_jsonl(tmp_path / "out" / "rows.jsonl")
+    assert manifest["summary"]["accepted_rows"] == 0
+    assert manifest["summary"]["rejected_rows"] == 1
+    assert rows[0]["label"] == 0
+    assert rows[0]["accepted_for_repair_gate"] is False
+    assert rows[0]["listen_preview_delivery_allowed"] is False
+
+
 def test_builder_maps_known_matrix_families(tmp_path: Path) -> None:
     from tools.build_minus_repair_outcome_training_view import route_family_from_matrix_path
 

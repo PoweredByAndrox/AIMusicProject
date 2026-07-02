@@ -165,6 +165,123 @@ def add_no_reference_window_scores(window: dict, *, accepted: bool) -> dict:
     return window
 
 
+def write_listen_preview_manifest(tmp_path: Path, *, accepted: bool = True) -> Path:
+    assets = write_assets(tmp_path, "listen_preview")
+    source_dir = tmp_path / "listen_preview_sources"
+    candidate_id = "accepted-minus-candidate"
+    self_judge_path = source_dir / "instrumental_self_judge_manifest.json"
+    result_judge_path = source_dir / "no_reference_result_judge.jsonl"
+    selector_path = source_dir / "no_reference_candidate_selection.jsonl"
+    manifest_path = source_dir / "no_reference_minus_listen_preview_manifest.json"
+    write_json(
+        self_judge_path,
+        {
+            "segments": [
+                {
+                    "segment_id": "segment_0000",
+                    "window_sec": [0.0, 1.0],
+                    "issues": [],
+                    "issue_severities": {"air_loss": 0.0, "presence_loss": 0.0, "low_rms_ratio": 0.0, "vocal_projection": 0.0},
+                    "metrics": {
+                        "source_candidate_corr_abs": 0.95,
+                        "source_candidate_delta_rms_ratio": 0.12,
+                        "vocal_stem_corr_abs": 0.04,
+                    },
+                },
+                {
+                    "segment_id": "segment_0001",
+                    "window_sec": [1.0, 2.0],
+                    "issues": [],
+                    "issue_severities": {"air_loss": 0.0, "presence_loss": 0.0, "low_rms_ratio": 0.0, "vocal_projection": 0.0},
+                    "metrics": {
+                        "source_candidate_corr_abs": 0.91,
+                        "source_candidate_delta_rms_ratio": 0.18,
+                        "vocal_stem_corr_abs": 0.03,
+                    },
+                },
+            ]
+        },
+    )
+    write_jsonl(
+        result_judge_path,
+        [
+            {
+                "track_id": "track-listen-preview",
+                "candidate_id": candidate_id,
+                "minus_decision": "accept_candidate",
+                "minus_blockers": [],
+                "mixture_consistency_score": 0.76,
+                "instrumental_phase_consistency_score": 0.88,
+                "vocal_leakage_in_minus_score": 0.21,
+                "instrumental_leakage_in_vocal_score": 0.02,
+                "robotic_artifact_score": 0.01,
+                "silence_hallucination_score": 0.0,
+                "thin_vocal_score": 0.0,
+                "transient_damage_score": 0.03,
+            }
+        ],
+    )
+    write_jsonl(
+        selector_path,
+        [
+            {
+                "track_id": "track-listen-preview",
+                "selected_candidate_id": candidate_id,
+                "decision": "accept_candidate" if accepted else "blocked_hard_case",
+            }
+        ],
+    )
+    write_json(
+        manifest_path,
+        {
+            "manifest_type": "no_reference_minus_listen_preview",
+            "delivery_status": "accepted" if accepted else "blocked",
+            "delivery_allowed": accepted,
+            "presentation_status": "accepted_for_listen_pack" if accepted else "blocked",
+            "release_status": "listen_preview_only",
+            "stem_type": "minus",
+            "score_mode": "minus",
+            "track_id": "track-listen-preview",
+            "candidate_id": candidate_id,
+            "mix_path": assets["mix_path"],
+            "vocal_path": assets["vocal_candidate_path"],
+            "selected_minus_path": assets["minus_candidate_path"],
+            "judge_mode": "no_reference_minus_self_judge_and_selector",
+            "accepted_listen_preview_rows": [
+                {
+                    "track_id": "track-listen-preview",
+                    "candidate_id": candidate_id,
+                    "stem_type": "minus",
+                    "minus_decision": "accept_candidate",
+                    "minus_blockers": [],
+                    "minus_musical_detail_preservation_gate": {
+                        "metrics": {
+                            "instrumental_integrity": 0.74,
+                            "mixture_consistency_score": 0.76,
+                            "phase_stereo_stability": 0.88,
+                            "spectral_balance": 0.96,
+                            "transient_damage_score": 0.03,
+                        }
+                    },
+                }
+            ],
+            "minus_musical_detail_preservation_gate": {
+                "metrics": {
+                    "instrumental_integrity": 0.74,
+                    "mixture_consistency_score": 0.76,
+                    "phase_stereo_stability": 0.88,
+                    "spectral_balance": 0.96,
+                    "transient_damage_score": 0.03,
+                }
+            },
+            "source_self_judge_manifest": {"path": str(self_judge_path), "sha256": "test"},
+            "source_result_judge_jsonl": {"path": str(result_judge_path), "sha256": "test"},
+            "source_selector_jsonl": {"path": str(selector_path), "sha256": "test"},
+        },
+    )
+    return manifest_path
+
+
 def rows_by_id(rows: list[dict]) -> dict[str, dict]:
     return {str(row["row_id"]): row for row in rows}
 
@@ -200,6 +317,33 @@ def test_pair_critic_view_requires_pair_compatibility_status(tmp_path: Path) -> 
     row = rows_by_id(pair_rows)[source["window_id"]]
     assert row["safe_for_this_view"] is False
     assert "missing_pair_compatibility_status" in row["unsafe_reason_for_this_view"]
+
+
+def test_overall_accept_requires_exact_pair_evidence_even_with_selected_candidate(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    source = repaired_row(
+        tmp_path,
+        21,
+        stem_type="minus",
+        accepted=True,
+        pair_status="",
+        unsafe_reason="",
+        selected_candidate_evidence=True,
+        source_selected_file="selected_candidates.jsonl",
+        source_pair_file="",
+    )
+    write_repaired_dataset(dataset_dir, [source])
+
+    build_audio_error_training_views(dataset_dir=dataset_dir, output_dir=tmp_path / "views")
+    overall_rows = read_jsonl(tmp_path / "views" / "overall_accept_training_view.jsonl")
+
+    row = rows_by_id(overall_rows)[source["window_id"]]
+    assert row["safe_for_this_view"] is False
+    assert row["label"] is None
+    assert "missing_pair_compatibility_status" in row["unsafe_reason_for_this_view"]
+    assert "missing_exact_pair_compatibility_evidence" in row["unsafe_reason_for_this_view"]
 
 
 def test_minus_labels_come_only_from_exact_minus_windowed_judge_evidence(tmp_path: Path) -> None:
@@ -541,6 +685,67 @@ def test_runtime_run_roots_import_self_contained_no_reference_judge_rows(tmp_pat
     assert "missing_audio_file:candidate_audio_path" not in ";".join(
         row["unsafe_reason_for_this_view"] for row in minus_rows
     )
+
+
+def test_accepted_listen_preview_manifests_add_minus_only_positive_rows(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    write_repaired_dataset(dataset_dir, [])
+    listen_manifest = write_listen_preview_manifest(tmp_path, accepted=True)
+    output_dir = tmp_path / "views"
+
+    manifest = build_audio_error_training_views(
+        dataset_dir=dataset_dir,
+        output_dir=output_dir,
+        listen_preview_manifests=[listen_manifest],
+    )
+    minus_rows = read_jsonl(output_dir / "minus_critic_training_view.jsonl")
+    pair_rows = read_jsonl(output_dir / "pair_critic_training_view.jsonl")
+    overall_rows = read_jsonl(output_dir / "overall_accept_training_view.jsonl")
+
+    safe_rows = [row for row in minus_rows if row["safe_for_this_view"] is True]
+    assert manifest["accepted_listen_preview_rows_added"] == 2
+    assert manifest["source_run_rows_added"] == 0
+    assert [row["label"] for row in safe_rows] == [1, 1]
+    assert pair_rows == []
+    assert overall_rows == []
+    assert all(row["source_candidate_family"] == "accepted_listen_preview_minus" for row in safe_rows)
+    assert all(row["source_judge_file"] == "no_reference_minus_windowed_judge.jsonl" for row in safe_rows)
+    assert all(row["feature_values"]["acoustic_feature_evidence_present"] == 1.0 for row in safe_rows)
+    assert safe_rows[0]["feature_values"]["mixture_consistency_error"] > 0.0
+    assert safe_rows[0]["feature_values"]["vocal_bleed_proxy_score"] > 0.0
+    assert safe_rows[0]["release_ready"] is False
+    evidence_file = Path(safe_rows[0]["source_run_dir"]) / safe_rows[0]["source_judge_file"]
+    evidence_rows = read_jsonl(evidence_file)
+    assert len(evidence_rows) == 1
+    assert len(evidence_rows[0]["window_metrics"]) == 2
+    provenance = set(safe_rows[0]["provenance_source_files"])
+    assert str(listen_manifest) in provenance
+    assert any(path.endswith("instrumental_self_judge_manifest.json") for path in provenance)
+    assert any(path.endswith("no_reference_result_judge.jsonl") for path in provenance)
+    assert any(path.endswith("no_reference_candidate_selection.jsonl") for path in provenance)
+
+
+def test_blocked_listen_preview_manifest_does_not_add_positive_rows(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    write_repaired_dataset(dataset_dir, [])
+    listen_manifest = write_listen_preview_manifest(tmp_path, accepted=False)
+    output_dir = tmp_path / "views"
+
+    manifest = build_audio_error_training_views(
+        dataset_dir=dataset_dir,
+        output_dir=output_dir,
+        listen_preview_manifests=[listen_manifest],
+    )
+
+    assert manifest["accepted_listen_preview_rows_added"] == 0
+    assert read_jsonl(output_dir / "minus_critic_training_view.jsonl") == []
+    assert read_jsonl(output_dir / "pair_critic_training_view.jsonl") == []
+    assert read_jsonl(output_dir / "overall_accept_training_view.jsonl") == []
+    assert not (output_dir / "accepted_preview_sources").exists()
 
 
 def test_runtime_run_roots_normalize_mac_project_artifact_paths(tmp_path: Path, monkeypatch) -> None:

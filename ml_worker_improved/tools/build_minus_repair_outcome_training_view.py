@@ -26,6 +26,9 @@ START_TIME = time.monotonic()
 ACCEPT_STATUSES = {"accepted", "release_ready", "passed"}
 REJECT_STATUSES = {"rejected", "blocked", "failed", "blocked_for_listening"}
 ROUTING_ONLY_STATUSES = {"passed_for_candidate_routing"}
+MIN_SAFE_REPAIR_ROWS = 10
+MIN_POSITIVE_REPAIR_ROWS = 3
+MIN_NEGATIVE_REPAIR_ROWS = 3
 DETAIL_DAMAGE_BLOCKERS = {
     "rms_dip_damage",
     "presence_dip_damage",
@@ -229,6 +232,14 @@ def metric_bundle(
     }
 
 
+def merge_metric_bundles(*bundles: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for bundle in bundles:
+        for key, value in bundle.items():
+            merged[key] = as_optional_float(value)
+    return merged
+
+
 def route_family_from_matrix_path(path: Path) -> str:
     parts = {part.lower() for part in path.parts}
     if "fswp" in parts:
@@ -416,11 +427,122 @@ def rows_from_matrix(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def listen_preview_decision_status(manifest: dict[str, Any], row: dict[str, Any]) -> str:
+    delivery_allowed = manifest.get("delivery_allowed") is True
+    delivery_status = str(manifest.get("delivery_status") or "").strip().lower()
+    presentation_status = str(manifest.get("presentation_status") or "").strip().lower()
+    minus_decision = str(row.get("minus_decision") or row.get("decision") or "").strip().lower()
+    if (
+        delivery_allowed
+        and delivery_status == "accepted"
+        and presentation_status == "accepted_for_listen_pack"
+        and minus_decision == "accept_candidate"
+    ):
+        return "accepted"
+    return delivery_status or "blocked"
+
+
+def listen_preview_metrics(manifest: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    detail_gate = row.get("minus_musical_detail_preservation_gate")
+    detail_metrics = detail_gate.get("metrics") if isinstance(detail_gate, dict) and isinstance(detail_gate.get("metrics"), dict) else {}
+    score_components = row.get("minus_score_components") if isinstance(row.get("minus_score_components"), dict) else {}
+    return merge_metric_bundles(
+        {
+            "score": row.get("minus_score") or manifest.get("minus_score"),
+            "overall_no_reference_score": row.get("overall_no_reference_score"),
+            "confidence": row.get("confidence"),
+            "window_count": row.get("window_count"),
+        },
+        {
+            f"detail_gate_{key}": value
+            for key, value in detail_metrics.items()
+        },
+        {
+            f"minus_score_component_{key}": value
+            for key, value in score_components.items()
+        },
+    )
+
+
+def rows_from_listen_preview_manifest(path: Path) -> list[dict[str, Any]]:
+    manifest = read_json(path)
+    accepted_rows = manifest.get("accepted_listen_preview_rows")
+    if not isinstance(accepted_rows, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(accepted_rows):
+        if not isinstance(row, dict):
+            continue
+        detail_gate = row.get("minus_musical_detail_preservation_gate")
+        detail_blockers = (
+            detail_gate.get("blockers")
+            if isinstance(detail_gate, dict) and isinstance(detail_gate.get("blockers"), list)
+            else []
+        )
+        blockers = stable_unique([*blocker_labels(row.get("minus_blockers")), *blocker_labels(detail_blockers)])
+        candidate_id = str(row.get("candidate_id") or manifest.get("candidate_id") or f"listen_preview_{index:03d}")
+        candidate_audio_path = str(
+            row.get("minus_path")
+            or row.get("instrumental_path")
+            or manifest.get("selected_minus_path")
+            or manifest.get("minus_path")
+            or ""
+        )
+        rows.append(
+            build_common_row(
+                source_kind="listen_preview_manifest_row",
+                source_path=path,
+                source_index=index,
+                track_id=str(row.get("track_id") or manifest.get("track_id") or ""),
+                source_candidate_id=str(manifest.get("candidate_id") or candidate_id),
+                repair_candidate_id=candidate_id,
+                candidate_audio_path=candidate_audio_path,
+                route_id=str(row.get("score_mode") or manifest.get("judge_mode") or "no_reference_minus_listen_preview"),
+                route_family="accepted_listen_preview_repair_chain",
+                status=listen_preview_decision_status(manifest, row),
+                blockers=blockers,
+                metrics=listen_preview_metrics(manifest, row),
+                parameters={},
+                extra={
+                    "listen_preview_delivery_allowed": manifest.get("delivery_allowed") is True,
+                    "listen_preview_delivery_status": str(manifest.get("delivery_status") or ""),
+                    "listen_preview_presentation_status": str(manifest.get("presentation_status") or ""),
+                    "listen_preview_release_status": str(manifest.get("release_status") or ""),
+                    "listen_preview_manifest_type": str(manifest.get("manifest_type") or ""),
+                    "result_judge_minus_decision": str(row.get("minus_decision") or row.get("decision") or ""),
+                    "source_self_judge_manifest": str(
+                        (manifest.get("source_self_judge_manifest") or {}).get("path")
+                        if isinstance(manifest.get("source_self_judge_manifest"), dict)
+                        else ""
+                    ),
+                    "source_result_judge_jsonl": str(
+                        (manifest.get("source_result_judge_jsonl") or {}).get("path")
+                        if isinstance(manifest.get("source_result_judge_jsonl"), dict)
+                        else ""
+                    ),
+                    "source_selector_jsonl": str(
+                        (manifest.get("source_selector_jsonl") or {}).get("path")
+                        if isinstance(manifest.get("source_selector_jsonl"), dict)
+                        else ""
+                    ),
+                },
+            )
+        )
+    return rows
+
+
 def summarize(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     safe_rows = [row for row in rows if row.get("safe_for_repair_outcome_training") is True]
     labels = Counter(str(row.get("label")) for row in safe_rows)
     blockers = Counter(blocker for row in rows for blocker in row.get("blocker_labels", []))
     families = Counter(str(row.get("route_family") or "") for row in rows)
+    readiness_blockers: list[str] = []
+    if len(safe_rows) < MIN_SAFE_REPAIR_ROWS:
+        readiness_blockers.append("insufficient_safe_rows")
+    if labels.get("1", 0) < MIN_POSITIVE_REPAIR_ROWS:
+        readiness_blockers.append("insufficient_positive_repair_rows")
+    if labels.get("0", 0) < MIN_NEGATIVE_REPAIR_ROWS:
+        readiness_blockers.append("insufficient_negative_repair_rows")
     return {
         "rows_total": len(rows),
         "safe_rows": len(safe_rows),
@@ -431,7 +553,8 @@ def summarize(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "blocker_counts": dict(sorted(blockers.items())),
         "detail_damage_rows": sum(1 for row in rows if row.get("has_detail_damage_blocker") is True),
         "leakage_blocker_rows": sum(1 for row in rows if row.get("has_leakage_blocker") is True),
-        "can_train_repair_outcome_model": len(safe_rows) >= 10 and labels.get("1", 0) > 0 and labels.get("0", 0) > 0,
+        "readiness_blockers": readiness_blockers,
+        "can_train_repair_outcome_model": not readiness_blockers,
     }
 
 
@@ -464,15 +587,22 @@ def build_minus_repair_outcome_training_view(
     output_dir: Path,
     ralph_manifests: Sequence[Path] = (),
     matrix_rows: Sequence[Path] = (),
+    listen_preview_manifests: Sequence[Path] = (),
     command_args: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    if not ralph_manifests and not matrix_rows:
-        raise ValueError("missing_sources:provide_ralph_manifests_or_matrix_rows")
+    if not ralph_manifests and not matrix_rows and not listen_preview_manifests:
+        raise ValueError("missing_sources:provide_ralph_manifests_matrix_rows_or_listen_preview_manifests")
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
     if progress_path.exists():
         progress_path.unlink()
-    progress(progress_path, "start", ralph_manifest_count=len(ralph_manifests), matrix_rows_count=len(matrix_rows))
+    progress(
+        progress_path,
+        "start",
+        ralph_manifest_count=len(ralph_manifests),
+        matrix_rows_count=len(matrix_rows),
+        listen_preview_manifest_count=len(listen_preview_manifests),
+    )
 
     rows: list[dict[str, Any]] = []
     for path in ralph_manifests:
@@ -483,6 +613,10 @@ def build_minus_repair_outcome_training_view(
         loaded = rows_from_matrix(path)
         rows.extend(loaded)
         progress(progress_path, "loaded_matrix_rows", path=str(path), rows_added=len(loaded))
+    for path in listen_preview_manifests:
+        loaded = rows_from_listen_preview_manifest(path)
+        rows.extend(loaded)
+        progress(progress_path, "loaded_listen_preview_manifest", path=str(path), rows_added=len(loaded))
 
     rows.sort(key=lambda row: (str(row.get("source_path") or ""), int(row.get("source_index") or 0), str(row.get("row_id") or "")))
     summary = summarize(rows)
@@ -492,6 +626,7 @@ def build_minus_repair_outcome_training_view(
         "output_dir": str(output_dir),
         "ralph_manifests": [str(path) for path in ralph_manifests],
         "matrix_rows": [str(path) for path in matrix_rows],
+        "listen_preview_manifests": [str(path) for path in listen_preview_manifests],
         "rows_jsonl": str(output_dir / ROWS_NAME),
         "summary_md": str(output_dir / SUMMARY_NAME),
         "progress_jsonl": str(progress_path),
@@ -511,6 +646,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--ralph-manifests", type=Path, nargs="*", default=[])
     parser.add_argument("--matrix-rows", type=Path, nargs="*", default=[])
+    parser.add_argument("--listen-preview-manifests", type=Path, nargs="*", default=[])
     parser.add_argument("--short-output-names", action="store_true")
     return parser.parse_args(argv)
 
@@ -525,6 +661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         ralph_manifests=args.ralph_manifests,
         matrix_rows=args.matrix_rows,
+        listen_preview_manifests=args.listen_preview_manifests,
         command_args=list(sys.argv[1:] if argv is None else argv),
     )
     return 0

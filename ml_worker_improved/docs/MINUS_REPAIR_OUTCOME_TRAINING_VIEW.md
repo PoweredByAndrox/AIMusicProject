@@ -15,6 +15,11 @@ The builder accepts existing source-of-truth repair artifacts:
 - `--matrix-rows`: JSONL sweep/matrix rows, for example focus-strength sweeps,
   guide-blend sweeps, historical dedicated-minus candidate matrices, and
   level-normalized historical matrices.
+- `--listen-preview-manifests`: accepted
+  `no_reference_minus_listen_preview_manifest.json` files. Only rows whose
+  manifest has `delivery_allowed=true`, `delivery_status=accepted`, and
+  `presentation_status=accepted_for_listen_pack` become positive repair-outcome
+  examples. Blocked manifests never become positive labels.
 
 This layer is intentionally separate from `audio_error_training_views.v1`.
 Target audio-error critics learn whether a candidate/window is acceptable.
@@ -35,7 +40,8 @@ progress.jsonl
 Each row records:
 
 - source artifact path and source row index;
-- `source_kind` (`ralph_manifest_candidate` or `matrix_row`);
+- `source_kind` (`ralph_manifest_candidate`, `matrix_row`, or
+  `listen_preview_manifest_row`);
 - source/base candidate id when available;
 - repair candidate/route id and route family;
 - repair outcome `status` and strict `label` (`1` accepted/release-ready,
@@ -56,6 +62,11 @@ Routing-only statuses such as `passed_for_candidate_routing` are also
 diagnostic-only: they authorize another candidate route, not a successful repair
 outcome, and are not positive labels.
 
+`can_train_repair_outcome_model` is intentionally conservative. It requires at
+least 10 safe rows, 3 positive repair-outcome rows, and 3 negative rows. A single
+accepted listen-preview hardcase is useful evidence, but it is not enough to
+declare the repair-outcome model training-ready.
+
 ## Safety
 
 All outputs keep:
@@ -73,6 +84,9 @@ All outputs keep:
 
 This view may feed a future repair-action router or model-level training stage.
 It is not a delivery gate and cannot make rejected diagnostic audio presentable.
+Accepted listen-preview rows are used only as training/evidence labels for the
+repair-outcome critic; the view itself still writes no audio and keeps
+`delivery_allowed=false`.
 
 ## Current Hardcase Example
 
@@ -89,10 +103,12 @@ docker compose run --rm --no-deps -T \
     /host_artifacts/loop/it075/gblend/r001/rows.jsonl \
     /host_artifacts/loop/it075/hist/r002/rows.jsonl \
     /host_artifacts/loop/it075/hnorm/r001/rows.jsonl \
+  --listen-preview-manifests \
+    /host_artifacts/loop/it076/deliv/r001/no_reference_minus_listen_preview_manifest.json \
   --short-output-names
 ```
 
-Expected interpretation for the current batch: no listen result is produced.
-The useful output is a structured set of hard-negative repair actions showing
-which attempts reduced leakage only by damaging detail or overboosting bands,
-and which attempts were too close to the base minus to matter.
+Expected interpretation for the current batch: the accepted listen-preview
+candidate can contribute one positive repair-outcome row, while rejected
+RALPH/matrix attempts remain negative evidence. No listen result is produced by
+this builder and no candidate becomes releasable through this view.
