@@ -239,6 +239,18 @@ def optional_score(window: dict[str, Any], key: str) -> float | None:
     return clip01(window.get(key))
 
 
+def optional_float(payload: dict[str, Any], key: str) -> float | None:
+    if key not in payload:
+        return None
+    try:
+        value = float(payload.get(key))
+    except (TypeError, ValueError):
+        return None
+    if value != value:
+        return None
+    return value
+
+
 def inverse_score(window: dict[str, Any], key: str) -> float:
     score = optional_score(window, key)
     return 0.0 if score is None else 1.0 - score
@@ -297,20 +309,102 @@ def ralph_drift_damage(window: dict[str, Any]) -> float:
     )
 
 
-def ralph_scalar_features(window: dict[str, Any]) -> dict[str, float]:
+RALPH_MINIMUM_DELTA_RMS_DB = -48.0
+RALPH_MINIMUM_AVERAGE_VOCAL_IMPROVEMENT_DB = 0.12
+RALPH_MINIMUM_PEAK_CORR_IMPROVEMENT = 0.0015
+RALPH_MAXIMUM_RMS_DIP_DB = -0.12
+RALPH_MAXIMUM_PRESENCE_DIP_DB = -0.15
+RALPH_MAXIMUM_AIR_DIP_DB = -0.12
+RALPH_MAXIMUM_RMS_BOOST_DB = 6.0
+RALPH_MAXIMUM_PRESENCE_BOOST_DB = 8.0
+RALPH_MAXIMUM_AIR_BOOST_DB = 8.0
+
+
+def ralph_under_minimum_score(value: float | None, minimum: float) -> float:
+    if value is None:
+        return 0.0
+    denominator = max(abs(minimum), 1.0e-12)
+    return clip01(max(0.0, minimum - value) / denominator)
+
+
+def ralph_dip_score(value: float | None, maximum_dip: float) -> float:
+    if value is None:
+        return 0.0
+    denominator = max(abs(maximum_dip), 1.0e-12)
+    return clip01(max(0.0, maximum_dip - value) / denominator)
+
+
+def ralph_boost_score(value: float | None, maximum_boost: float) -> float:
+    if value is None:
+        return 0.0
+    denominator = max(abs(maximum_boost), 1.0e-12)
+    return clip01(max(0.0, value - maximum_boost) / denominator)
+
+
+def ralph_policy_feature_scores(evaluation: dict[str, Any]) -> dict[str, float]:
+    summary = evaluation.get("summary") if isinstance(evaluation.get("summary"), dict) else {}
+    cumulative = evaluation.get("cumulative_summary") if isinstance(evaluation.get("cumulative_summary"), dict) else {}
+    average_gap = ralph_under_minimum_score(
+        optional_float(evaluation, "average_vocal_improvement_db"),
+        RALPH_MINIMUM_AVERAGE_VOCAL_IMPROVEMENT_DB,
+    )
+    peak_gap = ralph_under_minimum_score(
+        optional_float(evaluation, "peak_corr_improvement"),
+        RALPH_MINIMUM_PEAK_CORR_IMPROVEMENT,
+    )
+    return {
+        "no_meaningful_delta_score": ralph_under_minimum_score(
+            optional_float(summary, "rms_delta_db_vs_base"),
+            RALPH_MINIMUM_DELTA_RMS_DB,
+        ),
+        "insufficient_vocal_improvement_score": min(average_gap, peak_gap),
+        "rms_dip_damage_score": max(
+            ralph_dip_score(optional_float(summary, "worst_rms_dip_db"), RALPH_MAXIMUM_RMS_DIP_DB),
+            ralph_dip_score(optional_float(cumulative, "worst_rms_dip_db"), RALPH_MAXIMUM_RMS_DIP_DB),
+        ),
+        "presence_dip_damage_score": max(
+            ralph_dip_score(optional_float(summary, "worst_presence_dip_db"), RALPH_MAXIMUM_PRESENCE_DIP_DB),
+            ralph_dip_score(optional_float(cumulative, "worst_presence_dip_db"), RALPH_MAXIMUM_PRESENCE_DIP_DB),
+        ),
+        "air_dip_damage_score": max(
+            ralph_dip_score(optional_float(summary, "worst_air_dip_db"), RALPH_MAXIMUM_AIR_DIP_DB),
+            ralph_dip_score(optional_float(cumulative, "worst_air_dip_db"), RALPH_MAXIMUM_AIR_DIP_DB),
+        ),
+        "boost_damage_score": max(
+            ralph_boost_score(optional_float(summary, "max_rms_boost_db"), RALPH_MAXIMUM_RMS_BOOST_DB),
+            ralph_boost_score(optional_float(summary, "max_presence_boost_db"), RALPH_MAXIMUM_PRESENCE_BOOST_DB),
+            ralph_boost_score(optional_float(summary, "max_air_boost_db"), RALPH_MAXIMUM_AIR_BOOST_DB),
+        ),
+    }
+
+
+def ralph_scalar_features(window: dict[str, Any], evaluation: dict[str, Any] | None = None) -> dict[str, float]:
     vocal_bleed = clip01(abs(as_float(window.get("vocal_residue_corr"))))
-    missing_detail = ralph_drift_damage(window)
-    residual_energy = max(vocal_bleed, missing_detail)
+    window_detail_damage = ralph_drift_damage(window)
+    policy_scores = ralph_policy_feature_scores(evaluation or {})
+    detail_damage = max(
+        window_detail_damage,
+        policy_scores["rms_dip_damage_score"],
+        policy_scores["presence_dip_damage_score"],
+        policy_scores["air_dip_damage_score"],
+    )
+    residual_energy = max(
+        vocal_bleed,
+        detail_damage,
+        policy_scores["no_meaningful_delta_score"],
+        policy_scores["insufficient_vocal_improvement_score"],
+        policy_scores["boost_damage_score"],
+    )
     return {
         "residual_energy": residual_energy,
-        "mixture_consistency_error": vocal_bleed,
+        "mixture_consistency_error": max(vocal_bleed, policy_scores["no_meaningful_delta_score"]),
         "phase_collapse_score": 0.0,
-        "stereo_width_score": 0.0,
-        "vocal_bleed_proxy_score": vocal_bleed,
+        "stereo_width_score": max(detail_damage, policy_scores["boost_damage_score"]),
+        "vocal_bleed_proxy_score": max(vocal_bleed, policy_scores["insufficient_vocal_improvement_score"]),
         "instrumental_bleed_proxy_score": 0.0,
-        "missing_detail_score": missing_detail,
-        "transient_damage_score": 0.0,
-        "artifact_noise_score": 0.0,
+        "missing_detail_score": max(detail_damage, policy_scores["no_meaningful_delta_score"]),
+        "transient_damage_score": max(detail_damage, policy_scores["boost_damage_score"]),
+        "artifact_noise_score": policy_scores["boost_damage_score"],
     }
 
 
@@ -618,7 +712,7 @@ def ralph_manifest_rows(ralph_manifests: Sequence[Path], output_dir: Path) -> li
                 if end <= start:
                     continue
                 track_id = str(window.get("track_id") or filters.get("track_id") or "ralph_focus")
-                scalar_features = ralph_scalar_features(window)
+                scalar_features = ralph_scalar_features(window, evaluation)
                 evidence = ralph_window_evidence(window)
                 judge_window = {
                     "track_id": track_id,

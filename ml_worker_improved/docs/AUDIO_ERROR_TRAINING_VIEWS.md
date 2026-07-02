@@ -84,8 +84,13 @@ They are imported as score-only no-reference hardcase rows, not as strict
 training labels. The builder converts each candidate's RALPH focus windows into
 short evidence files under
 `ralph_manifest_sources/rmNNN/no_reference_minus_windowed_judge.jsonl`, maps
-RALPH vocal-residue/detail-drift metrics into the existing acoustic feature
-columns, and preserves raw RALPH window evidence in `source_evidence`. Target
+RALPH vocal-residue/detail-drift metrics and candidate-level RALPH policy
+metrics into the existing acoustic feature columns, and preserves raw RALPH
+window evidence in `source_evidence`. Candidate-level policy metrics include
+no-meaningful-delta, insufficient-vocal-improvement, dip damage, cumulative dip
+damage, and boost damage signals derived from the RALPH acceptance thresholds;
+blocker labels and delivery status remain provenance, not prediction features.
+Target
 critic scoring can use these rows because `score_target_audio_error_views.py`
 loads score-only rows, while strict target critic training still excludes them
 because their label source is not `minus_windowed_judge.jsonl`.

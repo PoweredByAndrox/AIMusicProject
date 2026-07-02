@@ -783,6 +783,17 @@ def test_ralph_manifests_add_minus_score_only_hardcase_rows(tmp_path: Path) -> N
                     "evaluation": {
                         "status": "accepted",
                         "blockers": [],
+                        "average_vocal_improvement_db": 0.20,
+                        "peak_corr_improvement": 0.002,
+                        "summary": {
+                            "rms_delta_db_vs_base": -47.0,
+                            "worst_rms_dip_db": -0.01,
+                            "worst_presence_dip_db": -0.02,
+                            "worst_air_dip_db": -0.03,
+                            "max_rms_boost_db": 0.0,
+                            "max_presence_boost_db": 0.0,
+                            "max_air_boost_db": 0.0,
+                        },
                         "focus_evaluation": {
                             "windows": [
                                 {
@@ -811,6 +822,17 @@ def test_ralph_manifests_add_minus_score_only_hardcase_rows(tmp_path: Path) -> N
                                 "reason": "candidate_does_not_reduce_vocal_proxy_enough",
                             }
                         ],
+                        "average_vocal_improvement_db": 0.0,
+                        "peak_corr_improvement": 0.0,
+                        "summary": {
+                            "rms_delta_db_vs_base": -70.0,
+                            "worst_rms_dip_db": -0.40,
+                            "worst_presence_dip_db": -0.45,
+                            "worst_air_dip_db": -0.20,
+                            "max_rms_boost_db": 0.0,
+                            "max_presence_boost_db": 0.0,
+                            "max_air_boost_db": 0.0,
+                        },
                         "focus_evaluation": {
                             "windows": [
                                 {
@@ -852,6 +874,13 @@ def test_ralph_manifests_add_minus_score_only_hardcase_rows(tmp_path: Path) -> N
     assert all(row["safe_for_this_view"] is True for row in minus_rows)
     assert all(row["feature_values"]["acoustic_feature_evidence_present"] == 1.0 for row in minus_rows)
     assert all(row["feature_values"]["vocal_bleed_proxy_score"] > 0.0 for row in minus_rows)
+    rows_by_candidate = {row["candidate_id"]: row for row in minus_rows}
+    accepted_features = rows_by_candidate["hybrid_detail_safe"]["feature_values"]
+    rejected_features = rows_by_candidate["focus_window_guarded"]["feature_values"]
+    assert accepted_features["residual_energy"] < 0.2
+    assert rejected_features["residual_energy"] == 1.0
+    assert rejected_features["missing_detail_score"] == 1.0
+    assert rejected_features["vocal_bleed_proxy_score"] == 1.0
     assert minus_rows[0]["blocker_labels"] == ["insufficient_vocal_residue_improvement"]
     assert minus_rows[0]["source_evidence"]["source"] == "ralph_minus_improvement_manifest"
     assert minus_rows[0]["source_evidence"]["focus_evaluation_used_for_delivery"] is False
