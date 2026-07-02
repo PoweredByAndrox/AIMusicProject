@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import soundfile as sf
@@ -400,6 +400,156 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def iter_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_zero_label(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    try:
+        return int(value) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def load_focus_windows(
+    path: Path | None,
+    *,
+    track_id: str = "",
+    candidate_id: str = "",
+    max_windows: int = 0,
+) -> list[dict[str, Any]]:
+    if path is None:
+        return []
+    windows: list[dict[str, Any]] = []
+    for row in iter_jsonl(path):
+        if track_id and str(row.get("track_id") or "") != track_id:
+            continue
+        if candidate_id and str(row.get("candidate_id") or "") != candidate_id:
+            continue
+        is_blocked = row.get("critic_decision") == "blocked_hard_case" or _is_zero_label(row.get("true_label"))
+        if not is_blocked:
+            continue
+        start = _as_float(row.get("window_start_sec"))
+        end = _as_float(row.get("window_end_sec"))
+        if end <= start:
+            continue
+        windows.append(
+            {
+                "track_id": row.get("track_id"),
+                "candidate_id": row.get("candidate_id"),
+                "start_sec": round(start, 6),
+                "end_sec": round(end, 6),
+                "critic_decision": row.get("critic_decision"),
+                "predicted_blockers": row.get("predicted_blockers") or [],
+                "true_label": row.get("true_label"),
+            }
+        )
+        if max_windows > 0 and len(windows) >= max_windows:
+            break
+    return windows
+
+
+def calculate_focus_window_summary(
+    *,
+    candidate_audio: np.ndarray,
+    base_audio: np.ndarray,
+    vocal_audio: np.ndarray,
+    sample_rate: int,
+    focus_windows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    if not focus_windows:
+        return {"window_count": 0, "windows": []}
+    candidate_audio, base_audio, vocal_audio = match_length([candidate_audio, base_audio, vocal_audio])
+    candidate_mono = candidate_audio.mean(axis=1)
+    base_mono = base_audio.mean(axis=1)
+    vocal_mono = vocal_audio.mean(axis=1)
+    rows: list[dict[str, Any]] = []
+    for focus in focus_windows:
+        start = _as_float(focus.get("start_sec"))
+        end = _as_float(focus.get("end_sec"))
+        start_frame = max(0, min(int(round(start * sample_rate)), candidate_mono.shape[0]))
+        end_frame = max(start_frame, min(int(round(end * sample_rate)), candidate_mono.shape[0]))
+        if end_frame <= start_frame:
+            continue
+        candidate_window = candidate_mono[start_frame:end_frame]
+        base_window = base_mono[start_frame:end_frame]
+        vocal_window = vocal_mono[start_frame:end_frame]
+        candidate_norm = float(np.linalg.norm(candidate_window))
+        vocal_norm = float(np.linalg.norm(vocal_window))
+        vocal_corr = abs(float(np.dot(candidate_window, vocal_window) / (candidate_norm * vocal_norm + EPSILON)))
+        vocal_projection_scale = float(np.dot(candidate_window, vocal_window) / (np.dot(vocal_window, vocal_window) + EPSILON))
+        vocal_projection = vocal_projection_scale * vocal_window
+        vocal_projection_ratio_db = float(
+            20.0
+            * math.log10(
+                (float(np.sqrt(np.mean(vocal_projection * vocal_projection))) + EPSILON)
+                / (float(np.sqrt(np.mean(candidate_window * candidate_window))) + EPSILON)
+            )
+        )
+        rms_drift_db = float(
+            20.0
+            * math.log10(
+                (float(np.sqrt(np.mean(candidate_window * candidate_window))) + EPSILON)
+                / (float(np.sqrt(np.mean(base_window * base_window))) + EPSILON)
+            )
+        )
+        rows.append(
+            {
+                "start_sec": start,
+                "end_sec": end,
+                "vocal_residue_corr": vocal_corr,
+                "vocal_projection_ratio_db": vocal_projection_ratio_db,
+                "rms_drift_db_vs_base": rms_drift_db,
+                "predicted_blockers": focus.get("predicted_blockers") or [],
+                "critic_decision": focus.get("critic_decision"),
+            }
+        )
+    if not rows:
+        return {"window_count": 0, "windows": []}
+    return {
+        "window_count": len(rows),
+        "avg_vocal_residue_corr": float(np.mean([row["vocal_residue_corr"] for row in rows])),
+        "max_vocal_residue_corr": float(np.max([row["vocal_residue_corr"] for row in rows])),
+        "avg_vocal_projection_ratio_db": float(np.mean([row["vocal_projection_ratio_db"] for row in rows])),
+        "worst_rms_dip_db": float(np.min([row["rms_drift_db_vs_base"] for row in rows])),
+        "windows": rows,
+    }
+
+
+def compare_focus_summaries(candidate_summary: dict[str, Any], base_summary: dict[str, Any]) -> dict[str, Any]:
+    if not candidate_summary.get("window_count") or not base_summary.get("window_count"):
+        return {"available": False, "reason": "missing_focus_windows"}
+    return {
+        "available": True,
+        "window_count": int(candidate_summary["window_count"]),
+        "average_vocal_improvement_db": round(
+            float(base_summary["avg_vocal_projection_ratio_db"]) - float(candidate_summary["avg_vocal_projection_ratio_db"]),
+            6,
+        ),
+        "peak_corr_improvement": round(
+            float(base_summary["max_vocal_residue_corr"]) - float(candidate_summary["max_vocal_residue_corr"]),
+            6,
+        ),
+        "worst_rms_dip_db": round(float(candidate_summary["worst_rms_dip_db"]), 6),
+        "windows": candidate_summary.get("windows") or [],
+    }
+
+
 def write_audio(path: Path, audio: np.ndarray, sample_rate: int) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(path), audio.astype(np.float32, copy=False), sample_rate)
@@ -527,6 +677,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--listen-dir")
     parser.add_argument("--reference-base-path")
     parser.add_argument("--window-sec", type=float, default=5.0)
+    parser.add_argument("--focus-windows-jsonl")
+    parser.add_argument("--focus-track-id", default="")
+    parser.add_argument("--focus-candidate-id", default="")
+    parser.add_argument("--max-focus-windows", type=int, default=16)
     return parser.parse_args(argv)
 
 
@@ -614,6 +768,19 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         sample_rate=sample_rate,
         window_sec=float(args.window_sec),
     )
+    focus_windows = load_focus_windows(
+        Path(args.focus_windows_jsonl) if args.focus_windows_jsonl else None,
+        track_id=str(args.focus_track_id or ""),
+        candidate_id=str(args.focus_candidate_id or ""),
+        max_windows=int(args.max_focus_windows),
+    )
+    focus_base_summary = calculate_focus_window_summary(
+        candidate_audio=base_audio,
+        base_audio=base_audio,
+        vocal_audio=primary_vocals,
+        sample_rate=sample_rate,
+        focus_windows=focus_windows,
+    )
 
     policy = MinusAcceptancePolicy()
     candidate_records: list[dict[str, Any]] = []
@@ -671,6 +838,14 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             policy=policy,
             cumulative_summary=cumulative_summary,
         )
+        focus_summary = calculate_focus_window_summary(
+            candidate_audio=candidate_audio,
+            base_audio=base_for_candidate,
+            vocal_audio=vocals_for_candidate,
+            sample_rate=sample_rate,
+            focus_windows=focus_windows,
+        )
+        evaluation["focus_evaluation"] = compare_focus_summaries(focus_summary, focus_base_summary)
         candidate_record["evaluation"] = evaluation
         candidate_records.append(candidate_record)
         emit_progress(
@@ -732,6 +907,15 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             },
             "normalized_sample_rate": prepared_inputs["sample_rate"],
         },
+        "focus_window_source": str(args.focus_windows_jsonl or ""),
+        "focus_window_filters": {
+            "track_id": str(args.focus_track_id or ""),
+            "candidate_id": str(args.focus_candidate_id or ""),
+            "max_focus_windows": int(args.max_focus_windows),
+        },
+        "focus_windows": focus_windows,
+        "focus_base_summary": focus_base_summary,
+        "focus_evaluation_used_for_delivery": False,
         "policy": policy.__dict__,
         "base_summary": base_summary,
         "candidates": [

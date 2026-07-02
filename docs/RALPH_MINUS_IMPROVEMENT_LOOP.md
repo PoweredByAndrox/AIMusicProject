@@ -42,6 +42,12 @@ The loop then checks both:
 This prevents a sequence of individually small repairs from accumulating into an
 audible dip.
 
+For hardcase debugging, pass `--focus-windows-jsonl` with scored
+`target_audio_error` windows and optional `--focus-track-id` /
+`--focus-candidate-id` filters. Focus evaluation is written to the manifest only;
+it does not relax the RALPH delivery gate and is not used to mark a candidate
+accepted.
+
 ## Runtime
 
 Run only inside Docker:
@@ -55,6 +61,7 @@ python /app/tools/run_ralph_minus_improvement_loop.py \
   /app/path/secondary_vocals.flac \
   /app/path/output_dir \
   --reference-base-path /app/path/original_base_minus.flac \
+  --focus-windows-jsonl /app/path/scored_minus_critic_windows.jsonl \
   --listen-dir /app/path/listen_dir
 ```
 

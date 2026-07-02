@@ -198,6 +198,92 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         self.assertTrue(rows[0]["gpu_inference_skipped"])
         self.assertEqual(rows[0]["reason"], "external_only_cpu_dsp_scoring")
 
+    def test_focus_windows_load_only_blocked_rows_for_requested_candidate(self) -> None:
+        module = _load_module()
+        focus_path = self.temp_path / "focus.jsonl"
+        rows = [
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "window_start_sec": 0.0,
+                "window_end_sec": 6.0,
+                "critic_decision": "blocked_hard_case",
+                "predicted_blockers": ["severe_phase_collapse"],
+                "true_label": 0,
+            },
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "window_start_sec": 6.0,
+                "window_end_sec": 12.0,
+                "true_label": 0,
+                "predicted_blockers": ["numeric_zero_label"],
+            },
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "window_start_sec": 12.0,
+                "window_end_sec": 18.0,
+                "critic_decision": "accept_candidate",
+                "true_label": 1,
+            },
+            {
+                "track_id": "track-b",
+                "candidate_id": "cand-b",
+                "window_start_sec": 0.0,
+                "window_end_sec": 6.0,
+                "critic_decision": "blocked_hard_case",
+                "true_label": 0,
+            },
+        ]
+        focus_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+        focus_windows = module.load_focus_windows(
+            focus_path,
+            track_id="track-a",
+            candidate_id="cand-a",
+            max_windows=4,
+        )
+
+        self.assertEqual(len(focus_windows), 2)
+        self.assertEqual(focus_windows[0]["start_sec"], 0.0)
+        self.assertEqual(focus_windows[0]["end_sec"], 6.0)
+        self.assertEqual(focus_windows[0]["predicted_blockers"], ["severe_phase_collapse"])
+        self.assertEqual(focus_windows[1]["start_sec"], 6.0)
+        self.assertEqual(focus_windows[1]["end_sec"], 12.0)
+        self.assertEqual(focus_windows[1]["predicted_blockers"], ["numeric_zero_label"])
+
+    def test_focus_summary_reports_local_improvement_without_delivery_claim(self) -> None:
+        module = _load_module()
+        sample_rate = 100
+        frames = 1000
+        t = np.linspace(0.0, 1.0, frames, dtype=np.float32)
+        vocal = np.stack([np.sin(2.0 * np.pi * 8.0 * t), np.sin(2.0 * np.pi * 8.0 * t)], axis=1).astype(np.float32)
+        base = (0.8 * vocal).astype(np.float32)
+        candidate = (0.6 * vocal).astype(np.float32)
+        focus_windows = [{"start_sec": 0.0, "end_sec": 2.0, "critic_decision": "blocked_hard_case"}]
+
+        base_summary = module.calculate_focus_window_summary(
+            candidate_audio=base,
+            base_audio=base,
+            vocal_audio=vocal,
+            sample_rate=sample_rate,
+            focus_windows=focus_windows,
+        )
+        candidate_summary = module.calculate_focus_window_summary(
+            candidate_audio=candidate,
+            base_audio=base,
+            vocal_audio=vocal,
+            sample_rate=sample_rate,
+            focus_windows=focus_windows,
+        )
+        comparison = module.compare_focus_summaries(candidate_summary, base_summary)
+
+        self.assertTrue(comparison["available"])
+        self.assertEqual(comparison["window_count"], 1)
+        self.assertGreater(comparison["average_vocal_improvement_db"], 0.0)
+        self.assertLess(comparison["worst_rms_dip_db"], 0.0)
+
     def test_recipe_inputs_are_resampled_to_base_sample_rate(self) -> None:
         module = _load_module()
         inputs_dir = self.temp_path / "inputs"
