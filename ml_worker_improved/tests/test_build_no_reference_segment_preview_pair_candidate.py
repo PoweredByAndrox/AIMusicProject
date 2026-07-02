@@ -122,6 +122,19 @@ def test_pair_candidate_blocks_segment_preview_without_mix_path(tmp_path: Path) 
     assert manifest["skipped_rows"][0]["skip_reason"] == "missing_source_mix_path"
 
 
+def test_pair_candidate_blocks_segment_preview_with_nested_semantic_reason(tmp_path: Path) -> None:
+    payload = accepted_segment_preview_manifest(tmp_path)
+    payload["accepted_listen_preview_rows"][0]["reasons"] = ["vocal_leakage_in_minus"]
+    source_manifest = write_json(tmp_path / "segment_preview_listen_manifest.json", payload)
+
+    manifest = build_pair_candidate_manifest(segment_preview_manifest_json=source_manifest)
+
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["dominant_failure_reason"] == "source_manifest_not_accepted"
+    assert manifest["candidate_rows"] == []
+
+
 def test_cli_writes_segment_preview_pair_candidate_jsonl(tmp_path: Path) -> None:
     output_jsonl = tmp_path / "segment_preview_pair_candidate_rows.jsonl"
     summary_json = tmp_path / "segment_preview_pair_candidate_manifest.json"

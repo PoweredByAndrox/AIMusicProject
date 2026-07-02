@@ -115,6 +115,67 @@ def test_accepted_for_listen_pack_with_structured_blockers_is_not_promotable(tmp
         view.assert_promotable()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("reasons", ["vocal_leakage_in_minus"]),
+        ("decision", "foreign_source_recovered:minus:vocals"),
+        ("pair_score_mode_reasons", ["mix_conservation_failed"]),
+        ("dominant_failure_class", "voice_presence_guard_failed"),
+    ],
+)
+def test_accepted_for_listen_pack_with_nested_semantic_reason_fields_is_not_promotable(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    manifest = write_manifest(
+        tmp_path / f"accepted_with_nested_{field}.json",
+        {
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "accepted_listen_preview_rows": [
+                {
+                    "track_id": "track-a",
+                    "candidate_id": "candidate-a",
+                    field: value,
+                }
+            ],
+        },
+    )
+
+    view = status_view_from_manifest(manifest)
+
+    assert view.blocked
+    assert not view.listenable
+    with pytest.raises(ArtifactContractError, match="artifact_with_blocking_failure_labels"):
+        can_promote_to_listen_result(manifest)
+
+
+def test_accepted_for_listen_pack_with_benign_nested_decision_remains_promotable(tmp_path: Path) -> None:
+    manifest = write_manifest(
+        tmp_path / "accepted_with_benign_nested_decision.json",
+        {
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "accepted_listen_preview_rows": [
+                {
+                    "track_id": "track-a",
+                    "candidate_id": "candidate-a",
+                    "decision": "accept_candidate",
+                    "reasons": ["dense_gate_passed"],
+                }
+            ],
+        },
+    )
+
+    view = status_view_from_manifest(manifest)
+
+    assert view.listenable
+    assert not view.blocked
+    assert can_promote_to_listen_result(manifest)
+
+
 def test_release_ready_is_deliverable_when_delivery_allowed(tmp_path: Path) -> None:
     manifest = write_manifest(
         tmp_path / "release.json",

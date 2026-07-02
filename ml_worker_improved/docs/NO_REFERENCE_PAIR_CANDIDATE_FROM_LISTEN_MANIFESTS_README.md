@@ -14,6 +14,12 @@ The bridge writes candidate rows only when:
 6. selected vocal and minus paths are present;
 7. neither source manifest reports a safety violation such as training, model changes, cleanup route additions, threshold relaxation, audio copy/export, or `release_ready`.
 
+Source promotability includes recursive semantic blocker detection. Nested
+generic fields such as `reasons`, `decision`, and `pair_score_mode_reasons`
+or failure-class fields cannot carry labels like `vocal_leakage_in_minus`,
+`foreign_source_recovered:*`, or `mix_conservation_failed`; such sources are
+blocked before pair-candidate rows are written.
+
 Blocked sources produce an empty JSONL plus a summary manifest with:
 
 - `delivery_status=blocked`

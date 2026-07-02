@@ -21,6 +21,12 @@ The bridge writes candidate rows only when:
 7. no source safety flag indicates training, model changes, cleanup route
    additions, threshold relaxation, audio copy/export, or `release_ready`.
 
+Source promotability includes recursive semantic blocker detection. Nested
+generic fields such as `reasons`, `decision`, and `pair_score_mode_reasons`
+or failure-class fields cannot carry labels like `vocal_leakage_in_minus`,
+`foreign_source_recovered:*`, or `mix_conservation_failed`; such sources are
+blocked before candidate rows are written.
+
 Ready output is not a listen result:
 
 - `delivery_status=ready_for_pair_judge`

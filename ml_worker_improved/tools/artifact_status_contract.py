@@ -56,6 +56,8 @@ FAILURE_LABEL_KEYS = {
     "check_names",
     "forbidden_actions",
 }
+GENERIC_BLOCKING_TEXT_KEYS = {"reason", "reasons", "decision"}
+GENERIC_BLOCKING_TEXT_SUFFIXES = ("_reason", "_reasons", "_decision", "_failure_class")
 FAILURE_ITEM_KEYS = ("code", "label", "name", "id", "check", "reason")
 BOOLEAN_BLOCKER_KEYS = {"blocked", "is_blocked", "has_blocker", "has_blockers"}
 
@@ -246,8 +248,28 @@ def collect_failure_labels(payload: Any) -> set[str]:
     return labels
 
 
+def is_generic_blocking_text_key(key: str) -> bool:
+    return key in GENERIC_BLOCKING_TEXT_KEYS or any(
+        key.endswith(suffix) for suffix in GENERIC_BLOCKING_TEXT_SUFFIXES
+    )
+
+
+def collect_blocking_text_labels(payload: Any) -> set[str]:
+    labels: set[str] = set()
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if is_generic_blocking_text_key(str(key).lower()):
+                labels.update(blocking_labels_from_values(value))
+            labels.update(collect_blocking_text_labels(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            labels.update(collect_blocking_text_labels(item))
+    return labels
+
+
 def blocking_failure_labels(payload: dict[str, Any]) -> tuple[str, ...]:
     labels = collect_failure_labels(payload)
+    labels.update(collect_blocking_text_labels(payload))
     return blocking_labels_from_label_set(labels)
 
 
