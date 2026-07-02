@@ -45,6 +45,7 @@ VENDOR_CPU_FALLBACK_MARKERS = (
     "running inference on cpu",
     "cpu inference",
 )
+INSTRUMENTAL_MINUS_NAMING_CONTRACT = "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role"
 
 
 def _emit(message: str) -> None:
@@ -175,6 +176,69 @@ def primary_stem_from_output_contract(output_contract: dict[str, Any]) -> str | 
     return None
 
 
+def product_stem_type_for_target(target_stem: str) -> str:
+    if target_stem == "instrumental":
+        return "minus"
+    if target_stem == "vocals":
+        return "vocal"
+    return target_stem
+
+
+def role_safe_stem_contract(target_stem: str) -> dict[str, str]:
+    product_stem_type = product_stem_type_for_target(target_stem)
+    naming_contract = (
+        INSTRUMENTAL_MINUS_NAMING_CONTRACT
+        if target_stem == "instrumental"
+        else "source_manifest_target_stem_matches_product_role"
+    )
+    return {
+        "source_manifest_target_stem": target_stem,
+        "canonical_stem_type": target_stem,
+        "user_facing_stem_role": product_stem_type,
+        "manifest_stem_name": target_stem,
+        "product_stem_type": product_stem_type,
+        "model_output_stem_type": target_stem,
+        "naming_contract": naming_contract,
+    }
+
+
+def target_stem_artifact(
+    *,
+    target_stem: str,
+    target_audio_path: Path,
+    target_summary: dict[str, Any],
+) -> dict[str, Any]:
+    contract = role_safe_stem_contract(target_stem)
+    return {
+        "path": str(target_audio_path),
+        "target_stem": target_stem,
+        "source": str(target_summary.get("source") or ""),
+        **contract,
+    }
+
+
+def stem_manifest_stems(
+    *,
+    target_stem: str,
+    vocals_summary: dict[str, Any],
+    instrumental_summary: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    stems = {
+        "vocals": vocals_summary,
+        "instrumental": instrumental_summary,
+    }
+    if target_stem == "instrumental":
+        stems["minus"] = {
+            **instrumental_summary,
+            "role": "product_alias",
+            "alias_of": "instrumental",
+            "source_manifest_target_stem": "instrumental",
+            "product_stem_type": "minus",
+            "model_output_stem_type": "instrumental",
+        }
+    return stems
+
+
 def build_full_track_stem_manifest(
     *,
     source_audio_path: Path,
@@ -217,12 +281,15 @@ def build_full_track_stem_manifest(
         **_audio_file_summary(instrumental_flac_path),
     }
     instrumental_summary.update(stem_provenance.get("instrumental", {}))
+    target_summary = instrumental_summary if target_stem == "instrumental" else vocals_summary
+    target_product_stem = product_stem_type_for_target(target_stem)
     return {
         "schema_version": 1,
         "source_audio_path": str(source_audio_path),
         "model_id": model_id,
         "model_name": model_id,
         "target_stem": target_stem,
+        "target_product_stem": target_product_stem,
         "target_audio_path": str(target_audio_path),
         "model": {
             "model_id": model_id,
@@ -257,10 +324,17 @@ def build_full_track_stem_manifest(
             "cuda_preflight": dict(cuda_preflight or {}),
             "inference_runtime": dict(inference_runtime),
         },
-        "stems": {
-            "vocals": vocals_summary,
-            "instrumental": instrumental_summary,
-        },
+        "stems": stem_manifest_stems(
+            target_stem=target_stem,
+            vocals_summary=vocals_summary,
+            instrumental_summary=instrumental_summary,
+        ),
+        "role_safe_stem_contract": role_safe_stem_contract(target_stem),
+        "target_stem_artifact": target_stem_artifact(
+            target_stem=target_stem,
+            target_audio_path=target_audio_path,
+            target_summary=target_summary,
+        ),
         "artifacts": {
             "raw_ref_flac": str(raw_ref_flac_path),
             "vocals_flac": str(vocals_flac_path),

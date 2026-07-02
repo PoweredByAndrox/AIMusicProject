@@ -620,6 +620,64 @@ def test_manifest_marks_instrumental_model_output_as_target_stem(tmp_path: Path)
     assert manifest["stems"]["vocals"]["role"] == "companion"
 
 
+def test_instrumental_target_manifest_exposes_minus_product_alias(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    vocals_path = output_dir / "vocals.flac"
+    instrumental_path = output_dir / "instrumental.flac"
+    raw_ref_path = output_dir / "raw_ref.flac"
+    output_dir.mkdir()
+    for path in (source_audio_path, vocals_path, instrumental_path, raw_ref_path):
+        _write_tiny_flac(path)
+
+    manifest = module.build_full_track_stem_manifest(
+        source_audio_path=source_audio_path,
+        vocals_flac_path=vocals_path,
+        instrumental_flac_path=instrumental_path,
+        raw_ref_flac_path=raw_ref_path,
+        repo_path=Path("/repo"),
+        model_path=Path("/becruily_instrumental.ckpt"),
+        config_template_path=Path("/becruily_instrumental.yaml"),
+        runtime_config_path=Path("/runtime.yaml"),
+        device_id=0,
+        num_overlap=2,
+        sample_rate=44100,
+        frames=44100,
+        elapsed_sec=1.0,
+        postprocess={"name": None},
+        model_id="becruily_instrumental_vocals",
+        model_display_name="Becruily MelBand RoFormer instrumental checkpoint",
+        stem_provenance={
+            "vocals": {"source": "residual_from_raw_minus_instrumental", "model_output": False},
+            "instrumental": {"source": "model_output", "model_output": True},
+        },
+        residual_companion_materialized=True,
+    )
+
+    assert manifest["target_stem"] == "instrumental"
+    assert manifest["target_product_stem"] == "minus"
+    assert manifest["role_safe_stem_contract"] == {
+        "source_manifest_target_stem": "instrumental",
+        "canonical_stem_type": "instrumental",
+        "user_facing_stem_role": "minus",
+        "manifest_stem_name": "instrumental",
+        "product_stem_type": "minus",
+        "model_output_stem_type": "instrumental",
+        "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+    }
+    assert manifest["target_stem_artifact"]["path"] == str(instrumental_path)
+    assert manifest["target_stem_artifact"]["target_stem"] == "instrumental"
+    assert manifest["target_stem_artifact"]["product_stem_type"] == "minus"
+    assert manifest["target_stem_artifact"]["model_output_stem_type"] == "instrumental"
+    assert manifest["stems"]["instrumental"]["path"] == str(instrumental_path)
+    assert manifest["stems"]["instrumental"]["role"] == "target"
+    assert manifest["stems"]["minus"]["path"] == str(instrumental_path)
+    assert manifest["stems"]["minus"]["role"] == "product_alias"
+    assert manifest["stems"]["minus"]["alias_of"] == "instrumental"
+    assert manifest["stems"]["minus"]["product_stem_type"] == "minus"
+
+
 def test_main_listen_copy_uses_instrumental_for_single_stem_instrumental_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

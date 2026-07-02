@@ -32,6 +32,7 @@ FORBIDDEN_MINUS_TARGET_SOURCES = {
     "rebuilt_non_vocal_stems",
     "stage1_non_vocal_sum",
 }
+INSTRUMENTAL_MINUS_NAMING_CONTRACT = "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -137,11 +138,23 @@ def minus_role_metadata(
         minus_path=minus_path,
     )
     canonical_stem_type = source_target_stem if source_target_stem in MINUS_TARGET_STEMS else manifest_stem_name
+    model_output_stem_type = manifest_stem_name or canonical_stem_type
+    naming_contract = (
+        INSTRUMENTAL_MINUS_NAMING_CONTRACT
+        if model_output_stem_type == "instrumental" or source_target_stem == "instrumental"
+        else "source_manifest_audio_stem_mapped_to_minus_product_role"
+    )
     return {
         "source_manifest_target_stem": source_target_stem,
         "canonical_stem_type": canonical_stem_type,
         "user_facing_stem_role": "minus",
         "manifest_stem_name": manifest_stem_name,
+        "product_stem_type": "minus",
+        "judge_stem_type": "minus",
+        "stem_type_source": "judge_product_role",
+        "model_output_stem_type": model_output_stem_type,
+        "source_manifest_stem_type": source_target_stem,
+        "naming_contract": naming_contract,
     }
 
 
@@ -168,6 +181,12 @@ def minus_route_id_for_candidate(candidate: dict[str, Any], model_id: str) -> st
     if route_family == "cpu_dsp_minus_phase_repair":
         return f"{model_id}__{route_family}"
     return model_id
+
+
+def minus_candidate_id(*, track_id: str, route_id: str, role_metadata: dict[str, str]) -> str:
+    source_stem_type = str(role_metadata.get("source_manifest_stem_type") or "")
+    source_suffix = "__source_instrumental" if source_stem_type == "instrumental" else ""
+    return f"{track_id}__minus__{route_id}{source_suffix}"
 
 
 def build_vocal_companion_map(candidates: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -261,7 +280,7 @@ def build_minus_row(
     row = {
             "schema": "testing_stuff_music_minus_windowed_judge_candidate_row.v1",
             "track_id": track_id,
-            "candidate_id": f"{track_id}__minus__{route_id}",
+            "candidate_id": minus_candidate_id(track_id=track_id, route_id=route_id, role_metadata=role_metadata),
             "mix_path": source_audio_path,
             "source_audio_path": source_audio_path,
             "minus_path": minus_path,

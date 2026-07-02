@@ -279,6 +279,12 @@ def test_instrumental_residual_vocal_is_companion_not_selected_vocal(tmp_path: P
     assert row["canonical_stem_type"] == "instrumental"
     assert row["user_facing_stem_role"] == "minus"
     assert row["manifest_stem_name"] == "instrumental"
+    assert row["product_stem_type"] == "minus"
+    assert row["judge_stem_type"] == "minus"
+    assert row["stem_type_source"] == "judge_product_role"
+    assert row["model_output_stem_type"] == "instrumental"
+    assert row["source_manifest_stem_type"] == "instrumental"
+    assert row["naming_contract"] == "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role"
     assert "vocal_path" not in row
     assert "selected_vocal_path" not in row
 
@@ -308,6 +314,37 @@ def test_candidate_ids_distinguish_same_model_different_minus_routes(tmp_path: P
     assert len(candidate_ids) == 2
     assert len(set(candidate_ids)) == 2
     assert any(candidate_id.endswith("__cpu_dsp_minus_phase_repair") for candidate_id in candidate_ids)
+
+
+def test_candidate_ids_distinguish_minus_product_from_instrumental_source_stem(tmp_path: Path) -> None:
+    execution_jsonl = write_jsonl(
+        tmp_path / "execution.jsonl",
+        [
+            execution_row(
+                tmp_path,
+                target_stem="minus",
+                model_id="shared_minus_model",
+                output_subdir="native_minus",
+            ),
+            execution_row(
+                tmp_path,
+                target_stem="instrumental",
+                model_id="shared_minus_model",
+                output_subdir="instrumental_model_output",
+                vocal_residual_companion=True,
+            ),
+        ],
+    )
+
+    result = build_inputs(execution_results_jsonls=[execution_jsonl])
+
+    candidate_ids = [row["candidate_id"] for row in result["rows"]]
+    assert len(candidate_ids) == 2
+    assert len(set(candidate_ids)) == 2
+    instrumental_row = next(row for row in result["rows"] if row["source_manifest_stem_type"] == "instrumental")
+    assert instrumental_row["candidate_id"].endswith("__source_instrumental")
+    assert instrumental_row["product_stem_type"] == "minus"
+    assert instrumental_row["model_output_stem_type"] == "instrumental"
 
 
 def test_does_not_turn_vocal_target_audio_into_minus_candidate(tmp_path: Path) -> None:
