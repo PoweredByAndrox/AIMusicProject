@@ -61,6 +61,9 @@ MODEL-2C makes false accept the primary safety metric.
   thresholds.
 - Threshold selection is false-accept-first: it must satisfy
   `false_accept_rate <= --max-false-accept-rate` before optimizing recall.
+- The accept boundary is strict: `predicted_accept_probability` must be greater
+  than `accept_threshold`; equality remains in the abstain/block region so a
+  boundary score is never promoted to `accept_candidate`.
 - Abstain is allowed for shadow scoring and is never counted as accept.
 - Hard-negative weighting applies only to real negative rows with configured
   blocker labels.

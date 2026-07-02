@@ -337,7 +337,7 @@ def test_threshold_selection_prioritizes_false_accept_over_recall() -> None:
     )
 
     assert result["false_accept_rate"] == 0.0
-    assert result["accept_threshold"] > 0.86
+    assert result["accept_threshold"] >= 0.86
     assert result["accepted_positive_rows"] == 1
 
 
@@ -355,6 +355,19 @@ def test_abstain_is_not_counted_as_accept() -> None:
     assert metrics["false_accept_rate"] == 0.0
     assert metrics["abstain_rows"] == 1
     assert metrics["accept_count"] == 1
+
+
+def test_accept_threshold_boundary_is_abstain_not_accept() -> None:
+    from tools.train_target_audio_error_critics import thresholded_metrics
+
+    rows = [{"label": 0}]
+    predictions = [{"predicted_accept_probability": 0.9, "predicted_block_probability": 0.1}]
+
+    metrics = thresholded_metrics(rows, predictions, accept_threshold=0.9, block_threshold=0.6)
+
+    assert metrics["decisions"] == ["abstain"]
+    assert metrics["accept_count"] == 0
+    assert metrics["false_accept_rate"] == 0.0
 
 
 def test_hard_negative_weighting_uses_only_real_negative_rows(tmp_path: Path) -> None:

@@ -578,7 +578,7 @@ def thresholded_metrics(
     for label, prediction in zip(labels, predictions):
         accept_score = clip01(prediction.get("predicted_accept_probability"))
         block_score = clip01(prediction.get("predicted_block_probability", 1.0 - accept_score))
-        if accept_score >= accept_threshold:
+        if accept_score > accept_threshold:
             decision = "accept_candidate"
             accept_count += 1
             if label == 1:
