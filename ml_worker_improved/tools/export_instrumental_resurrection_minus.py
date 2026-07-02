@@ -83,6 +83,8 @@ def _resolve_bs_roformer_device(device: str) -> tuple[bool, list[str]]:
         return False, ["0"]
     if requested in {"cpu", "cpu:0"}:
         return True, []
+    if requested in {"mps", "metal"}:
+        return False, []
     normalized = requested.replace("cuda:", "").replace("cuda", "")
     normalized = normalized.replace(" ", ",")
     device_ids: list[str] = [
@@ -95,6 +97,15 @@ def _resolve_bs_roformer_device(device: str) -> tuple[bool, list[str]]:
     if any(not token.isdigit() for token in device_ids):
         raise ValueError(f"Unsupported BS Roformer device value: {device}")
     return False, device_ids
+
+
+def _expected_acceleration_mode(device: str, *, force_cpu: bool) -> str:
+    requested = str(device).strip().lower()
+    if force_cpu:
+        return "cpu_diagnostic_inference"
+    if requested in {"mps", "metal"}:
+        return "mps_inference"
+    return "gpu_inference"
 
 
 def _copy_listen_file(source_path: Path, target_path: Path) -> None:
@@ -202,7 +213,7 @@ def main() -> int:
         "target_instrument": str(args.target_instrument),
         "gpu_inference_skipped": bool(force_cpu),
         "gpu_inference_skip_reason": "cpu_requested" if force_cpu else None,
-        "expected_acceleration_mode": "cpu_diagnostic_inference" if force_cpu else "gpu_inference",
+        "expected_acceleration_mode": _expected_acceleration_mode(args.device, force_cpu=force_cpu),
     }
     _mark_progress(
         progress_log_path,
@@ -260,7 +271,7 @@ def main() -> int:
         ]
         if force_cpu:
             command.append("--force_cpu")
-        else:
+        elif device_ids:
             command.extend(["--device_ids", *device_ids])
         if args.use_tta:
             command.append("--use_tta")
@@ -275,7 +286,53 @@ def main() -> int:
             device=str(args.device),
             expected_acceleration_mode=execution_contract["expected_acceleration_mode"],
         )
-        _run_command(command, cwd=runtime_repo)
+        try:
+            _run_command(command, cwd=runtime_repo)
+        except subprocess.CalledProcessError as exc:
+            error_text = str(exc.stderr or exc.output or exc)
+            _mark_progress(
+                progress_log_path,
+                run_started_at=started_at,
+                stage="model_inference",
+                status="failed",
+                stage_started_at=stage_started_at,
+                returncode=exc.returncode,
+                error=error_text,
+                expected_acceleration_mode=execution_contract["expected_acceleration_mode"],
+            )
+            blocked_manifest = {
+                "schema_version": 1,
+                "mode": "export_instrumental_resurrection_minus",
+                "source_audio_path": str(source_audio_path),
+                "target_stem": "minus",
+                "target_audio_path": None,
+                "delivery_allowed": False,
+                "delivery_status": "blocked_model_inference_failed",
+                "presentation_status": "diagnostic_blocked_not_for_listen_pack",
+                "release_status": "not_release_ready",
+                "failed_checks": ["instrumental_resurrection_model_inference_failed"],
+                "error": error_text,
+                "returncode": exc.returncode,
+                "model": {
+                    "name": "bs_roformer_instrumental_resurrection_unwa",
+                    "model_type": str(args.model_type),
+                    "config_path": str(args.config_path),
+                    "checkpoint_path": str(args.model_path),
+                    "target_instrument": str(args.target_instrument),
+                    "device": str(args.device),
+                    "registry_recovery": "manual_huggingface_mirror",
+                },
+                "execution_contract": execution_contract,
+                "artifacts": {
+                    "progress_log_jsonl": str(progress_log_path),
+                },
+                "elapsed_sec": round(time.perf_counter() - started_at, 3),
+            }
+            (output_dir / "stem_manifest.json").write_text(
+                json.dumps(blocked_manifest, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            raise
         _mark_progress(
             progress_log_path,
             run_started_at=started_at,

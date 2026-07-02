@@ -88,8 +88,8 @@ class TestExportInstrumentalResurrectionMinus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.wav"
-            output_dir = temp_path / "out"
-            listen_dir = temp_path / "listen"
+            output_dir = (temp_path / "out").resolve()
+            listen_dir = (temp_path / "listen").resolve()
             runtime_repo = temp_path / "runtime_repo"
             runtime_repo.mkdir()
             (runtime_repo / "inference.py").write_text("# fake vendor entrypoint\n", encoding="utf-8")
@@ -227,7 +227,7 @@ class TestExportInstrumentalResurrectionMinus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.wav"
-            output_dir = temp_path / "out"
+            output_dir = (temp_path / "out").resolve()
             runtime_repo = temp_path / "runtime_repo"
             runtime_repo.mkdir()
             (runtime_repo / "inference.py").write_text("# fake vendor entrypoint\n", encoding="utf-8")
@@ -307,6 +307,126 @@ class TestExportInstrumentalResurrectionMinus(unittest.TestCase):
                 "cpu_diagnostic_inference",
             )
 
+    def test_mps_export_lets_vendor_select_mps_without_device_ids(self):
+        module = _load_export_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.wav"
+            output_dir = (temp_path / "out").resolve()
+            runtime_repo = temp_path / "runtime_repo"
+            runtime_repo.mkdir()
+            (runtime_repo / "inference.py").write_text("# fake vendor entrypoint\n", encoding="utf-8")
+            config_path = temp_path / "config.yaml"
+            config_path.write_text("training:\n  target_instrument: other\n", encoding="utf-8")
+            checkpoint_path = temp_path / "model.ckpt"
+            checkpoint_path.write_bytes(b"fake checkpoint")
+            source_audio = _write_stereo_wav(source_path)
+
+            captured: dict[str, object] = {}
+
+            def fake_run_command(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+                captured["command"] = command
+                captured["cwd"] = cwd
+                store_dir = _assert_common_inference_command(
+                    self,
+                    command,
+                    cwd=cwd,
+                    runtime_repo=runtime_repo,
+                    config_path=config_path,
+                    checkpoint_path=checkpoint_path,
+                    input_wav_name="source.wav",
+                )
+                store_dir.mkdir(parents=True, exist_ok=True)
+                sf.write(str(store_dir / "other.wav"), source_audio * 0.75, 44100, subtype="PCM_24")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            argv = [
+                "export_instrumental_resurrection_minus.py",
+                str(source_path),
+                str(output_dir),
+                "--runtime-repo",
+                str(runtime_repo),
+                "--config-path",
+                str(config_path),
+                "--model-path",
+                str(checkpoint_path),
+                "--device",
+                "mps",
+            ]
+
+            with patch.object(module, "_run_command", side_effect=fake_run_command), patch.object(
+                module.sys,
+                "argv",
+                argv,
+            ):
+                self.assertEqual(module.main(), 0)
+
+            command = captured["command"]
+            self.assertIsInstance(command, list)
+            self.assertNotIn("--force_cpu", command)
+            self.assertNotIn("--device_ids", command)
+
+            manifest = json.loads((output_dir / "stem_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["model"]["device"], "mps")
+            self.assertEqual(
+                manifest["execution_contract"]["expected_acceleration_mode"],
+                "mps_inference",
+            )
+
+    def test_model_inference_failure_writes_blocked_manifest(self):
+        module = _load_export_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.wav"
+            output_dir = (temp_path / "out").resolve()
+            runtime_repo = temp_path / "runtime_repo"
+            runtime_repo.mkdir()
+            (runtime_repo / "inference.py").write_text("# fake vendor entrypoint\n", encoding="utf-8")
+            config_path = temp_path / "config.yaml"
+            config_path.write_text("training:\n  target_instrument: other\n", encoding="utf-8")
+            checkpoint_path = temp_path / "model.ckpt"
+            checkpoint_path.write_bytes(b"fake checkpoint")
+            _write_stereo_wav(source_path)
+
+            def fake_run_command(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+                raise subprocess.CalledProcessError(
+                    returncode=1,
+                    cmd=command,
+                    output="",
+                    stderr="RuntimeError: Invalid buffer size",
+                )
+
+            argv = [
+                "export_instrumental_resurrection_minus.py",
+                str(source_path),
+                str(output_dir),
+                "--runtime-repo",
+                str(runtime_repo),
+                "--config-path",
+                str(config_path),
+                "--model-path",
+                str(checkpoint_path),
+                "--device",
+                "mps",
+            ]
+
+            with patch.object(module, "_run_command", side_effect=fake_run_command), patch.object(
+                module.sys,
+                "argv",
+                argv,
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    module.main()
+
+            manifest = json.loads((output_dir / "stem_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["delivery_allowed"], False)
+            self.assertEqual(manifest["delivery_status"], "blocked_model_inference_failed")
+            self.assertEqual(manifest["failed_checks"], ["instrumental_resurrection_model_inference_failed"])
+            self.assertEqual(manifest["execution_contract"]["expected_acceleration_mode"], "mps_inference")
+            self.assertIn("Invalid buffer size", manifest["error"])
+
     def test_resolve_bs_roformer_device_maps_cpu_and_cuda_values(self):
         module = _load_export_module()
 
@@ -314,3 +434,8 @@ class TestExportInstrumentalResurrectionMinus(unittest.TestCase):
         self.assertEqual(module._resolve_bs_roformer_device("auto"), (False, ["0"]))
         self.assertEqual(module._resolve_bs_roformer_device("cuda:1"), (False, ["1"]))
         self.assertEqual(module._resolve_bs_roformer_device("cuda:0,2"), (False, ["0", "2"]))
+
+    def test_resolve_bs_roformer_device_maps_mps_to_vendor_auto_device(self):
+        module = _load_export_module()
+
+        self.assertEqual(module._resolve_bs_roformer_device("mps"), (False, []))
