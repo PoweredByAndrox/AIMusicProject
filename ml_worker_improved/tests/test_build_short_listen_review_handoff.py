@@ -20,11 +20,15 @@ def _pack(path: Path, *, release_ready: bool = False) -> Path:
         {
             "schema": "aggregate_short_listen_pack_manifest.v1",
             "pack_id": "lp_test",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
+            "delivery_status": "aggregate_validation_pending",
+            "delivery_allowed": False,
+            "presentation_status": "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "aggregate_validation_pending",
             "release_ready": release_ready,
             "can_publish_as_result": False,
+            "listenable": False,
+            "deliverable": False,
+            "aggregate_validation_ready": True,
             "failed_checks": [],
             "items": [
                 {
@@ -146,6 +150,58 @@ def _candidate_wave_pack(path: Path) -> Path:
     return path
 
 
+def _machine_gate(path: Path, *, pack: Path) -> Path:
+    _write_json(
+        path.parent / "validation.json",
+        {
+            "schema": "aggregate_short_listen_pack_validation.v1",
+            "validation_status": "passed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        path.parent / "semantic_review.json",
+        {
+            "schema": "short_listen_semantic_review.v1",
+            "review_status": "passed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        path.parent / "minus_audit.json",
+        {
+            "schema": "short_minus_quality_audit.v1",
+            "audit_status": "completed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        path,
+        {
+            "schema": "machine_stem_acceptance_gate.v1",
+            "gate_status": "accepted",
+            "final_result_allowed": True,
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "pack_manifest_json": str(pack),
+            "validation_json": str(path.parent / "validation.json"),
+            "minus_audit_json": str(path.parent / "minus_audit.json"),
+            "minus_audit_status": "completed",
+            "semantic_review_json": str(path.parent / "semantic_review.json"),
+            "semantic_review_evidence_count": 2,
+            "failed_checks": [],
+        },
+    )
+    return path
+
+
 def _template(path: Path, *, release_ready: bool = False) -> Path:
     root = path.parent
     template_jsonl = root / "feedback_items_template.jsonl"
@@ -193,6 +249,12 @@ def _template(path: Path, *, release_ready: bool = False) -> Path:
         },
     )
     return path
+
+
+def _set_template_machine_gate(template: Path, gate: Path) -> None:
+    payload = json.loads(template.read_text(encoding="utf-8"))
+    payload["machine_gate_json"] = str(gate)
+    _write_json(template, payload)
 
 
 def _subset_template(path: Path) -> Path:
@@ -325,6 +387,7 @@ def _set_template_pack_id(path: Path, pack_id: str) -> None:
 def test_build_short_listen_review_handoff_writes_playlist_and_checklist(tmp_path: Path) -> None:
     pack = _pack(tmp_path / "agg" / "pack.json")
     template = _template(tmp_path / "feedback_template" / "feedback_template_manifest.json")
+    _set_template_machine_gate(template, _machine_gate(tmp_path / "gate" / "gate.json", pack=pack))
 
     manifest = build_short_listen_review_handoff(
         pack_manifest_json=pack,
@@ -358,7 +421,7 @@ def test_build_short_listen_review_handoff_writes_playlist_and_checklist(tmp_pat
     assert "vocal_bleed_in_minus" in checklist
 
 
-def test_build_short_listen_review_handoff_accepts_subset_pack(tmp_path: Path) -> None:
+def test_build_short_listen_review_handoff_blocks_subset_pack(tmp_path: Path) -> None:
     pack = _subset_pack(tmp_path / "subset" / "pack.json")
     template = _subset_template(tmp_path / "feedback_template" / "tpl.json")
 
@@ -368,15 +431,13 @@ def test_build_short_listen_review_handoff_accepts_subset_pack(tmp_path: Path) -
         output_dir=tmp_path / "handoff",
     )
 
-    assert manifest["handoff_status"] == "ready_for_listen_review"
+    assert manifest["handoff_status"] == "blocked"
+    assert manifest["item_count"] == 0
     assert manifest["pack_id"] == "lp_subset"
-    assert [item["audio_path"] for item in manifest["items"]] == ["audio/sub/g001.flac", "audio/sub/g002.flac"]
-    playlist = (tmp_path / "handoff" / "playlist.m3u").read_text(encoding="utf-8")
-    assert "../subset/audio/sub/g001.flac" in playlist
-    assert "../subset/audio/sub/g002.flac" in playlist
+    assert "pack_schema_unexpected" in manifest["failed_checks"]
 
 
-def test_build_short_listen_review_handoff_accepts_repair_selection_pack(tmp_path: Path) -> None:
+def test_build_short_listen_review_handoff_blocks_repair_selection_pack(tmp_path: Path) -> None:
     pack = _repair_selection_pack(tmp_path / "repair" / "pack.json")
     template = _repair_template(tmp_path / "feedback_template" / "tpl.json")
 
@@ -386,14 +447,13 @@ def test_build_short_listen_review_handoff_accepts_repair_selection_pack(tmp_pat
         output_dir=tmp_path / "handoff",
     )
 
-    assert manifest["handoff_status"] == "ready_for_listen_review"
+    assert manifest["handoff_status"] == "blocked"
+    assert manifest["item_count"] == 0
     assert manifest["pack_id"] == "lp_repair"
-    assert [item["audio_path"] for item in manifest["items"]] == ["audio/min/m001.flac"]
-    playlist = (tmp_path / "handoff" / "playlist.m3u").read_text(encoding="utf-8")
-    assert "../repair/audio/min/m001.flac" in playlist
+    assert "pack_schema_unexpected" in manifest["failed_checks"]
 
 
-def test_build_short_listen_review_handoff_accepts_candidate_wave_pack(tmp_path: Path) -> None:
+def test_build_short_listen_review_handoff_blocks_candidate_wave_pack(tmp_path: Path) -> None:
     pack = _candidate_wave_pack(tmp_path / "cw" / "pack.json")
     template = _candidate_wave_template(tmp_path / "feedback_template" / "tpl.json")
 
@@ -403,16 +463,16 @@ def test_build_short_listen_review_handoff_accepts_candidate_wave_pack(tmp_path:
         output_dir=tmp_path / "handoff",
     )
 
-    assert manifest["handoff_status"] == "ready_for_listen_review"
+    assert manifest["handoff_status"] == "blocked"
+    assert manifest["item_count"] == 0
     assert manifest["pack_id"] == "cw_listen"
-    assert [item["audio_path"] for item in manifest["items"]] == ["audio/min/m001.flac"]
-    playlist = (tmp_path / "handoff" / "playlist.m3u").read_text(encoding="utf-8")
-    assert "../cw/audio/min/m001.flac" in playlist
+    assert "pack_schema_unexpected" in manifest["failed_checks"]
 
 
 def test_build_short_listen_review_handoff_blocks_release_ready_pack(tmp_path: Path) -> None:
     pack = _pack(tmp_path / "pack.json", release_ready=True)
     template = _template(tmp_path / "feedback_template" / "feedback_template_manifest.json")
+    _set_template_machine_gate(template, _machine_gate(tmp_path / "gate" / "gate.json", pack=pack))
 
     manifest = build_short_listen_review_handoff(
         pack_manifest_json=pack,
@@ -429,6 +489,7 @@ def test_build_short_listen_review_handoff_blocks_release_ready_pack(tmp_path: P
 def test_build_short_listen_review_handoff_blocks_pack_id_mismatch(tmp_path: Path) -> None:
     pack = _pack(tmp_path / "pack.json")
     template = _template(tmp_path / "feedback_template" / "feedback_template_manifest.json")
+    _set_template_machine_gate(template, _machine_gate(tmp_path / "gate" / "gate.json", pack=pack))
     _set_template_pack_id(template, "different_pack")
 
     manifest = build_short_listen_review_handoff(

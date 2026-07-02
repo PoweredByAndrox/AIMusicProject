@@ -16,6 +16,10 @@ if str(APP_ROOT) not in sys.path:
 
 from tools.artifact_name_policy import validate_artifact_relative_path
 from tools.docker_runtime import require_docker_runtime
+from tools.short_listen_gate_contract import (  # noqa: E402
+    accepted_machine_gate_failures,
+    staged_aggregate_pack_failures,
+)
 
 START_TIME = time.monotonic()
 MANIFEST_NAME = "tpl.json"
@@ -63,7 +67,6 @@ LISTEN_AUDIO_FILE_PACK_SCHEMAS = {
     "short_listen_repair_selection_pack_manifest.v1",
     "short_candidate_wave_listen_pack_manifest.v1",
 }
-ACCEPTED_PACK_SCHEMAS = {"aggregate_short_listen_pack_manifest.v1", *LISTEN_AUDIO_FILE_PACK_SCHEMAS}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -199,6 +202,7 @@ def build_summary(manifest: dict[str, Any], rows: Sequence[dict[str, Any]]) -> s
 def build_short_listen_feedback_template(
     *,
     pack_manifest_json: Path,
+    machine_gate_json: Path | None = None,
     output_dir: Path,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -206,19 +210,19 @@ def build_short_listen_feedback_template(
     progress_path = output_dir / PROGRESS_NAME
     if progress_path.exists():
         progress_path.unlink()
-    progress(progress_path, "start", pack_manifest_json=str(pack_manifest_json))
+    progress(progress_path, "start", pack_manifest_json=str(pack_manifest_json), machine_gate_json=str(machine_gate_json or ""))
 
     pack = read_json(pack_manifest_json)
     failed: list[str] = []
     failed.extend(collect_true_flag_failures("pack", pack))
-    if pack.get("schema") not in ACCEPTED_PACK_SCHEMAS:
-        failed.append("pack_schema_unexpected")
-    if pack.get("delivery_status") != "accepted":
-        failed.append("pack_delivery_status_not_accepted")
-    if pack.get("delivery_allowed") is not True:
-        failed.append("pack_delivery_allowed_not_true")
-    if pack.get("presentation_status") != "accepted_for_listen_pack":
-        failed.append("pack_presentation_status_not_accepted")
+    failed.extend(staged_aggregate_pack_failures(pack))
+    failed.extend(
+        accepted_machine_gate_failures(
+            machine_gate_json=machine_gate_json,
+            pack_manifest_json=pack_manifest_json,
+            pack=pack,
+        )
+    )
     if pack.get("failed_checks") not in ([], None):
         failed.append("pack_failed_checks_not_empty")
 
@@ -247,6 +251,7 @@ def build_short_listen_feedback_template(
         "schema": "short_listen_feedback_template_manifest.v1",
         "pack_id": str(pack.get("pack_id") or ""),
         "pack_manifest_json": str(pack_manifest_json),
+        "machine_gate_json": str(machine_gate_json or ""),
         "template_status": "ready_for_human_review" if rows and not failed else "blocked",
         "ready_for_feedback_manifest": False,
         "template_jsonl": str(output_dir / TEMPLATE_NAME),
@@ -281,6 +286,7 @@ def build_short_listen_feedback_template(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a short listen feedback template from an aggregate listen pack.")
     parser.add_argument("--pack-manifest-json", type=Path, required=True)
+    parser.add_argument("--machine-gate-json", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args(argv)
 
@@ -293,6 +299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     manifest = build_short_listen_feedback_template(
         pack_manifest_json=args.pack_manifest_json,
+        machine_gate_json=args.machine_gate_json,
         output_dir=args.output_dir,
         command_args=list(argv if argv is not None else sys.argv[1:]),
     )

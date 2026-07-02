@@ -39,11 +39,15 @@ def _write_handoff(
         {
             "schema": pack_schema,
             "pack_id": pack_id,
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
+            "delivery_status": "accepted" if listen_audio_schema else "aggregate_validation_pending",
+            "delivery_allowed": True if listen_audio_schema else False,
+            "presentation_status": "accepted_for_listen_pack" if listen_audio_schema else "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "listen_preview_only" if listen_audio_schema else "aggregate_validation_pending",
             "release_ready": False,
             "can_publish_as_result": False,
+            "listenable": True if listen_audio_schema else False,
+            "deliverable": False,
+            "aggregate_validation_ready": False if listen_audio_schema else True,
             "failed_checks": [],
             ("listen_audio_files" if listen_audio_schema else "items"): [
                 {
@@ -75,12 +79,61 @@ def _write_handoff(
         encoding="utf-8",
     )
     _write_json(
+        root / "validation" / "validation.json",
+        {
+            "schema": "aggregate_short_listen_pack_validation.v1",
+            "validation_status": "passed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        root / "semantic" / "review.json",
+        {
+            "schema": "short_listen_semantic_review.v1",
+            "review_status": "passed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        root / "minus" / "audit.json",
+        {
+            "schema": "short_minus_quality_audit.v1",
+            "audit_status": "completed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        root / "gate" / "gate.json",
+        {
+            "schema": "machine_stem_acceptance_gate.v1",
+            "gate_status": "accepted",
+            "final_result_allowed": True,
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "pack_manifest_json": str(pack),
+            "validation_json": str(root / "validation" / "validation.json"),
+            "minus_audit_json": str(root / "minus" / "audit.json"),
+            "minus_audit_status": "completed",
+            "semantic_review_json": str(root / "semantic" / "review.json"),
+            "semantic_review_evidence_count": 2,
+            "failed_checks": [],
+        },
+    )
+    _write_json(
         template,
         {
             "schema": "short_listen_feedback_template_manifest.v1",
             "pack_id": pack_id,
             "template_status": "ready_for_human_review",
             "ready_for_feedback_manifest": False,
+            "machine_gate_json": str(root / "gate" / "gate.json"),
             "template_jsonl": str(template_jsonl),
             "item_count": 2,
             "failed_checks": [],
@@ -95,6 +148,7 @@ def _write_handoff(
             "pack_id": pack_id,
             "pack_manifest_json": str(pack),
             "feedback_template_manifest_json": str(template),
+            "machine_gate_json": str(root / "gate" / "gate.json"),
             "handoff_status": "ready_for_listen_review",
             "item_count": 2,
             "items": [
@@ -151,34 +205,34 @@ def test_validate_short_listen_review_handoff_accepts_valid_handoff(tmp_path: Pa
     assert all(len(path.name) <= 32 for path in (tmp_path / "validation").iterdir() if path.is_file())
 
 
-def test_validate_short_listen_review_handoff_accepts_subset_pack(tmp_path: Path) -> None:
+def test_validate_short_listen_review_handoff_blocks_subset_pack(tmp_path: Path) -> None:
     manifest = _write_handoff(tmp_path, subset_pack=True)
 
     result = validate_short_listen_review_handoff(handoff_manifest_json=manifest, output_dir=tmp_path / "validation")
 
-    assert result["validation_status"] == "passed"
-    assert result["failed_checks"] == []
-    assert result["item_count"] == 2
+    assert result["validation_status"] == "failed"
+    assert "pack_schema_unexpected" in result["failed_checks"]
+    assert result["item_count"] == 0
 
 
-def test_validate_short_listen_review_handoff_accepts_repair_selection_pack(tmp_path: Path) -> None:
+def test_validate_short_listen_review_handoff_blocks_repair_selection_pack(tmp_path: Path) -> None:
     manifest = _write_handoff(tmp_path, repair_selection_pack=True)
 
     result = validate_short_listen_review_handoff(handoff_manifest_json=manifest, output_dir=tmp_path / "validation")
 
-    assert result["validation_status"] == "passed"
-    assert result["failed_checks"] == []
-    assert result["item_count"] == 2
+    assert result["validation_status"] == "failed"
+    assert "pack_schema_unexpected" in result["failed_checks"]
+    assert result["item_count"] == 0
 
 
-def test_validate_short_listen_review_handoff_accepts_candidate_wave_pack(tmp_path: Path) -> None:
+def test_validate_short_listen_review_handoff_blocks_candidate_wave_pack(tmp_path: Path) -> None:
     manifest = _write_handoff(tmp_path, candidate_wave_pack=True)
 
     result = validate_short_listen_review_handoff(handoff_manifest_json=manifest, output_dir=tmp_path / "validation")
 
-    assert result["validation_status"] == "passed"
-    assert result["failed_checks"] == []
-    assert result["item_count"] == 2
+    assert result["validation_status"] == "failed"
+    assert "pack_schema_unexpected" in result["failed_checks"]
+    assert result["item_count"] == 0
 
 
 def test_validate_short_listen_review_handoff_blocks_release_ready(tmp_path: Path) -> None:

@@ -122,6 +122,7 @@ def run_short_listen_review_packet(
     pack_manifest_json: Path,
     output_dir: Path,
     aggregate_validation_json: Path | None = None,
+    machine_gate_json: Path | None = None,
     required_stems: Sequence[str] | None = None,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -129,7 +130,7 @@ def run_short_listen_review_packet(
     progress_path = output_dir / PROGRESS_NAME
     if progress_path.exists():
         progress_path.unlink()
-    progress(progress_path, "start", pack_manifest_json=str(pack_manifest_json))
+    progress(progress_path, "start", pack_manifest_json=str(pack_manifest_json), machine_gate_json=str(machine_gate_json or ""))
 
     stages: dict[str, dict[str, Any]] = {}
     failed: list[str] = []
@@ -146,8 +147,16 @@ def run_short_listen_review_packet(
         template_dir = output_dir / "feedback_template"
         template = build_short_listen_feedback_template(
             pack_manifest_json=pack_manifest_json,
+            machine_gate_json=machine_gate_json,
             output_dir=template_dir,
-            command_args=["--pack-manifest-json", str(pack_manifest_json), "--output-dir", str(template_dir)],
+            command_args=[
+                "--pack-manifest-json",
+                str(pack_manifest_json),
+                "--machine-gate-json",
+                str(machine_gate_json or ""),
+                "--output-dir",
+                str(template_dir),
+            ],
         )
         stages["feedback_template"] = {
             "template_status": template.get("template_status"),
@@ -218,6 +227,7 @@ def run_short_listen_review_packet(
             audit = audit_short_listen_goal_status(
                 pack_manifest_json=pack_manifest_json,
                 validation_json=audit_validation_json,
+                machine_gate_json=machine_gate_json,
                 output_dir=audit_dir,
             )
             stages["goal_audit"] = {
@@ -237,7 +247,7 @@ def run_short_listen_review_packet(
             }
 
     goal_status = str(stages.get("goal_audit", {}).get("goal_status") or "")
-    if contract_required_stems and goal_status in {"failed_safety_contract", "machine_evidence_incomplete"}:
+    if goal_status in {"failed_safety_contract", "machine_evidence_incomplete"}:
         failed.append(f"goal_audit:{goal_status}")
 
     failed = stable_unique(failed)
@@ -246,6 +256,7 @@ def run_short_listen_review_packet(
         "schema": "short_listen_review_packet_manifest.v1",
         "packet_status": packet_status,
         "pack_manifest_json": str(pack_manifest_json),
+        "machine_gate_json": str(machine_gate_json or ""),
         "output_dir": str(output_dir),
         "stages": stages,
         "failed_checks": failed,
@@ -287,6 +298,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pack-manifest-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--aggregate-validation-json", type=Path)
+    parser.add_argument("--machine-gate-json", type=Path)
     parser.add_argument("--required-stem", action="append", default=[])
     parser.add_argument("--require-full-pack-stems", action="store_true")
     return parser.parse_args(argv)
@@ -302,6 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pack_manifest_json=args.pack_manifest_json,
         output_dir=args.output_dir,
         aggregate_validation_json=args.aggregate_validation_json,
+        machine_gate_json=args.machine_gate_json,
         required_stems=required_stems_from_cli(
             requested=tuple(str(item) for item in args.required_stem),
             require_full_pack=bool(args.require_full_pack_stems),

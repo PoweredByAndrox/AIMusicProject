@@ -18,6 +18,10 @@ if str(APP_ROOT) not in sys.path:
 
 from tools.artifact_name_policy import validate_artifact_relative_path  # noqa: E402
 from tools.docker_runtime import require_docker_runtime  # noqa: E402
+from tools.short_listen_gate_contract import (  # noqa: E402
+    accepted_machine_gate_failures,
+    staged_aggregate_pack_failures,
+)
 
 START_TIME = time.monotonic()
 VALIDATION_NAME = "validation.json"
@@ -42,7 +46,6 @@ LISTEN_AUDIO_FILE_PACK_SCHEMAS = {
     "short_listen_repair_selection_pack_manifest.v1",
     "short_candidate_wave_listen_pack_manifest.v1",
 }
-ACCEPTED_PACK_SCHEMAS = {"aggregate_short_listen_pack_manifest.v1", *LISTEN_AUDIO_FILE_PACK_SCHEMAS}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -241,12 +244,7 @@ def validate_short_listen_review_handoff(
     if pack_path.exists():
         pack = read_json(pack_path)
         failed.extend(collect_true_flag_failures("pack", pack))
-        if pack.get("schema") not in ACCEPTED_PACK_SCHEMAS:
-            failed.append("pack_schema_unexpected")
-        if pack.get("delivery_status") != "accepted":
-            failed.append("pack_delivery_status_not_accepted")
-        if pack.get("delivery_allowed") is not True:
-            failed.append("pack_delivery_allowed_not_true")
+        failed.extend(staged_aggregate_pack_failures(pack))
         if pack.get("failed_checks") not in ([], None):
             failed.append("pack_failed_checks_not_empty")
     if template_path.exists():
@@ -267,6 +265,16 @@ def validate_short_listen_review_handoff(
         failed.append("feedback_template_pack_id_mismatch")
     if pack and str(pack.get("pack_id") or "") != str(handoff.get("pack_id") or ""):
         failed.append("handoff_pack_id_mismatch")
+    if pack:
+        gate_value = str(handoff.get("machine_gate_json") or template.get("machine_gate_json") or "")
+        machine_gate_json = Path(gate_value) if gate_value else None
+        failed.extend(
+            accepted_machine_gate_failures(
+                machine_gate_json=machine_gate_json,
+                pack_manifest_json=pack_path,
+                pack=pack,
+            )
+        )
 
     rows = [row for row in handoff.get("items") or [] if isinstance(row, dict)]
     for index, row in enumerate(rows, start=1):

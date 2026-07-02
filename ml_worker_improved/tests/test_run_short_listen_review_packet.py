@@ -20,39 +20,73 @@ def _touch(path: Path) -> None:
 def _pack(root: Path, *, release_ready: bool = False) -> Path:
     pack = root / "pack.json"
     _touch(root / "audio/vrep/sub/v001.flac")
+    _touch(root / "audio/vrep/sub/v002.flac")
+    _touch(root / "audio/vrep/sub/v003.flac")
     _touch(root / "audio/mpr/min/m001.flac")
+    items = [
+        {
+            "audio_path": "audio/vrep/sub/v001.flac",
+            "source_alias": "vrep",
+            "stem_type": "vocal",
+            "track_alias": "vrep",
+            "duration_sec": 100.0,
+            "release_ready": False,
+            "can_publish_as_result": False,
+        },
+        {
+            "audio_path": "audio/vrep/sub/v002.flac",
+            "source_alias": "vrep2",
+            "stem_type": "vocal",
+            "track_alias": "vrep",
+            "duration_sec": 100.0,
+            "release_ready": False,
+            "can_publish_as_result": False,
+        },
+        {
+            "audio_path": "audio/vrep/sub/v003.flac",
+            "source_alias": "vrep3",
+            "stem_type": "vocal",
+            "track_alias": "vrep",
+            "duration_sec": 100.0,
+            "release_ready": False,
+            "can_publish_as_result": False,
+        },
+        {
+            "audio_path": "audio/mpr/min/m001.flac",
+            "source_alias": "mpr",
+            "stem_type": "minus",
+            "track_alias": "mpr",
+            "duration_sec": 100.0,
+            "release_ready": False,
+            "can_publish_as_result": False,
+        },
+    ]
+    for item in items:
+        item["source_manifest"] = str(root / "src" / f"{item['source_alias']}.json")
+        item["source_audio_path"] = str(root / item["audio_path"])
+        item["source_row"] = {
+            "delivery_status": "accepted",
+            "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+        }
     _write_json(
         pack,
         {
             "schema": "aggregate_short_listen_pack_manifest.v1",
             "pack_id": "lp_test",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
+            "delivery_status": "aggregate_validation_pending",
+            "delivery_allowed": False,
+            "presentation_status": "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "aggregate_validation_pending",
             "release_ready": release_ready,
             "can_publish_as_result": False,
+            "listenable": False,
+            "deliverable": False,
+            "aggregate_validation_ready": True,
             "failed_checks": [],
             "coverage_json": str(root / "coverage.json"),
-            "items": [
-                {
-                    "audio_path": "audio/vrep/sub/v001.flac",
-                    "source_alias": "vrep",
-                    "stem_type": "vocal",
-                    "track_alias": "vrep",
-                    "duration_sec": 100.0,
-                    "release_ready": False,
-                    "can_publish_as_result": False,
-                },
-                {
-                    "audio_path": "audio/mpr/min/m001.flac",
-                    "source_alias": "mpr",
-                    "stem_type": "minus",
-                    "track_alias": "mpr",
-                    "duration_sec": 100.0,
-                    "release_ready": False,
-                    "can_publish_as_result": False,
-                },
-            ],
+            "item_count": 25,
+            "items": items,
             "artifact_name_policy": {
                 "schema": "short_windows_safe_artifact_names.v1",
                 "raw_track_or_stem_ids_in_path": False,
@@ -70,11 +104,12 @@ def _pack(root: Path, *, release_ready: bool = False) -> Path:
             "failed_checks": [],
             "stem_groups": [
                 {
-                    "group_alias": "six",
+                    "group_alias": f"six{index:03d}",
                     "item_count": 7,
                     "stem_types": ["vocal", "minus", "drums", "bass", "other", "guitar", "piano"],
                     "semantic_quality_verified": False,
                 }
+                for index in range(1, 4)
             ],
         },
     )
@@ -86,6 +121,7 @@ def _pack(root: Path, *, release_ready: bool = False) -> Path:
             "failed_checks": [],
             "release_ready": False,
             "can_publish_as_result": False,
+            "pack_manifest_json": str(pack),
         },
     )
     return pack
@@ -143,11 +179,56 @@ def _validation(root: Path) -> Path:
     return path
 
 
+def _machine_gate(root: Path, *, pack: Path, accepted: bool = True) -> Path:
+    path = root / "gate" / "gate.json"
+    _write_json(
+        root / "semantic" / "review.json",
+        {
+            "schema": "short_listen_semantic_review.v1",
+            "review_status": "passed" if accepted else "blocked",
+            "failed_checks": [] if accepted else ["blocked_fixture"],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        root / "minus" / "audit.json",
+        {
+            "schema": "short_minus_quality_audit.v1",
+            "audit_status": "completed" if accepted else "blocked",
+            "failed_checks": [] if accepted else ["blocked_fixture"],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        path,
+        {
+            "schema": "machine_stem_acceptance_gate.v1",
+            "gate_status": "accepted" if accepted else "blocked",
+            "final_result_allowed": accepted,
+            "delivery_status": "accepted" if accepted else "blocked",
+            "delivery_allowed": accepted,
+            "presentation_status": "accepted_for_listen_pack" if accepted else "blocked_from_listen_pack",
+            "release_status": "listen_preview_only",
+            "release_ready": False,
+            "can_publish_as_result": False,
+            "pack_manifest_json": str(pack),
+            "validation_json": str(pack.parent / "validation" / "validation.json"),
+            "minus_audit_json": str(root / "minus" / "audit.json"),
+            "minus_audit_status": "completed" if accepted else "blocked",
+            "semantic_review_json": str(root / "semantic" / "review.json"),
+            "semantic_review_evidence_count": 2 if accepted else 0,
+            "failed_checks": [] if accepted else ["minus_audit_row_warnings_present"],
+        },
+    )
+    return path
+
+
 def test_run_short_listen_review_packet_builds_all_review_artifacts(tmp_path: Path) -> None:
     pack = _pack(tmp_path / "pack")
+    gate = _machine_gate(tmp_path, pack=pack)
     out = tmp_path / "packet"
 
-    manifest = run_short_listen_review_packet(pack_manifest_json=pack, output_dir=out)
+    manifest = run_short_listen_review_packet(pack_manifest_json=pack, machine_gate_json=gate, output_dir=out)
 
     assert manifest["schema"] == "short_listen_review_packet_manifest.v1"
     assert manifest["packet_status"] == "ready_for_listen_review"
@@ -157,7 +238,8 @@ def test_run_short_listen_review_packet_builds_all_review_artifacts(tmp_path: Pa
     assert manifest["stages"]["feedback_template"]["template_status"] == "ready_for_human_review"
     assert manifest["stages"]["review_handoff"]["handoff_status"] == "ready_for_listen_review"
     assert manifest["stages"]["review_handoff_validation"]["validation_status"] == "passed"
-    assert manifest["stages"]["goal_audit"]["goal_status"] == "machine_evidence_incomplete"
+    assert manifest["stages"]["goal_audit"]["goal_status"] == "machine_pass_human_listen_pending"
+    assert manifest["stages"]["goal_audit"]["remaining_blockers"] == ["human_listen_verdict_missing"]
     assert (out / "packet.json").exists()
     assert (out / "feedback_template" / "items.jsonl").exists()
     assert (out / "review_handoff" / "playlist.m3u").exists()
@@ -168,31 +250,28 @@ def test_run_short_listen_review_packet_builds_all_review_artifacts(tmp_path: Pa
             assert len(path.name) <= 32
 
 
-def test_run_short_listen_review_packet_skips_goal_audit_for_subset_pack(tmp_path: Path) -> None:
+def test_run_short_listen_review_packet_blocks_subset_pack(tmp_path: Path) -> None:
     pack = _subset_pack(tmp_path / "pack")
     validation = _validation(tmp_path / "validation")
+    gate = _machine_gate(tmp_path, pack=pack)
     out = tmp_path / "packet"
 
     manifest = run_short_listen_review_packet(
         pack_manifest_json=pack,
+        machine_gate_json=gate,
         aggregate_validation_json=validation,
         output_dir=out,
     )
 
-    assert manifest["packet_status"] == "ready_for_listen_review"
-    assert manifest["failed_checks"] == []
-    assert manifest["stages"]["review_handoff_validation"]["validation_status"] == "passed"
-    assert manifest["stages"]["goal_audit"]["goal_status"] == "not_run"
-    assert manifest["stages"]["goal_audit"]["remaining_blockers"] == ["aggregate_goal_audit_not_applicable_to_subset_pack"]
+    assert manifest["packet_status"] == "failed_safety_contract"
+    assert "feedback_template:pack_schema_unexpected" in manifest["failed_checks"]
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
     assert not (out / "goal_audit" / "goal_status_audit.json").exists()
-    assert manifest["stages"]["feedback_template"]["template_status"] == "ready_for_human_review"
-    assert manifest["stages"]["review_handoff"]["handoff_status"] == "ready_for_listen_review"
+    assert manifest["stages"]["feedback_template"]["template_status"] == "blocked"
+    assert "review_handoff" not in manifest["stages"]
     assert (out / "packet.json").exists()
     assert (out / "feedback_template" / "items.jsonl").exists()
-    assert (out / "review_handoff" / "playlist.m3u").exists()
-    assert (out / "review_handoff_validation" / "validation.json").exists()
     for path in out.rglob("*"):
         if path.is_file() or path.is_dir():
             assert len(path.name) <= 32
@@ -245,10 +324,32 @@ def test_run_short_listen_review_packet_blocks_subset_schema_with_full_pack_cont
 
 def test_run_short_listen_review_packet_fails_closed_on_release_ready_pack(tmp_path: Path) -> None:
     pack = _pack(tmp_path / "pack", release_ready=True)
+    gate = _machine_gate(tmp_path, pack=pack)
 
-    manifest = run_short_listen_review_packet(pack_manifest_json=pack, output_dir=tmp_path / "packet")
+    manifest = run_short_listen_review_packet(pack_manifest_json=pack, machine_gate_json=gate, output_dir=tmp_path / "packet")
 
     assert manifest["packet_status"] == "failed_safety_contract"
     assert "feedback_template:pack_release_ready_true" in manifest["failed_checks"]
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
+
+
+def test_run_short_listen_review_packet_blocks_missing_machine_gate(tmp_path: Path) -> None:
+    pack = _pack(tmp_path / "pack")
+
+    manifest = run_short_listen_review_packet(pack_manifest_json=pack, output_dir=tmp_path / "packet")
+
+    assert manifest["packet_status"] == "failed_safety_contract"
+    assert "feedback_template:machine_gate_json_missing" in manifest["failed_checks"]
+    assert "review_handoff" not in manifest["stages"]
+
+
+def test_run_short_listen_review_packet_blocks_unaccepted_machine_gate(tmp_path: Path) -> None:
+    pack = _pack(tmp_path / "pack")
+    gate = _machine_gate(tmp_path, pack=pack, accepted=False)
+
+    manifest = run_short_listen_review_packet(pack_manifest_json=pack, machine_gate_json=gate, output_dir=tmp_path / "packet")
+
+    assert manifest["packet_status"] == "failed_safety_contract"
+    assert "feedback_template:machine_gate_not_accepted" in manifest["failed_checks"]
+    assert "review_handoff" not in manifest["stages"]

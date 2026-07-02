@@ -108,18 +108,21 @@ docker compose run --rm --no-deps ml-worker python tools/build_listen_coverage_s
 ```
 
 After aggregate validation, semantic review, minus audit, and the final machine
-stem acceptance gate, the resulting subset pack can be handed to the standard
-feedback template and review handoff tools:
+stem acceptance gate, hand the staged aggregate pack plus the accepted
+`gate.json` to the standard feedback template and review handoff tools. Subset,
+repair-selection, and candidate-wave listen-file packs remain staging or
+diagnostic material and are rejected by the post-gate review handoff path:
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_short_listen_feedback_template.py \
-  --pack-manifest-json /app/lab_artifacts/lp_v45_001/gsub001/pack.json \
-  --output-dir /app/lab_artifacts/lp_v45_001/gsub001/tpl001
+  --pack-manifest-json /app/lab_artifacts/lp_v45_001/pack.json \
+  --machine-gate-json /app/lab_artifacts/lp_v45_001/gate001/gate.json \
+  --output-dir /app/lab_artifacts/lp_v45_001/tpl001
 ```
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_short_listen_review_handoff.py \
-  --pack-manifest-json /app/lab_artifacts/lp_v45_001/gsub001/pack.json \
-  --feedback-template-manifest-json /app/lab_artifacts/lp_v45_001/gsub001/tpl001/tpl.json \
-  --output-dir /app/lab_artifacts/lp_v45_001/gsub001/rh001
+  --pack-manifest-json /app/lab_artifacts/lp_v45_001/pack.json \
+  --feedback-template-manifest-json /app/lab_artifacts/lp_v45_001/tpl001/tpl.json \
+  --output-dir /app/lab_artifacts/lp_v45_001/rh001
 ```

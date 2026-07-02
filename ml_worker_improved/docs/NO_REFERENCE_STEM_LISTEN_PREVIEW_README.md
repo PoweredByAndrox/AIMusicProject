@@ -145,25 +145,28 @@ gate proves otherwise.
 
 When listening rejects a short pack item, first write item-level rows with the
 short `audio_path`, `verdict`, `issue_tags`, and optional note, then build
-`feedback.json` with `tools/build_short_listen_feedback_manifest.py`.
-The feedback manifest copies provenance from `pack.json`, rejects unknown audio
-paths, and remains non-deliverable. Passing that manifest back into
+`feedback.json` with `tools/build_short_listen_feedback_manifest.py`. This
+feedback builder requires the staged aggregate pack and the accepted
+`machine_stem_acceptance_gate.v1` `gate.json`; stale accepted aggregate packs,
+subset packs, repair-selection packs, and candidate-wave listen packs are
+blocked instead of becoming human-feedback evidence. The feedback manifest
+copies provenance from `pack.json`, rejects unknown audio paths, and remains
+non-deliverable. Passing that manifest back into
 `tools/audit_short_listen_goal_status.py` changes the goal status to
 `human_listen_rejected`, so repair/mining can target exact short-path items
 instead of ambiguous long filenames.
 
 Use `tools/build_short_listen_feedback_template.py` to create the item-level
-review rows directly from a validated aggregate pack. It writes `items.jsonl`
-with every short `audio_path`, empty `verdict`, and stem-specific suggested
-issue tags. The template manifest is `tpl.json`; it is deliberately not a
-human verdict and sets `ready_for_feedback_manifest=false`; fill each row with
-`accepted` or `rejected` before passing it to
-`tools/build_short_listen_feedback_manifest.py`. The template route also
-accepts an audit-gated `short_listen_subset_pack_manifest.v1`, using its
-`listen_audio_files` rows and `artifact_relative_path` values. It also accepts
-`short_listen_repair_selection_pack_manifest.v1` so accepted repair-selection
-candidates can get their own A/B listen handoff without being merged into the
-main aggregate pack first.
+review rows only after the staged aggregate pack has an accepted machine gate.
+Pass the same `gate.json` with `--machine-gate-json`. The template writes
+`items.jsonl` with every short `audio_path`, empty `verdict`, and stem-specific
+suggested issue tags. The template manifest is `tpl.json`; it is deliberately
+not a human verdict and sets `ready_for_feedback_manifest=false`; fill each row
+with `accepted` or `rejected` before passing it to
+`tools/build_short_listen_feedback_manifest.py`. The template route can still
+normalize subset, repair-selection, and candidate-wave row shapes to produce
+short diagnostic blockers, but those schemas are not accepted as post-gate
+human-review inputs.
 
 Use `tools/build_short_listen_review_handoff.py` after the feedback template to
 write a review-only handoff folder with `playlist.m3u`, `checklist.md`, and
@@ -280,8 +283,9 @@ candidate ids, route ids, source paths, judge rows, sha256, and duration in
 `pack.json` / `selected.jsonl`. The route is packaging-only:
 `gpu_inference_skipped=true`, no inference/training/model changes are run, and
 `release_ready=false` / `can_publish_as_result=false` remain forced false. The
-resulting `short_candidate_wave_listen_pack_manifest.v1` is accepted by the
-feedback template, review handoff, and handoff validator routes.
+resulting `short_candidate_wave_listen_pack_manifest.v1` remains
+staging/diagnostic material. Post-gate human-review routes reject it and require
+the staged aggregate pack plus an accepted machine gate.
 
 For a minus hard-case that already has failing middle/warning windows, first
 run `tools/build_minus_cmp.py` against the candidate-wave pack. Then rebuild the
@@ -327,7 +331,9 @@ write `delivery_status=accepted`, `delivery_allowed=true`, and
 `presentation_status=accepted_for_listen_pack`. A blocked gate writes
 `gate.json`, `blockers.jsonl`, `summary.md`, and `progress.jsonl` so the next
 ARIS loop can target exact machine-detected defects instead of asking for manual
-listening.
+listening. The post-gate human-review tools consume the staged aggregate
+`pack.json` plus this accepted `gate.json`; they do not consume subset,
+repair-selection, or candidate-wave listen-file packs as final review handoffs.
 
 After the audit, consume it with `tools/build_short_listen_subset_pack.py`
 using `--minus-audit-json`. In audit-gated mode the subset builder keeps
@@ -416,6 +422,9 @@ The aggregate pack is staging material, not a listen/result artifact. The goal
 audit can reach `machine_pass_human_listen_pending`; it must not be marked
 complete until validation, semantic review, minus audit when applicable, the
 final machine gate, and the short-path human listen verdict are all present.
+Human-review templates, handoffs, validators, and feedback manifests require
+the staged aggregate pack plus accepted machine-gate evidence and reject stale
+accepted pack manifests.
 
 ## Run
 
@@ -507,21 +516,22 @@ docker compose run --rm --no-deps ml-worker python tools/build_short_listen_repa
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_short_listen_feedback_template.py \
-  --pack-manifest-json /app/lab_artifacts/lp_v45_001/gsub001/pack.json \
-  --output-dir /app/lab_artifacts/lp_v45_001/gsub001/tpl001
+  --pack-manifest-json /app/lab_artifacts/lp_v45_001/pack.json \
+  --machine-gate-json /app/lab_artifacts/lp_v45_001/gate001/gate.json \
+  --output-dir /app/lab_artifacts/lp_v45_001/tpl001
 ```
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_short_listen_review_handoff.py \
-  --pack-manifest-json /app/lab_artifacts/lp_v45_001/gsub001/pack.json \
-  --feedback-template-manifest-json /app/lab_artifacts/lp_v45_001/gsub001/tpl001/tpl.json \
-  --output-dir /app/lab_artifacts/lp_v45_001/gsub001/rh001
+  --pack-manifest-json /app/lab_artifacts/lp_v45_001/pack.json \
+  --feedback-template-manifest-json /app/lab_artifacts/lp_v45_001/tpl001/tpl.json \
+  --output-dir /app/lab_artifacts/lp_v45_001/rh001
 ```
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/validate_short_listen_review_handoff.py \
-  --handoff-manifest-json /app/lab_artifacts/lp_v45_001/gsub001/rh001/handoff.json \
-  --output-dir /app/lab_artifacts/lp_v45_001/gsub001/rhv001
+  --handoff-manifest-json /app/lab_artifacts/lp_v45_001/rh001/handoff.json \
+  --output-dir /app/lab_artifacts/lp_v45_001/rhv001
 ```
 
 ```bash
@@ -545,6 +555,7 @@ docker compose run --rm --no-deps ml-worker python tools/build_short_listen_repa
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_short_listen_feedback_manifest.py \
   --pack-manifest-json /app/lab_artifacts/lp_v37_001/pack.json \
+  --machine-gate-json /app/lab_artifacts/lp_v37_001/gate001/gate.json \
   --feedback-jsonl /app/lab_artifacts/lp_v37_001/feedback/feedback_items.jsonl \
   --output-dir /app/lab_artifacts/lp_v37_001/feedback
 ```
@@ -552,6 +563,7 @@ docker compose run --rm --no-deps ml-worker python tools/build_short_listen_feed
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_short_listen_feedback_template.py \
   --pack-manifest-json /app/lab_artifacts/lp_v37_001/pack.json \
+  --machine-gate-json /app/lab_artifacts/lp_v37_001/gate001/gate.json \
   --output-dir /app/lab_artifacts/lp_v37_001/feedback_template
 ```
 
@@ -572,6 +584,7 @@ docker compose run --rm --no-deps ml-worker python tools/validate_short_listen_r
 docker compose run --rm --no-deps ml-worker python tools/run_short_listen_review_packet.py \
   --pack-manifest-json /app/lab_artifacts/lp_v37_001/pack.json \
   --aggregate-validation-json /app/lab_artifacts/lp_v37_001/validation/validation.json \
+  --machine-gate-json /app/lab_artifacts/lp_v37_001/gate001/gate.json \
   --output-dir /app/lab_artifacts/lp_v37_001/review_packet_001
 ```
 
@@ -579,6 +592,7 @@ docker compose run --rm --no-deps ml-worker python tools/run_short_listen_review
 docker compose run --rm --no-deps ml-worker python tools/run_short_listen_feedback_cycle.py \
   --pack-manifest-json /app/lab_artifacts/lp_v37_001/pack.json \
   --aggregate-validation-json /app/lab_artifacts/lp_v37_001/validation/validation.json \
+  --machine-gate-json /app/lab_artifacts/lp_v37_001/gate001/gate.json \
   --feedback-jsonl /app/lab_artifacts/lp_v37_001/review_packet_001/feedback_template/items.jsonl \
   --output-dir /app/lab_artifacts/lp_v37_001/feedback_cycle_001
 ```

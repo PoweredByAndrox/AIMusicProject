@@ -134,11 +134,14 @@ def run_short_listen_feedback_cycle(
     feedback_dir = output_dir / "feedback"
     feedback = build_short_listen_feedback_manifest(
         pack_manifest_json=pack_manifest_json,
+        machine_gate_json=machine_gate_json,
         output_dir=feedback_dir,
         feedback_items=read_jsonl(feedback_jsonl),
         command_args=[
             "--pack-manifest-json",
             str(pack_manifest_json),
+            "--machine-gate-json",
+            str(machine_gate_json or ""),
             "--feedback-jsonl",
             str(feedback_jsonl),
             "--output-dir",

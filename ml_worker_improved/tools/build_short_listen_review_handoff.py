@@ -17,6 +17,10 @@ if str(APP_ROOT) not in sys.path:
 
 from tools.artifact_name_policy import validate_artifact_relative_path  # noqa: E402
 from tools.docker_runtime import require_docker_runtime  # noqa: E402
+from tools.short_listen_gate_contract import (  # noqa: E402
+    accepted_machine_gate_failures,
+    staged_aggregate_pack_failures,
+)
 
 START_TIME = time.monotonic()
 MANIFEST_NAME = "handoff.json"
@@ -42,7 +46,6 @@ LISTEN_AUDIO_FILE_PACK_SCHEMAS = {
     "short_listen_repair_selection_pack_manifest.v1",
     "short_candidate_wave_listen_pack_manifest.v1",
 }
-ACCEPTED_PACK_SCHEMAS = {"aggregate_short_listen_pack_manifest.v1", *LISTEN_AUDIO_FILE_PACK_SCHEMAS}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -238,14 +241,7 @@ def build_short_listen_review_handoff(
     failed: list[str] = []
     failed.extend(collect_true_flag_failures("pack", pack))
     failed.extend(collect_true_flag_failures("feedback_template", template))
-    if pack.get("schema") not in ACCEPTED_PACK_SCHEMAS:
-        failed.append("pack_schema_unexpected")
-    if pack.get("delivery_status") != "accepted":
-        failed.append("pack_delivery_status_not_accepted")
-    if pack.get("delivery_allowed") is not True:
-        failed.append("pack_delivery_allowed_not_true")
-    if pack.get("presentation_status") != "accepted_for_listen_pack":
-        failed.append("pack_presentation_status_not_accepted")
+    failed.extend(staged_aggregate_pack_failures(pack))
     if pack.get("failed_checks") not in ([], None):
         failed.append("pack_failed_checks_not_empty")
     if template.get("schema") != "short_listen_feedback_template_manifest.v1":
@@ -258,6 +254,14 @@ def build_short_listen_review_handoff(
         failed.append("feedback_template_failed_checks_not_empty")
     if str(template.get("pack_id") or "") != str(pack.get("pack_id") or ""):
         failed.append("feedback_template_pack_id_mismatch")
+    machine_gate_json = Path(str(template.get("machine_gate_json") or "")) if str(template.get("machine_gate_json") or "") else None
+    failed.extend(
+        accepted_machine_gate_failures(
+            machine_gate_json=machine_gate_json,
+            pack_manifest_json=pack_manifest_json,
+            pack=pack,
+        )
+    )
 
     rows: list[dict[str, Any]] = []
     if not failed:
@@ -283,6 +287,7 @@ def build_short_listen_review_handoff(
         "pack_id": str(pack.get("pack_id") or ""),
         "pack_manifest_json": str(pack_manifest_json),
         "feedback_template_manifest_json": str(feedback_template_manifest_json),
+        "machine_gate_json": str(machine_gate_json or ""),
         "handoff_status": "ready_for_listen_review" if rows and not failed else "blocked",
         "item_count": len(rows),
         "items": rows,

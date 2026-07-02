@@ -513,6 +513,11 @@ sha256/metadata and checks promised metadata artifacts. The audit records which
 goal requirements are machine-proved and keeps the goal open when the human
 listen verdict is missing. It also records that 6s stem coverage is not semantic
 ground truth unless separately verified.
+Human review materialization starts only after
+`tools/build_machine_stem_acceptance_gate.py` emits an accepted `gate.json` for
+the same staged aggregate pack. The feedback template, review handoff,
+handoff validator, and feedback manifest reject stale accepted aggregate packs
+and non-aggregate subset/repair/candidate listen-file packs.
 
 For multiple holdout folds, use
 `tools/aggregate_train_ready_audio_model_decisions.py`. It combines child

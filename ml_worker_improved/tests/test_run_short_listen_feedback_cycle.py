@@ -22,11 +22,15 @@ def _pack(root: Path) -> Path:
         {
             "schema": "aggregate_short_listen_pack_manifest.v1",
             "pack_id": "lp_test",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
+            "delivery_status": "aggregate_validation_pending",
+            "delivery_allowed": False,
+            "presentation_status": "aggregate_validation_pending_not_for_listen_pack",
+            "release_status": "aggregate_validation_pending",
             "release_ready": False,
             "can_publish_as_result": False,
+            "listenable": False,
+            "deliverable": False,
+            "aggregate_validation_ready": True,
             "failed_checks": [],
             "coverage_json": str(root / "coverage.json"),
             "items": [
@@ -116,7 +120,7 @@ def _make_machine_ready_pack(pack: Path) -> list[str]:
             "presentation_status": "accepted_for_listen_pack",
         }
     payload["item_count"] = 25
-    payload["release_status"] = "listen_preview_only"
+    payload["release_status"] = "aggregate_validation_pending"
     payload["deliverable"] = False
     pack.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     coverage = json.loads((pack.parent / "coverage.json").read_text(encoding="utf-8"))
@@ -135,13 +139,36 @@ def _make_machine_ready_pack(pack: Path) -> list[str]:
 
 def _machine_gate(root: Path, *, pack: Path) -> Path:
     validation = pack.parent / "validation" / "validation.json"
+    _write_json(
+        root / "semantic" / "review.json",
+        {
+            "schema": "short_listen_semantic_review.v1",
+            "review_status": "passed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
+    _write_json(
+        root / "minus" / "audit.json",
+        {
+            "schema": "short_minus_quality_audit.v1",
+            "audit_status": "completed",
+            "failed_checks": [],
+            "pack_manifest_json": str(pack),
+        },
+    )
     return _write_json(
         root / "gate" / "gate.json",
         {
             "schema": "machine_stem_acceptance_gate.v1",
             "gate_status": "accepted",
             "final_result_allowed": True,
+            "delivery_status": "accepted",
             "delivery_allowed": True,
+            "presentation_status": "accepted_for_listen_pack",
+            "release_status": "listen_preview_only",
+            "release_ready": False,
+            "can_publish_as_result": False,
             "failed_checks": [],
             "pack_manifest_json": str(pack),
             "validation_json": str(validation),
@@ -215,9 +242,8 @@ def test_run_short_listen_feedback_cycle_blocks_rejected_feedback_without_machin
     )
 
     assert manifest["cycle_status"] == "failed_safety_contract"
-    assert "goal_audit:machine_evidence_incomplete" in manifest["failed_checks"]
-    assert manifest["stages"]["goal_audit"]["goal_status"] == "human_listen_rejected"
-    assert "machine_acceptance_gate_missing" in manifest["stages"]["goal_audit"]["remaining_blockers"]
+    assert "feedback_manifest:machine_gate_json_missing" in manifest["failed_checks"]
+    assert "goal_audit" not in manifest["stages"]
     assert "repair_queue" not in manifest["stages"]
 
 
@@ -255,9 +281,8 @@ def test_run_short_listen_feedback_cycle_fails_closed_on_missing_machine_gate_af
     )
 
     assert manifest["cycle_status"] == "failed_safety_contract"
-    assert "goal_audit:machine_evidence_incomplete" in manifest["failed_checks"]
-    assert manifest["stages"]["goal_audit"]["goal_status"] == "machine_evidence_incomplete"
-    assert manifest["stages"]["goal_audit"]["remaining_blockers"] == ["machine_acceptance_gate_missing"]
+    assert "feedback_manifest:machine_gate_json_missing" in manifest["failed_checks"]
+    assert "goal_audit" not in manifest["stages"]
     assert "repair_queue" not in manifest["stages"]
 
 

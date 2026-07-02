@@ -16,6 +16,10 @@ if str(APP_ROOT) not in sys.path:
 
 from tools.artifact_name_policy import validate_artifact_segment  # noqa: E402
 from tools.docker_runtime import require_docker_runtime  # noqa: E402
+from tools.short_listen_gate_contract import (  # noqa: E402
+    accepted_machine_gate_failures,
+    staged_aggregate_pack_failures,
+)
 
 
 START_TIME = time.monotonic()
@@ -157,6 +161,7 @@ def issue_tag_counts(items: Sequence[dict[str, Any]]) -> dict[str, int]:
 def build_short_listen_feedback_manifest(
     *,
     pack_manifest_json: Path,
+    machine_gate_json: Path | None = None,
     output_dir: Path,
     feedback_items: Sequence[dict[str, Any]],
     command_args: list[str] | None = None,
@@ -165,19 +170,25 @@ def build_short_listen_feedback_manifest(
     progress_path = output_dir / PROGRESS_NAME
     if progress_path.exists():
         progress_path.unlink()
-    progress(progress_path, "start", pack_manifest_json=str(pack_manifest_json), feedback_item_count=len(feedback_items))
+    progress(
+        progress_path,
+        "start",
+        pack_manifest_json=str(pack_manifest_json),
+        machine_gate_json=str(machine_gate_json or ""),
+        feedback_item_count=len(feedback_items),
+    )
 
     pack = read_json(pack_manifest_json)
     failed: list[str] = []
     failed.extend(collect_true_flag_failures("pack", pack))
-    if pack.get("schema") != "aggregate_short_listen_pack_manifest.v1":
-        failed.append("pack_schema_unexpected")
-    if pack.get("delivery_status") != "accepted":
-        failed.append("pack_delivery_status_not_accepted")
-    if pack.get("delivery_allowed") is not True:
-        failed.append("pack_delivery_allowed_not_true")
-    if pack.get("presentation_status") != "accepted_for_listen_pack":
-        failed.append("pack_presentation_status_not_accepted")
+    failed.extend(staged_aggregate_pack_failures(pack))
+    failed.extend(
+        accepted_machine_gate_failures(
+            machine_gate_json=machine_gate_json,
+            pack_manifest_json=pack_manifest_json,
+            pack=pack,
+        )
+    )
     if pack.get("failed_checks") not in ([], None):
         failed.append("pack_failed_checks_not_empty")
 
@@ -261,6 +272,7 @@ def build_short_listen_feedback_manifest(
         "schema": "short_listen_feedback_manifest.v1",
         "pack_id": str(pack.get("pack_id") or ""),
         "pack_manifest_json": str(pack_manifest_json),
+        "machine_gate_json": str(machine_gate_json or ""),
         "overall_listen_verdict": overall,
         "review_scope": "full_pack" if review_coverage_status == "complete" else "subset",
         "review_coverage_status": review_coverage_status,
@@ -304,6 +316,7 @@ def build_short_listen_feedback_manifest(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build short listen feedback manifest from item-level verdict rows.")
     parser.add_argument("--pack-manifest-json", type=Path, required=True)
+    parser.add_argument("--machine-gate-json", type=Path)
     parser.add_argument("--feedback-jsonl", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args(argv)
@@ -317,6 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     manifest = build_short_listen_feedback_manifest(
         pack_manifest_json=args.pack_manifest_json,
+        machine_gate_json=args.machine_gate_json,
         output_dir=args.output_dir,
         feedback_items=read_feedback_jsonl(args.feedback_jsonl),
         command_args=list(argv if argv is not None else sys.argv[1:]),
