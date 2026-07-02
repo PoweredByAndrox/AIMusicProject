@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -25,7 +26,6 @@ from tools.train_audio_error_critic import (  # noqa: E402
     SCALAR_FEATURE_COLUMNS,
     as_float,
     as_list,
-    error_map_npz_path,
     feature_dict,
     has_scalar_features,
 )
@@ -54,6 +54,14 @@ VIEW_READINESS_RULES = {
 }
 RUN_MARKER_FILES = ("candidate_pool.jsonl", "minus_windowed_judge.jsonl", "vocal_windowed_judge.jsonl")
 ACOUSTIC_SCALAR_FEATURE_COLUMNS = tuple(name for name in SCALAR_FEATURE_COLUMNS if not name.startswith("window_"))
+PROJECT_PATH_MOUNT_PREFIXES = (
+    ("D:/AIMusicProject/artifacts", "AIMUSIC_ARTIFACTS_MOUNT", "/host_artifacts"),
+    ("/d/AIMusicProject/artifacts", "AIMUSIC_ARTIFACTS_MOUNT", "/host_artifacts"),
+    ("/Users/andrejviluha/AIMusicProject_win/artifacts", "AIMUSIC_ARTIFACTS_MOUNT", "/host_artifacts"),
+    ("D:/AIMusicProject/testing_stuff_music", "AIMUSIC_TESTING_STUFF_MOUNT", "/host_testing_stuff_music"),
+    ("/d/AIMusicProject/testing_stuff_music", "AIMUSIC_TESTING_STUFF_MOUNT", "/host_testing_stuff_music"),
+    ("/Users/andrejviluha/AIMusicProject_win/testing_stuff_music", "AIMUSIC_TESTING_STUFF_MOUNT", "/host_testing_stuff_music"),
+)
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -117,11 +125,28 @@ def find_run_dirs(run_roots: Sequence[Path]) -> list[Path]:
     return sorted(discovered, key=lambda path: str(path))
 
 
+def normalize_runtime_path(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    normalized_lower = normalized.lower()
+    for source_prefix, env_name, default_mount in PROJECT_PATH_MOUNT_PREFIXES:
+        prefix = source_prefix.rstrip("/")
+        prefix_lower = prefix.lower()
+        if normalized_lower == prefix_lower:
+            return os.environ.get(env_name, default_mount).rstrip("/")
+        if normalized_lower.startswith(prefix_lower + "/"):
+            mount = os.environ.get(env_name, default_mount).rstrip("/")
+            return mount + normalized[len(prefix) :]
+    return text
+
+
 def row_path(row: dict[str, Any], names: Sequence[str]) -> str:
     for name in names:
         value = row.get(name)
         if value:
-            return str(value)
+            return normalize_runtime_path(value)
     return ""
 
 
@@ -195,6 +220,66 @@ def window_blockers_for(stem_type: str, window: dict[str, Any]) -> list[str]:
     return stable_unique(value for key in ("blockers", f"{stem_type}_blockers") for value in as_list(window.get(key)))
 
 
+def clip01(value: Any) -> float:
+    return max(0.0, min(1.0, as_float(value)))
+
+
+def optional_score(window: dict[str, Any], key: str) -> float | None:
+    if key not in window:
+        return None
+    return clip01(window.get(key))
+
+
+def inverse_score(window: dict[str, Any], key: str) -> float:
+    score = optional_score(window, key)
+    return 0.0 if score is None else 1.0 - score
+
+
+def max_score(window: dict[str, Any], keys: Sequence[str]) -> float:
+    values = [score for key in keys if (score := optional_score(window, key)) is not None]
+    return max(values) if values else 0.0
+
+
+def phase_collapse_from_no_reference_scores(window: dict[str, Any]) -> float:
+    scores = [
+        score
+        for key in ("phase_consistency_score", "instrumental_phase_consistency_score")
+        if (score := optional_score(window, key)) is not None
+    ]
+    return 0.0 if not scores else 1.0 - min(scores)
+
+
+def no_reference_runtime_scalar_features(stem_type: str, window: dict[str, Any]) -> dict[str, float]:
+    del stem_type
+    mixture_error = inverse_score(window, "mixture_consistency_score")
+    phase_collapse = phase_collapse_from_no_reference_scores(window)
+    vocal_bleed = clip01(window.get("vocal_leakage_in_minus_score"))
+    instrumental_bleed = clip01(window.get("instrumental_leakage_in_vocal_score"))
+    artifact_noise = max_score(window, ("robotic_artifact_score", "silence_hallucination_score", "thin_vocal_score"))
+    transient_damage = clip01(window.get("transient_damage_score"))
+    missing_detail = max(mixture_error, inverse_score(window, "instrumental_phase_consistency_score"), clip01(window.get("thin_vocal_score")))
+    residual_energy = max(mixture_error, phase_collapse, vocal_bleed, instrumental_bleed, artifact_noise, transient_damage)
+    return {
+        "residual_energy": residual_energy,
+        "mixture_consistency_error": mixture_error,
+        "phase_collapse_score": phase_collapse,
+        "stereo_width_score": 0.0,
+        "vocal_bleed_proxy_score": vocal_bleed,
+        "instrumental_bleed_proxy_score": instrumental_bleed,
+        "missing_detail_score": missing_detail,
+        "transient_damage_score": transient_damage,
+        "artifact_noise_score": artifact_noise,
+    }
+
+
+def runtime_scalar_features(stem_type: str, window: dict[str, Any]) -> dict[str, float]:
+    no_reference_features = no_reference_runtime_scalar_features(stem_type, window)
+    return {
+        name: as_float(window.get(name)) if name in window else no_reference_features[name]
+        for name in ACOUSTIC_SCALAR_FEATURE_COLUMNS
+    }
+
+
 def runtime_window_rows(run_roots: Sequence[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for run_dir in find_run_dirs(run_roots):
@@ -218,6 +303,7 @@ def runtime_window_rows(run_roots: Sequence[Path]) -> list[dict[str, Any]]:
                             continue
                         start, end = window_bounds(judge_row, window)
                         status, pair_file = pair_status.get((track_id, candidate_id), ("", ""))
+                        scalar_features = runtime_scalar_features(stem_type, window)
                         window_id = "__".join(
                             [
                                 track_id or "missing_track_id",
@@ -242,15 +328,7 @@ def runtime_window_rows(run_roots: Sequence[Path]) -> list[dict[str, Any]]:
                                 "blockers": window_blockers_for(stem_type, window),
                                 "judge_decision": window_decision_for(stem_type, judge_row, window),
                                 "pair_compatibility_status": status,
-                                "residual_energy": as_float(window.get("residual_energy")),
-                                "mixture_consistency_error": as_float(window.get("mixture_consistency_error")),
-                                "phase_collapse_score": as_float(window.get("phase_collapse_score")),
-                                "stereo_width_score": as_float(window.get("stereo_width_score")),
-                                "vocal_bleed_proxy_score": as_float(window.get("vocal_bleed_proxy_score")),
-                                "instrumental_bleed_proxy_score": as_float(window.get("instrumental_bleed_proxy_score")),
-                                "missing_detail_score": as_float(window.get("missing_detail_score")),
-                                "transient_damage_score": as_float(window.get("transient_damage_score")),
-                                "artifact_noise_score": as_float(window.get("artifact_noise_score")),
+                                **scalar_features,
                                 "error_map_paths": {},
                                 "train_split": "train",
                                 "safe_for_training": False,
@@ -267,8 +345,32 @@ def runtime_window_rows(run_roots: Sequence[Path]) -> list[dict[str, Any]]:
 
 
 def path_exists(value: Any) -> bool:
-    text = str(value or "").strip()
+    text = normalize_runtime_path(value)
     return bool(text and Path(text).exists())
+
+
+def normalized_error_map_npz_path(row: dict[str, Any]) -> Path | None:
+    paths = row.get("error_map_paths")
+    if not isinstance(paths, dict):
+        return None
+    text = normalize_runtime_path(paths.get("npz"))
+    if not text:
+        return None
+    return Path(text)
+
+
+def row_with_normalized_error_map_paths(row: dict[str, Any]) -> dict[str, Any]:
+    paths = row.get("error_map_paths")
+    if not isinstance(paths, dict):
+        return row
+    normalized_npz = normalize_runtime_path(paths.get("npz"))
+    if not normalized_npz or normalized_npz == str(paths.get("npz") or ""):
+        return row
+    normalized_row = dict(row)
+    normalized_paths = dict(paths)
+    normalized_paths["npz"] = normalized_npz
+    normalized_row["error_map_paths"] = normalized_paths
+    return normalized_row
 
 
 def view_row_id(index: int, row: dict[str, Any]) -> str:
@@ -280,19 +382,19 @@ def view_row_id(index: int, row: dict[str, Any]) -> str:
 
 
 def npz_text(row: dict[str, Any]) -> str:
-    path = error_map_npz_path(row)
+    path = normalized_error_map_npz_path(row)
     return str(path) if path is not None else ""
 
 
 def has_error_map_or_scalar_features(row: dict[str, Any]) -> bool:
-    path = error_map_npz_path(row)
+    path = normalized_error_map_npz_path(row)
     if path is not None and path.exists():
         return True
     return has_scalar_features(row)
 
 
 def has_acoustic_feature_evidence(row: dict[str, Any]) -> bool:
-    path = error_map_npz_path(row)
+    path = normalized_error_map_npz_path(row)
     if path is not None and path.exists():
         return True
     for name in ACOUSTIC_SCALAR_FEATURE_COLUMNS:
@@ -302,12 +404,13 @@ def has_acoustic_feature_evidence(row: dict[str, Any]) -> bool:
 
 
 def error_map_evidence_present(row: dict[str, Any]) -> bool:
-    path = error_map_npz_path(row)
+    path = normalized_error_map_npz_path(row)
     return path is not None and path.exists()
 
 
 def view_feature_dict(row: dict[str, Any], *, map_cache: dict[str, dict[str, float]]) -> dict[str, Any]:
-    features = feature_dict(row, map_cache=map_cache)
+    normalized_row = row_with_normalized_error_map_paths(row)
+    features = feature_dict(normalized_row, map_cache=map_cache)
     features["acoustic_feature_evidence_present"] = 1.0 if has_acoustic_feature_evidence(row) else 0.0
     features["error_map_evidence_present"] = 1.0 if error_map_evidence_present(row) else 0.0
     return features
@@ -502,7 +605,11 @@ def overall_label(row: dict[str, Any]) -> int | None:
 
 def stem_candidate_path(row: dict[str, Any], stem_type: str) -> str:
     key = "minus_candidate_path" if stem_type == "minus" else "vocal_candidate_path"
-    return str(row.get(key) or "")
+    return normalize_runtime_path(row.get(key))
+
+
+def primary_candidate_path(row: dict[str, Any]) -> str:
+    return normalize_runtime_path(row.get("minus_candidate_path") or row.get("vocal_candidate_path"))
 
 
 def base_view_row(
@@ -531,7 +638,7 @@ def base_view_row(
         "window_start_sec": as_float(source_row.get("window_start_sec")),
         "window_end_sec": as_float(source_row.get("window_end_sec")),
         "candidate_audio_path": candidate_audio_path,
-        "mix_path": str(source_row.get("mix_path") or ""),
+        "mix_path": normalize_runtime_path(source_row.get("mix_path")),
         "error_map_path": npz_text(source_row),
         "feature_values": view_feature_dict(source_row, map_cache=map_cache),
         "label": label if safe else None,
@@ -607,7 +714,7 @@ def build_pair_view_row(index: int, row: dict[str, Any], *, map_cache: dict[str,
         label_source=source,
         safe=safe,
         unsafe_reasons=reasons,
-        candidate_audio_path=str(row.get("minus_candidate_path") or row.get("vocal_candidate_path") or ""),
+        candidate_audio_path=primary_candidate_path(row),
         map_cache=map_cache,
     )
 
@@ -631,7 +738,7 @@ def build_overall_view_row(index: int, row: dict[str, Any], *, map_cache: dict[s
         label_source=str(row.get("source_selected_file") or ""),
         safe=safe,
         unsafe_reasons=reasons,
-        candidate_audio_path=str(row.get("minus_candidate_path") or row.get("vocal_candidate_path") or ""),
+        candidate_audio_path=primary_candidate_path(row),
         map_cache=map_cache,
     )
 

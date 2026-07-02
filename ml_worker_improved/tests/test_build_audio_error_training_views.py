@@ -148,6 +148,23 @@ def add_window_scores(window: dict, *, accepted: bool) -> dict:
     return window
 
 
+def add_no_reference_window_scores(window: dict, *, accepted: bool) -> dict:
+    window.update(
+        {
+            "mixture_consistency_score": 0.98 if accepted else 0.62,
+            "phase_consistency_score": 0.91 if accepted else 0.24,
+            "instrumental_phase_consistency_score": 0.93 if accepted else 0.21,
+            "vocal_leakage_in_minus_score": 0.02 if accepted else 0.74,
+            "instrumental_leakage_in_vocal_score": 0.03 if accepted else 0.18,
+            "robotic_artifact_score": 0.01 if accepted else 0.08,
+            "silence_hallucination_score": 0.01 if accepted else 0.11,
+            "thin_vocal_score": 0.02 if accepted else 0.23,
+            "transient_damage_score": 0.03 if accepted else 0.15,
+        }
+    )
+    return window
+
+
 def rows_by_id(rows: list[dict]) -> dict[str, dict]:
     return {str(row["row_id"]): row for row in rows}
 
@@ -357,3 +374,219 @@ def test_runtime_run_roots_add_strict_window_view_rows(tmp_path: Path) -> None:
     assert manifest["source_run_rows_added"] == 2
     assert [row["label"] for row in safe_rows] == [1, 0]
     assert all(row["label_source"] == "minus_windowed_judge.jsonl" for row in safe_rows)
+
+
+def test_runtime_run_roots_import_no_reference_scores_as_acoustic_evidence(tmp_path: Path) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    write_repaired_dataset(dataset_dir, [])
+    assets = write_assets(tmp_path, "runtime_nr")
+    run_dir = tmp_path / "runtime_nr_run"
+    write_jsonl(
+        run_dir / "candidate_pool.jsonl",
+        [
+            {
+                "track_id": "track-runtime-nr",
+                "run_id": "run-runtime-nr",
+                "candidate_id": "cand-runtime-nr",
+                "route_id": "route-runtime-nr",
+                "candidate_family": "runtime_candidate",
+                "mix_path": assets["mix_path"],
+                "vocal_path": assets["vocal_candidate_path"],
+                "minus_path": assets["minus_candidate_path"],
+                "release_ready": False,
+            }
+        ],
+    )
+    write_jsonl(
+        run_dir / "minus_windowed_judge.jsonl",
+        [
+            {
+                "track_id": "track-runtime-nr",
+                "candidate_id": "cand-runtime-nr",
+                "window_metrics": [
+                    add_no_reference_window_scores(
+                        {
+                            "start_sec": 0.0,
+                            "duration_sec": 1.0,
+                            "minus_decision": "accept_candidate",
+                            "minus_blockers": [],
+                        },
+                        accepted=True,
+                    ),
+                    add_no_reference_window_scores(
+                        {
+                            "start_sec": 1.0,
+                            "duration_sec": 1.0,
+                            "minus_decision": "blocked_hard_case",
+                            "minus_blockers": ["minus_detail_gate_blocked"],
+                        },
+                        accepted=False,
+                    ),
+                ],
+            }
+        ],
+    )
+
+    manifest = build_audio_error_training_views(
+        dataset_dir=dataset_dir,
+        output_dir=tmp_path / "views",
+        run_roots=[run_dir],
+    )
+    minus_rows = read_jsonl(tmp_path / "views" / "minus_critic_training_view.jsonl")
+
+    safe_rows = [row for row in minus_rows if row["safe_for_this_view"] is True]
+    assert manifest["source_run_rows_added"] == 2
+    assert [row["label"] for row in safe_rows] == [1, 0]
+    assert all(row["feature_values"]["acoustic_feature_evidence_present"] == 1.0 for row in safe_rows)
+    assert safe_rows[0]["feature_values"]["mixture_consistency_error"] > 0.0
+    assert safe_rows[1]["feature_values"]["phase_collapse_score"] > 0.0
+    assert "missing_acoustic_feature_evidence" not in ";".join(row["unsafe_reason_for_this_view"] for row in minus_rows)
+
+
+def test_runtime_run_roots_normalize_mac_project_artifact_paths(tmp_path: Path, monkeypatch) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    write_repaired_dataset(dataset_dir, [])
+    artifact_mount = tmp_path / "host_artifacts"
+    monkeypatch.setenv("AIMUSIC_ARTIFACTS_MOUNT", str(artifact_mount))
+    for relative in ("legacy/mix.flac", "legacy/vocal.flac", "legacy/minus.flac"):
+        path = artifact_mount / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"audio-placeholder")
+    run_dir = tmp_path / "runtime_legacy_path_run"
+    write_jsonl(
+        run_dir / "candidate_pool.jsonl",
+        [
+            {
+                "track_id": "track-legacy-path",
+                "run_id": "run-legacy-path",
+                "candidate_id": "cand-legacy-path",
+                "route_id": "route-legacy-path",
+                "candidate_family": "runtime_candidate",
+                "mix_path": "/Users/andrejviluha/AIMusicProject_win/artifacts/legacy/mix.flac",
+                "vocal_path": "/Users/andrejviluha/AIMusicProject_win/artifacts/legacy/vocal.flac",
+                "minus_path": "/Users/andrejviluha/AIMusicProject_win/artifacts/legacy/minus.flac",
+                "release_ready": False,
+            }
+        ],
+    )
+    write_jsonl(
+        run_dir / "minus_windowed_judge.jsonl",
+        [
+            {
+                "track_id": "track-legacy-path",
+                "candidate_id": "cand-legacy-path",
+                "window_metrics": [
+                    add_no_reference_window_scores(
+                        {
+                            "start_sec": 0.0,
+                            "duration_sec": 1.0,
+                            "minus_decision": "accept_candidate",
+                            "minus_blockers": [],
+                        },
+                        accepted=True,
+                    ),
+                ],
+            }
+        ],
+    )
+
+    build_audio_error_training_views(
+        dataset_dir=dataset_dir,
+        output_dir=tmp_path / "views",
+        run_roots=[run_dir],
+    )
+    minus_rows = read_jsonl(tmp_path / "views" / "minus_critic_training_view.jsonl")
+
+    assert len(minus_rows) == 1
+    row = minus_rows[0]
+    assert row["safe_for_this_view"] is True
+    assert row["mix_path"] == str(artifact_mount / "legacy/mix.flac")
+    assert row["candidate_audio_path"] == str(artifact_mount / "legacy/minus.flac")
+
+
+def test_repaired_rows_normalize_mac_project_artifact_paths(tmp_path: Path, monkeypatch) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    artifact_mount = tmp_path / "host_artifacts"
+    monkeypatch.setenv("AIMUSIC_ARTIFACTS_MOUNT", str(artifact_mount))
+    for relative in ("repaired/mix.flac", "repaired/vocal.flac", "repaired/minus.flac"):
+        path = artifact_mount / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"audio-placeholder")
+    row = repaired_row(
+        tmp_path,
+        11,
+        stem_type="minus",
+        accepted=True,
+        pair_status="",
+        unsafe_reason="",
+        error_map_paths={},
+        mix_path="/Users/andrejviluha/AIMusicProject_win/artifacts/repaired/mix.flac",
+        vocal_candidate_path="/Users/andrejviluha/AIMusicProject_win/artifacts/repaired/vocal.flac",
+        minus_candidate_path="/Users/andrejviluha/AIMusicProject_win/artifacts/repaired/minus.flac",
+    )
+    write_repaired_dataset(dataset_dir, [row])
+
+    build_audio_error_training_views(dataset_dir=dataset_dir, output_dir=tmp_path / "views")
+    minus_rows = read_jsonl(tmp_path / "views" / "minus_critic_training_view.jsonl")
+    pair_rows = read_jsonl(tmp_path / "views" / "pair_critic_training_view.jsonl")
+    overall_rows = read_jsonl(tmp_path / "views" / "overall_accept_training_view.jsonl")
+
+    assert len(minus_rows) == 1
+    output = minus_rows[0]
+    assert output["safe_for_this_view"] is True
+    assert output["mix_path"] == str(artifact_mount / "repaired/mix.flac")
+    assert output["candidate_audio_path"] == str(artifact_mount / "repaired/minus.flac")
+    assert pair_rows[0]["candidate_audio_path"] == str(artifact_mount / "repaired/minus.flac")
+    assert overall_rows[0]["candidate_audio_path"] == str(artifact_mount / "repaired/minus.flac")
+
+
+def test_repaired_rows_normalize_mac_project_error_map_paths(tmp_path: Path, monkeypatch) -> None:
+    from tools.build_audio_error_training_views import build_audio_error_training_views
+
+    dataset_dir = tmp_path / "dataset"
+    artifact_mount = tmp_path / "host_artifacts"
+    monkeypatch.setenv("AIMUSIC_ARTIFACTS_MOUNT", str(artifact_mount))
+    map_path = artifact_mount / "maps" / "legacy_map.npz"
+    map_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        map_path,
+        stft_residual_magnitude=np.ones((4, 4), dtype=np.float32),
+    )
+    row = repaired_row(
+        tmp_path,
+        12,
+        stem_type="minus",
+        accepted=True,
+        pair_status="",
+        unsafe_reason="",
+        error_map_paths={"npz": "/Users/andrejviluha/AIMusicProject_win/artifacts/maps/legacy_map.npz"},
+    )
+    for name in (
+        "residual_energy",
+        "mixture_consistency_error",
+        "phase_collapse_score",
+        "stereo_width_score",
+        "vocal_bleed_proxy_score",
+        "instrumental_bleed_proxy_score",
+        "missing_detail_score",
+        "transient_damage_score",
+        "artifact_noise_score",
+    ):
+        row[name] = 0.0
+    write_repaired_dataset(dataset_dir, [row])
+
+    build_audio_error_training_views(dataset_dir=dataset_dir, output_dir=tmp_path / "views")
+    minus_rows = read_jsonl(tmp_path / "views" / "minus_critic_training_view.jsonl")
+
+    assert len(minus_rows) == 1
+    output = minus_rows[0]
+    assert output["safe_for_this_view"] is True
+    assert output["error_map_path"] == str(map_path)
+    assert output["feature_values"]["error_map_evidence_present"] == 1.0
+    assert output["feature_values"]["map_stft_residual_magnitude_mean"] == 1.0
