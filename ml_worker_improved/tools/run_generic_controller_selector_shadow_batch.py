@@ -121,6 +121,10 @@ def item_row(index: int, judge_jsonl: Path, single_manifest: dict[str, Any]) -> 
         "controller_allowed_candidates": int(integration.get("controller_allowed_candidates") or 0),
         "controller_reranked_candidates": int(integration.get("controller_reranked_candidates") or 0),
         "controller_blocked_candidates": int(integration.get("controller_blocked_candidates") or 0),
+        "hard_case_policy_blocked_candidates": int(integration.get("hard_case_policy_blocked_candidates") or 0),
+        "hard_case_route_policy_applied": bool(integration.get("hard_case_route_policy_applied")),
+        "hard_case_training_objective_required": bool(integration.get("hard_case_training_objective_required")),
+        "hard_case_artifact_safe_route_required": bool(integration.get("hard_case_artifact_safe_route_required")),
         "controller_missing_routes": int(integration.get("controller_missing_routes") or 0),
         "controller_override_count": int(integration.get("controller_override_count") or 0),
         "delivery_allowed": False,
@@ -142,6 +146,10 @@ def build_batch_summary(item_rows: Sequence[dict[str, Any]], min_batch_checked_c
         "controller_allowed_candidates": sum(int(row["controller_allowed_candidates"]) for row in item_rows),
         "controller_reranked_candidates": sum(int(row["controller_reranked_candidates"]) for row in item_rows),
         "controller_blocked_candidates": sum(int(row["controller_blocked_candidates"]) for row in item_rows),
+        "hard_case_policy_blocked_candidates": sum(int(row["hard_case_policy_blocked_candidates"]) for row in item_rows),
+        "hard_case_route_policy_applied": any(bool(row["hard_case_route_policy_applied"]) for row in item_rows),
+        "hard_case_training_objective_required": any(bool(row["hard_case_training_objective_required"]) for row in item_rows),
+        "hard_case_artifact_safe_route_required": any(bool(row["hard_case_artifact_safe_route_required"]) for row in item_rows),
         "controller_missing_routes": sum(int(row["controller_missing_routes"]) for row in item_rows),
         "controller_override_count": sum(int(row["controller_override_count"]) for row in item_rows),
     }
@@ -150,6 +158,18 @@ def build_batch_summary(item_rows: Sequence[dict[str, Any]], min_batch_checked_c
 def promotion_status(summary: dict[str, Any]) -> tuple[str, str, bool]:
     if int(summary.get("input_count") or 0) <= 0:
         return ("blocked_no_judge_inputs", "no judge JSONL inputs were provided or discovered", False)
+    if summary.get("hard_case_training_objective_required") is True:
+        return (
+            "blocked_hard_case_requires_separator_training_objective",
+            "hard-case policy requires separator training objective before shadow-batch staging",
+            False,
+        )
+    if int(summary.get("hard_case_policy_blocked_candidates") or 0) > 0:
+        return (
+            "blocked_hard_case_policy_route_mismatch",
+            "hard-case policy blocked at least one selector route outside the allowed artifact-safe route set",
+            False,
+        )
     if int(summary.get("controller_checked_candidates") or 0) < int(summary.get("min_batch_checked_candidates") or 0):
         return ("blocked_insufficient_controller_checked_candidates", "not enough controller-checked candidates", False)
     if int(summary.get("controller_missing_routes") or 0) > 0:
@@ -166,6 +186,7 @@ def run_shadow_batch(
     min_selector_usable_per_input: int = 1,
     min_batch_checked_candidates: int = 1,
     accept_threshold: float = 0.5,
+    hard_case_route_policy_json: Path | None = None,
 ) -> dict[str, Any]:
     if min_selector_usable_per_input <= 0:
         raise ValueError("min_selector_usable_per_input must be > 0")
@@ -183,6 +204,7 @@ def run_shadow_batch(
         progress_path,
         "start",
         controller_model_json=str(controller_model_json),
+        hard_case_route_policy_json=str(hard_case_route_policy_json or ""),
         input_count=len(judge_inputs),
         score_mode=score_mode,
         min_selector_usable_per_input=min_selector_usable_per_input,
@@ -201,6 +223,7 @@ def run_shadow_batch(
             score_mode=score_mode,
             min_selector_usable=min_selector_usable_per_input,
             accept_threshold=accept_threshold,
+            hard_case_route_policy_json=hard_case_route_policy_json,
         )
         item = item_row(index, judge_jsonl, single_manifest)
         items.append(item)
@@ -212,6 +235,7 @@ def run_shadow_batch(
             single_promotion_status=item["single_promotion_status"],
             controller_checked_candidates=item["controller_checked_candidates"],
             controller_missing_routes=item["controller_missing_routes"],
+            hard_case_policy_blocked_candidates=item["hard_case_policy_blocked_candidates"],
         )
 
     summary = build_batch_summary(items, min_batch_checked_candidates)
@@ -219,6 +243,7 @@ def run_shadow_batch(
     fingerprint = stable_hash(
         {
             "controller_model_json": str(controller_model_json),
+            "hard_case_route_policy_json": str(hard_case_route_policy_json or ""),
             "judge_jsonls": [str(path) for path in judge_inputs],
             "score_mode": score_mode,
             "min_selector_usable_per_input": min_selector_usable_per_input,
@@ -239,6 +264,7 @@ def run_shadow_batch(
         "schema": "generic_controller_selector_shadow_batch_manifest.v1",
         "manifest_type": "generic_controller_selector_shadow_batch",
         "controller_model_json": str(controller_model_json),
+        "hard_case_route_policy_json": str(hard_case_route_policy_json or ""),
         "judge_jsonls": [str(path) for path in judge_inputs],
         "output_dir": str(output_dir),
         "score_mode": score_mode,
@@ -277,6 +303,7 @@ def run_shadow_batch(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a metadata-only controller/selector shadow batch.")
     parser.add_argument("--controller-model-json", type=Path, required=True)
+    parser.add_argument("--hard-case-route-policy-json", type=Path, default=None)
     parser.add_argument("--judge-jsonl", type=Path, action="append", default=[])
     parser.add_argument("--judge-root", type=Path)
     parser.add_argument("--judge-glob", default="**/no_reference_*_windowed_judge_results.jsonl")
@@ -303,6 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     manifest = run_shadow_batch(
         controller_model_json=args.controller_model_json,
+        hard_case_route_policy_json=args.hard_case_route_policy_json,
         judge_jsonls=collect_judge_jsonls(args),
         output_dir=args.output_dir,
         score_mode=args.score_mode,

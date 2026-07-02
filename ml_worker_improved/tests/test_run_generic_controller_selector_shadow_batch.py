@@ -27,6 +27,12 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def write_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def controller_row(row_id: str, stem: str, route: str, accepted: bool) -> dict:
     return {
         "id": row_id,
@@ -81,6 +87,26 @@ def trained_controller(tmp_path: Path) -> dict:
         output_dir=tmp_path / "controller_model",
         min_examples_per_route=1,
     )
+
+
+def hard_case_policy(tmp_path: Path, **fields: object) -> Path:
+    payload = {
+        "schema": "no_reference_hard_case_route_policy.v1",
+        "run_id": "shadow-policy-test",
+        "track_id": "track-shadow-policy",
+        "hard_case_detected": True,
+        "trigger_reasons": [],
+        "training_objective_required": False,
+        "artifact_safe_route_required": False,
+        "artifact_safe_candidate_route_ids": [],
+        "selected_conditional_route_ids": [],
+        "route_allowed": False,
+        "route_reason": "",
+        "route_block_reason": "",
+        "release_ready": False,
+    }
+    payload.update(fields)
+    return write_json(tmp_path / "hard_case_route_policy.json", payload)
 
 
 def test_shadow_batch_aggregates_allow_block_and_missing_routes(tmp_path: Path) -> None:
@@ -152,3 +178,90 @@ def test_discovers_judge_jsonls_under_root_with_glob(tmp_path: Path) -> None:
         first,
         second,
     ]
+
+
+def test_shadow_batch_propagates_training_objective_policy(tmp_path: Path) -> None:
+    training_manifest = trained_controller(tmp_path)
+    judge_rows = write_jsonl(
+        tmp_path / "judges" / "policy" / "no_reference_minus_windowed_judge_results.jsonl",
+        [judge_row("good-route", track_id="track-policy")],
+    )
+    policy_json = hard_case_policy(
+        tmp_path,
+        trigger_reasons=["model_gap_requires_separator_training_objective"],
+        training_objective_required=True,
+        route_block_reason="hard_case_requires_separator_training_objective",
+        route_reason="train_separator_attribution_objective_required",
+    )
+
+    manifest = run_shadow_batch(
+        controller_model_json=Path(training_manifest["outputs"]["model_json"]),
+        judge_jsonls=[judge_rows],
+        output_dir=tmp_path / "shadow_batch",
+        score_mode="minus",
+        min_selector_usable_per_input=1,
+        min_batch_checked_candidates=1,
+        hard_case_route_policy_json=policy_json,
+    )
+
+    assert manifest["hard_case_route_policy_json"] == str(policy_json)
+    assert manifest["batch_summary"]["hard_case_training_objective_required"] is True
+    assert manifest["batch_summary"]["hard_case_policy_blocked_candidates"] == 1
+    assert manifest["promotion"]["status"] == "blocked_hard_case_requires_separator_training_objective"
+    assert manifest["promotion"]["can_stage_controller_candidate"] is False
+
+    items = read_jsonl(tmp_path / "shadow_batch" / BATCH_ITEMS_NAME)
+    assert items[0]["single_promotion_status"] == "blocked_hard_case_requires_separator_training_objective"
+    assert items[0]["hard_case_training_objective_required"] is True
+    assert items[0]["hard_case_policy_blocked_candidates"] == 1
+
+
+def test_shadow_batch_propagates_artifact_safe_route_policy(tmp_path: Path) -> None:
+    examples = write_jsonl(
+        tmp_path / "controller.jsonl",
+        [
+            controller_row("good1", "minus", "good-route", True),
+            controller_row("good2", "minus", "good-route", True),
+            controller_row("safe1", "minus", "safe-route", True),
+            controller_row("safe2", "minus", "safe-route", True),
+        ],
+    )
+    training_manifest = train_controller_model(
+        controller_examples_jsonl=examples,
+        output_dir=tmp_path / "controller_model",
+        min_examples_per_route=1,
+    )
+    judge_rows = write_jsonl(
+        tmp_path / "judges" / "safe" / "no_reference_minus_windowed_judge_results.jsonl",
+        [
+            judge_row("good-route", track_id="track-safe", score=0.95),
+            judge_row("safe-route", track_id="track-safe", score=0.90),
+        ],
+    )
+    policy_json = hard_case_policy(
+        tmp_path,
+        trigger_reasons=["pitch_guard_damage_regression"],
+        artifact_safe_route_required=True,
+        artifact_safe_candidate_route_ids=["safe-route"],
+        selected_conditional_route_ids=["safe-route"],
+        route_allowed=True,
+        route_reason="artifact_safe_route_for_damage_regression_blocker",
+    )
+
+    manifest = run_shadow_batch(
+        controller_model_json=Path(training_manifest["outputs"]["model_json"]),
+        judge_jsonls=[judge_rows],
+        output_dir=tmp_path / "shadow_batch",
+        score_mode="minus",
+        min_selector_usable_per_input=1,
+        min_batch_checked_candidates=1,
+        hard_case_route_policy_json=policy_json,
+    )
+
+    assert manifest["batch_summary"]["hard_case_artifact_safe_route_required"] is True
+    assert manifest["batch_summary"]["controller_reranked_candidates"] == 1
+    assert manifest["promotion"]["status"] == "controller_selector_shadow_batch_staged"
+
+    items = read_jsonl(tmp_path / "shadow_batch" / BATCH_ITEMS_NAME)
+    assert items[0]["controller_reranked_candidates"] == 1
+    assert items[0]["hard_case_artifact_safe_route_required"] is True

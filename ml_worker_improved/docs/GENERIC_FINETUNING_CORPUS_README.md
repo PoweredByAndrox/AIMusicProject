@@ -214,6 +214,9 @@ shadow-batch manifest. The batch is metadata-only, writes a structured progress
 trail, and remains fail-closed: missing controller routes or too few checked
 candidates block staging. It still does not render audio, edit registries,
 start fine-tuning, or create listen/release artifacts.
+When `--hard-case-route-policy-json` is provided, the same hard-case training
+objective and artifact-safe route gates are propagated into every single-case
+staging run and aggregated into the shadow-batch promotion decision.
 
 `tools/plan_generic_controller_selector_route_gaps.py` consumes a shadow-batch
 manifest and all referenced single-case integration decisions. It aggregates
@@ -796,6 +799,7 @@ python /app/tools/run_generic_controller_selector_shadow_batch.py \
   --controller-model-json /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_model_from_hard_case_split_v1/generic_finetuning_controller_model.json \
   --judge-root /app/lab_artifacts/generic_finetuning_playbook_20260613 \
   --judge-glob "**/no_reference_*_windowed_judge_results.jsonl" \
+  --hard-case-route-policy-json /app/lab_artifacts/no_reference_minus_route_expansion/hard_case_route_policy.json \
   --output-dir /app/lab_artifacts/generic_finetuning_playbook_20260613/controller_selector_shadow_batch_v1 \
   --score-mode minus \
   --min-selector-usable-per-input 1 \
