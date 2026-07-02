@@ -382,13 +382,20 @@ def accepted_pipeline_manifest(
 ) -> dict[str, Any]:
     return {
         "manifest_type": "no_reference_vocal_delivery_pipeline",
-        "delivery_status": listen_manifest.get("delivery_status"),
-        "delivery_allowed": listen_manifest.get("delivery_allowed") is True,
-        "presentation_status": listen_manifest.get("presentation_status"),
-        "release_status": listen_manifest.get("release_status"),
-        "dominant_failure_reason": listen_manifest.get("dominant_failure_reason") or "",
+        "delivery_status": "blocked",
+        "delivery_allowed": False,
+        "presentation_status": "aggregate_machine_gate_required_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "dominant_failure_reason": "requires_staged_aggregate_validation_and_machine_gate",
         "stem_type": "vocal",
         "base_candidate_id": base_candidate_id,
+        "listen_source_promotable": True,
+        "source_listen_preview_delivery_status": str(listen_manifest.get("delivery_status") or ""),
+        "source_listen_preview_delivery_allowed": listen_manifest.get("delivery_allowed") is True,
+        "source_listen_preview_presentation_status": str(listen_manifest.get("presentation_status") or ""),
+        "source_listen_preview_release_status": str(listen_manifest.get("release_status") or ""),
+        "requires_staged_aggregate_machine_gate": True,
+        "final_delivery_blockers": ["requires_staged_aggregate_validation_and_machine_gate"],
         "source_vocal_judge_jsonl": str(vocal_judge_jsonl),
         "candidate_manifest_path": str(output_dir / "vocal_candidate_manifest.json"),
         "selector_jsonl": str(output_dir / "no_reference_candidate_selector" / "no_reference_candidate_selection.jsonl"),
@@ -579,7 +586,7 @@ def run_vocal_delivery_pipeline(
         candidate_score_matrix_json=candidate_score_matrix_json,
     )
     write_pipeline_outputs(output_dir, manifest)
-    log_event("vocal_listen_preview_manifest", "end", delivery_allowed=True, output_manifest=str(listen_manifest_json))
+    log_event("vocal_listen_preview_manifest", "end", listen_source_promotable=True, output_manifest=str(listen_manifest_json))
     return manifest
 
 

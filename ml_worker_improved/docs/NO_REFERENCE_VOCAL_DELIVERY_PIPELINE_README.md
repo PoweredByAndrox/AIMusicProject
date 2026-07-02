@@ -36,7 +36,8 @@ When `--candidate-score-matrix-json` is supplied, the pipeline manifest records
 is `vocal_score_sort`; explicit `--base-candidate-id` records
 `base_selection_source=explicit_base_candidate_id`.
 
-Accepted output is listen-preview only:
+Accepted `no_reference_vocal_listen_preview_manifest.json` remains source
+evidence only:
 
 - `delivery_status=accepted`
 - `delivery_allowed=true`
@@ -47,7 +48,21 @@ Accepted output is listen-preview only:
 - selector summary uses `selection_metric=vocal_score`
 - `can_mark_release_ready=false`
 
-If any step fails, the final pipeline manifest is blocked and includes `dominant_failure_reason`.
+The final `no_reference_vocal_delivery_pipeline_manifest.json` is not a
+user-facing listen-pack artifact. Even when the listen-preview source is
+promotable, the wrapper fails closed until staged aggregate validation and an
+accepted machine stem gate are present:
+
+- `delivery_status=blocked`
+- `delivery_allowed=false`
+- `presentation_status=aggregate_machine_gate_required_not_for_listen_pack`
+- `release_status=not_release_ready`
+- `listen_source_promotable=true`
+- `requires_staged_aggregate_machine_gate=true`
+- `final_delivery_blockers=["requires_staged_aggregate_validation_and_machine_gate"]`
+
+If any earlier step fails, the final pipeline manifest is blocked and includes
+`dominant_failure_reason` for that earlier failure.
 
 Example:
 

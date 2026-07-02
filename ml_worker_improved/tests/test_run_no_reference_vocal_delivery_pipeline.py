@@ -33,6 +33,21 @@ def write_jsonl(path: Path, rows: list[dict]) -> Path:
     return path
 
 
+def assert_pipeline_requires_aggregate_gate(manifest: dict) -> None:
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_machine_gate_required_not_for_listen_pack"
+    assert manifest["release_status"] == "not_release_ready"
+    assert manifest["dominant_failure_reason"] == "requires_staged_aggregate_validation_and_machine_gate"
+    assert manifest["listen_source_promotable"] is True
+    assert manifest["source_listen_preview_delivery_status"] == "accepted"
+    assert manifest["source_listen_preview_delivery_allowed"] is True
+    assert manifest["source_listen_preview_presentation_status"] == "accepted_for_listen_pack"
+    assert manifest["source_listen_preview_release_status"] == "listen_preview_only"
+    assert manifest["requires_staged_aggregate_machine_gate"] is True
+    assert manifest["final_delivery_blockers"] == ["requires_staged_aggregate_validation_and_machine_gate"]
+
+
 def vocal_judge_row(tmp_path: Path, candidate_id: str = "vocal-a") -> dict:
     vocal_path = write_wav(tmp_path / candidate_id / "vocal.wav", 0.2)
     return {
@@ -66,10 +81,7 @@ def test_vocal_delivery_pipeline_accepts_vocal_without_minus_or_both_gate(tmp_pa
     )
 
     listen_manifest = Path(manifest["final_listen_preview_manifest"])
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
-    assert manifest["presentation_status"] == "accepted_for_listen_pack"
-    assert manifest["release_status"] == "listen_preview_only"
+    assert_pipeline_requires_aggregate_gate(manifest)
     assert manifest["stem_type"] == "vocal"
     assert manifest["accepted_count"] == 1
     assert manifest["score_modes_used"] == ["vocal"]
@@ -99,8 +111,7 @@ def test_vocal_delivery_pipeline_accepts_mode_specific_vocal_decision_with_gener
     )
 
     listen_manifest = json.loads(Path(manifest["final_listen_preview_manifest"]).read_text(encoding="utf-8"))
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert_pipeline_requires_aggregate_gate(manifest)
     assert manifest["score_modes_used"] == ["vocal"]
     assert listen_manifest["candidate_id"] == row["candidate_id"]
     assert listen_manifest["accepted_listen_preview_rows"][0]["vocal_score"] == 0.82
@@ -121,7 +132,7 @@ def test_vocal_delivery_pipeline_preserves_rendered_source_quiet_repair_status(t
 
     candidate_manifest = json.loads(Path(manifest["candidate_manifest_path"]).read_text(encoding="utf-8"))
     listen_manifest = json.loads(Path(manifest["final_listen_preview_manifest"]).read_text(encoding="utf-8"))
-    assert manifest["delivery_status"] == "accepted"
+    assert_pipeline_requires_aggregate_gate(manifest)
     assert candidate_manifest["render_status"] == "rendered_vocal_source_quiet_silence_repair_candidate"
     assert candidate_manifest["candidate_row"]["render_status"] == "rendered_vocal_source_quiet_silence_repair_candidate"
     assert listen_manifest["delivery_status"] == "accepted"
@@ -147,7 +158,7 @@ def test_vocal_delivery_pipeline_selects_by_vocal_score_not_overall_score(tmp_pa
     )
 
     listen_manifest = json.loads(Path(manifest["final_listen_preview_manifest"]).read_text(encoding="utf-8"))
-    assert manifest["delivery_status"] == "accepted"
+    assert_pipeline_requires_aggregate_gate(manifest)
     assert manifest["base_candidate_id"] == "vocal-better"
     assert manifest["selected_vocal_path"] == vocal_better["vocal_path"]
     assert listen_manifest["candidate_id"] == "vocal-better"
@@ -200,7 +211,7 @@ def test_vocal_delivery_pipeline_uses_score_matrix_for_base_candidate(tmp_path: 
         candidate_score_matrix_json=matrix_json,
     )
 
-    assert manifest["delivery_status"] == "accepted"
+    assert_pipeline_requires_aggregate_gate(manifest)
     assert manifest["base_candidate_id"] == "matrix-vocal"
     assert manifest["base_selection_source"] == "candidate_score_matrix"
 
@@ -307,12 +318,11 @@ def test_vocal_delivery_pipeline_cli_writes_final_manifest(tmp_path: Path) -> No
                 str(output_dir),
             ]
         )
-        == 0
+        == 1
     )
     final_manifest = output_dir / "no_reference_vocal_delivery_pipeline_manifest.json"
     summary_md = output_dir / "no_reference_vocal_delivery_pipeline_summary.md"
     assert final_manifest.exists()
     assert summary_md.exists()
     payload = json.loads(final_manifest.read_text(encoding="utf-8"))
-    assert payload["delivery_status"] == "accepted"
-    assert payload["delivery_allowed"] is True
+    assert_pipeline_requires_aggregate_gate(payload)

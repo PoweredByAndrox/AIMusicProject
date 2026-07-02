@@ -30,6 +30,21 @@ def write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def assert_pipeline_requires_aggregate_gate(manifest: dict) -> None:
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_machine_gate_required_not_for_listen_pack"
+    assert manifest["release_status"] == "not_release_ready"
+    assert manifest["dominant_failure_reason"] == "requires_staged_aggregate_validation_and_machine_gate"
+    assert manifest["listen_source_promotable"] is True
+    assert manifest["source_listen_preview_delivery_status"] == "accepted"
+    assert manifest["source_listen_preview_delivery_allowed"] is True
+    assert manifest["source_listen_preview_presentation_status"] == "accepted_for_listen_pack"
+    assert manifest["source_listen_preview_release_status"] == "listen_preview_only"
+    assert manifest["requires_staged_aggregate_machine_gate"] is True
+    assert manifest["final_delivery_blockers"] == ["requires_staged_aggregate_validation_and_machine_gate"]
+
+
 def self_judge_manifest(
     tmp_path: Path,
     candidate_id: str,
@@ -202,10 +217,7 @@ def test_minus_delivery_pipeline_promotes_only_after_existing_gates(tmp_path: Pa
     )
 
     listen_manifest = Path(manifest["final_listen_preview_manifest"])
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
-    assert manifest["presentation_status"] == "accepted_for_listen_pack"
-    assert manifest["release_status"] == "listen_preview_only"
+    assert_pipeline_requires_aggregate_gate(manifest)
     assert manifest["stem_type"] == "minus"
     assert manifest["accepted_count"] == 1
     assert can_promote_to_listen_result(listen_manifest) is True
@@ -256,7 +268,7 @@ def test_minus_delivery_pipeline_logs_mode_specific_progress(tmp_path: Path, mon
     assert any(
         event.get("phase") == "minus_listen_preview_manifest"
         and event.get("event") == "end"
-        and event.get("delivery_allowed") is True
+        and event.get("listen_source_promotable") is True
         for event in events
     )
 
@@ -290,15 +302,14 @@ def test_minus_delivery_pipeline_auto_discovers_manifests_and_base_candidate(tmp
                 "1",
             ]
         )
-        == 0
+        == 1
     )
 
     final_manifest = json.loads(
         (tmp_path / "out" / "no_reference_minus_delivery_pipeline_manifest.json").read_text(encoding="utf-8")
     )
     assert final_manifest["base_candidate_id"] == "base"
-    assert final_manifest["delivery_status"] == "accepted"
-    assert final_manifest["delivery_allowed"] is True
+    assert_pipeline_requires_aggregate_gate(final_manifest)
 
 
 def test_minus_delivery_pipeline_uses_score_matrix_for_base_candidate(tmp_path: Path, monkeypatch) -> None:
@@ -367,7 +378,7 @@ def test_minus_delivery_pipeline_uses_score_matrix_for_base_candidate(tmp_path: 
                 "1",
             ]
         )
-        == 0
+        == 1
     )
 
     final_manifest = json.loads(
@@ -441,7 +452,7 @@ def test_minus_delivery_pipeline_passes_repairable_blocked_alternate_flag(tmp_pa
     )
 
     assert captured["allow_repairable_blocked_alternate"] is True
-    assert manifest["delivery_status"] == "accepted"
+    assert_pipeline_requires_aggregate_gate(manifest)
 
 
 def test_score_matrix_base_selection_prefers_specific_candidate_over_model_name_alias(tmp_path: Path) -> None:
@@ -547,7 +558,7 @@ def test_minus_delivery_pipeline_accepts_existing_zero_blocker_candidate(tmp_pat
                 "1",
             ]
         )
-        == 0
+        == 1
     )
 
     final_manifest = json.loads(
@@ -558,8 +569,7 @@ def test_minus_delivery_pipeline_accepts_existing_zero_blocker_candidate(tmp_pat
     )
     assert final_manifest["base_candidate_id"] == "clean"
     assert final_manifest["render_status"] == "existing_minus_candidate_proxy_pass"
-    assert final_manifest["delivery_status"] == "accepted"
-    assert final_manifest["delivery_allowed"] is True
+    assert_pipeline_requires_aggregate_gate(final_manifest)
     assert listen_manifest["delivery_status"] == "accepted"
     assert listen_manifest["delivery_allowed"] is True
     assert listen_manifest["audio_exported"] is False
@@ -754,8 +764,7 @@ def test_minus_delivery_pipeline_repairs_post_render_vocal_leakage_blocker(tmp_p
 
     assert repair_calls["count"] == 1
     assert judge_calls["count"] == 2
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert_pipeline_requires_aggregate_gate(manifest)
     assert manifest["repair_manifest_path"].endswith("judge_guided_minus_vocal_leakage_repair_manifest.json")
     assert manifest["post_candidate_self_judge_manifest"].endswith("post_repair_self_judge/instrumental_self_judge_manifest.json")
 
