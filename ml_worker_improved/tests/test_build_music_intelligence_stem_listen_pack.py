@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.build_music_intelligence_stem_listen_pack import build_music_intelligence_stem_listen_pack
+from tools.build_music_intelligence_stem_listen_pack import build_music_intelligence_stem_listen_pack, main as stem_listen_pack_main
 
 
 def _write_json(path: Path, payload: dict) -> Path:
@@ -58,9 +58,11 @@ def test_stem_listen_pack_collects_accepted_vocal_and_minus(tmp_path: Path) -> N
         required_stem_types={"vocal", "minus"},
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert manifest["delivery_status"] == "semantic_review_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "semantic_review_queue_not_for_listen_pack"
     assert manifest["release_ready"] is False
+    assert manifest["listenable"] is False
     assert manifest["track_count"] == 1
     assert manifest["stem_counts"] == {"minus": 1, "vocal": 1}
     assert {item["stem_type"] for item in manifest["listen_audio_files"]} == {"vocal", "minus"}
@@ -76,6 +78,9 @@ def test_stem_listen_pack_collects_accepted_vocal_and_minus(tmp_path: Path) -> N
     assert all(item["semantic_review_required"] is True for item in manifest["listen_audio_files"])
     assert all(item["semantic_quality_verified"] is False for item in manifest["listen_audio_files"])
     assert all(item["review_status"] == "semantic_review_pending" for item in manifest["listen_audio_files"])
+    assert all(item["delivery_status"] == "semantic_review_pending" for item in manifest["listen_audio_files"])
+    assert all(item["delivery_allowed"] is False for item in manifest["listen_audio_files"])
+    assert all(item["presentation_status"] == "semantic_review_queue_not_for_listen_pack" for item in manifest["listen_audio_files"])
     assert manifest["semantic_review_required"] is True
     assert manifest["semantic_quality_verified"] is False
     assert manifest["review_status"] == "semantic_review_pending"
@@ -88,6 +93,47 @@ def test_stem_listen_pack_collects_accepted_vocal_and_minus(tmp_path: Path) -> N
     assert review["pending_item_count"] == 2
     rows = [json.loads(line) for line in Path(manifest["rows_jsonl"]).read_text(encoding="utf-8").splitlines()]
     assert {row["semantic_quality_status"] for row in rows} == {"pending"}
+
+
+def test_stem_listen_pack_cli_succeeds_for_non_delivery_review_queue(tmp_path: Path) -> None:
+    vocal = _audio(tmp_path / "run" / "vocal.flac")
+    mi_manifest = _write_json(
+        tmp_path / "run" / "music_intelligence_input_manifest.json",
+        {
+            "schema": "music_intelligence_input_manifest.v1",
+            "release_ready": False,
+            "stems": [
+                {
+                    "track_id": "track_cli",
+                    "stem_id": "track_cli__vocal",
+                    "stem_type": "vocal",
+                    "audio_path": str(vocal),
+                    "duration_sec": 12.0,
+                    "quality_status": "accepted",
+                    "analysis_allowed": True,
+                    "release_ready": False,
+                }
+            ],
+        },
+    )
+    output_dir = tmp_path / "listen"
+
+    assert stem_listen_pack_main(
+        [
+            "--music-intelligence-manifest",
+            str(mi_manifest),
+            "--output-dir",
+            str(output_dir),
+            "--required-stem-type",
+            "vocal",
+        ]
+    ) == 0
+
+    manifest = json.loads((output_dir / "pack.json").read_text(encoding="utf-8"))
+    assert manifest["delivery_status"] == "semantic_review_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "semantic_review_queue_not_for_listen_pack"
+    assert manifest["listen_audio_count"] == 1
 
 
 def test_stem_listen_pack_blocks_unaccepted_required_stem(tmp_path: Path) -> None:
@@ -189,10 +235,12 @@ def test_stem_listen_pack_collects_required_stems_from_aggregate_pack(tmp_path: 
         required_stem_types=set(stems),
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert manifest["delivery_status"] == "semantic_review_pending"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "semantic_review_queue_not_for_listen_pack"
     assert manifest["release_ready"] is False
     assert manifest["can_publish_as_result"] is False
+    assert manifest["listenable"] is False
     assert manifest["semantic_review_required"] is True
     assert manifest["semantic_quality_verified"] is False
     assert manifest["review_status"] == "semantic_review_pending"
@@ -209,6 +257,9 @@ def test_stem_listen_pack_collects_required_stems_from_aggregate_pack(tmp_path: 
     assert all(item["semantic_review_required"] is True for item in manifest["listen_audio_files"])
     assert all(item["semantic_quality_verified"] is False for item in manifest["listen_audio_files"])
     assert all(item["review_status"] == "semantic_review_pending" for item in manifest["listen_audio_files"])
+    assert all(item["delivery_status"] == "semantic_review_pending" for item in manifest["listen_audio_files"])
+    assert all(item["delivery_allowed"] is False for item in manifest["listen_audio_files"])
+    assert all(item["presentation_status"] == "semantic_review_queue_not_for_listen_pack" for item in manifest["listen_audio_files"])
     review = json.loads(Path(manifest["review_json"]).read_text(encoding="utf-8"))
     assert review["schema"] == "semantic_stem_quality_review.v1"
     assert review["review_status"] == "pending"

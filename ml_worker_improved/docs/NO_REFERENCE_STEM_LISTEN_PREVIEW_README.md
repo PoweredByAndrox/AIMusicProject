@@ -710,8 +710,11 @@ pack, pass `--input-pack-json`, restrict to complete short aliases with
 `--source-alias`, and require every stem type. The tool copies existing audio to
 short review paths, writes `pack.json`, `selected.jsonl`, `review.json`,
 `rows.jsonl`, `summary.md`, and `progress.jsonl`, and marks every row
-`review_status=semantic_review_pending`. This is a review artifact, not semantic
-proof.
+`review_status=semantic_review_pending`. A successful queue uses
+`review_queue_ready=true`, `delivery_status=semantic_review_pending`,
+`delivery_allowed=false`, `listenable=false`, and
+`presentation_status=semantic_review_queue_not_for_listen_pack`; it is a review
+artifact, not semantic proof or a listen-pack result.
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/build_music_intelligence_stem_listen_pack.py \
@@ -732,7 +735,9 @@ docker compose run --rm --no-deps ml-worker python tools/build_music_intelligenc
 Then run the existing semantic batch against the short `pack.json`. This does
 not copy/export audio and does not run model inference; it writes short metadata
 under `semj001`, including `review/review.json`. Unsupported stems remain
-blocked rows instead of being treated as clean ground truth.
+blocked rows instead of being treated as clean ground truth. Promotion into any
+listen/result handoff still requires completed semantic review, minus audit when
+minus rows exist, aggregate validation, and the final machine gate.
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/run_no_reference_stem_semantic_batch.py \

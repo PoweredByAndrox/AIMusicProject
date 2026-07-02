@@ -11,6 +11,13 @@ import soundfile as sf
 from tools.run_no_reference_stem_semantic_batch import run_batch, main
 
 
+REVIEW_QUEUE_DELIVERY_STATUS = "semantic_review_pending"
+REVIEW_QUEUE_PRESENTATION_STATUS = "semantic_review_queue_not_for_listen_pack"
+SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS = "pending_semantic_judge"
+SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS = "semantic_judge_input_not_for_listen_pack"
+SEMANTIC_JUDGE_INPUT_RELEASE_STATUS = "semantic_judge_input_only"
+
+
 def write_audio(path: Path, *, freq_hz: float = 220.0, amplitude: float = 0.08) -> Path:
     sample_rate = 16_000
     t = np.arange(sample_rate * 2, dtype=np.float32) / float(sample_rate)
@@ -68,11 +75,13 @@ def write_short_stem_pack(root: Path) -> Path:
     pack = root / "pack.json"
     payload = {
         "schema": "music_intelligence_stem_listen_pack_manifest.v1",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
+        "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
         "release_ready": False,
         "can_publish_as_result": False,
+        "listenable": False,
+        "review_queue_ready": True,
         "failed_checks": [],
         "listen_audio_files": [
             {
@@ -84,9 +93,9 @@ def write_short_stem_pack(root: Path) -> Path:
                 "audio_path": "audio/t001/bass.flac",
                 "listen_audio_path": str(bass),
                 "duration_sec": 2.0,
-                "delivery_status": "accepted",
-                "delivery_allowed": True,
-                "presentation_status": "accepted_for_listen_pack",
+                "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+                "delivery_allowed": False,
+                "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
                 "release_ready": False,
                 "can_publish_as_result": False,
             },
@@ -99,9 +108,9 @@ def write_short_stem_pack(root: Path) -> Path:
                 "audio_path": "audio/t001/vocal.flac",
                 "listen_audio_path": str(vocal),
                 "duration_sec": 2.0,
-                "delivery_status": "accepted",
-                "delivery_allowed": True,
-                "presentation_status": "accepted_for_listen_pack",
+                "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+                "delivery_allowed": False,
+                "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
                 "release_ready": False,
                 "can_publish_as_result": False,
             },
@@ -129,20 +138,22 @@ def write_short_pair_pack(root: Path) -> Path:
         "source_track_id": "raw_source_track_id_is_manifest_only",
         "track_alias": "t001",
         "duration_sec": 2.0,
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
+        "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
         "release_ready": False,
         "can_publish_as_result": False,
         "mix_path": str(mix),
     }
     payload = {
         "schema": "music_intelligence_stem_listen_pack_manifest.v1",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
+        "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
         "release_ready": False,
         "can_publish_as_result": False,
+        "listenable": False,
+        "review_queue_ready": True,
         "failed_checks": [],
         "listen_audio_files": [
             {
@@ -187,9 +198,9 @@ def write_short_pair_pack_with_upstream_mix_manifest(root: Path) -> Path:
         "source_track_id": "raw_source_track_id_is_manifest_only",
         "track_alias": "t001",
         "duration_sec": 2.0,
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
+        "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
         "release_ready": False,
         "can_publish_as_result": False,
         "source_manifest": str(aggregate_pack_dir),
@@ -197,11 +208,13 @@ def write_short_pair_pack_with_upstream_mix_manifest(root: Path) -> Path:
     }
     payload = {
         "schema": "music_intelligence_stem_listen_pack_manifest.v1",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
+        "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
         "release_ready": False,
         "can_publish_as_result": False,
+        "listenable": False,
+        "review_queue_ready": True,
         "failed_checks": [],
         "listen_audio_files": [
             {**common, "stem_type": "vocal", "audio_path": "audio/t001/vocal.flac", "listen_audio_path": str(vocal)},
@@ -210,6 +223,20 @@ def write_short_pair_pack_with_upstream_mix_manifest(root: Path) -> Path:
     }
     pack.write_text(json.dumps(payload), encoding="utf-8")
     return pack
+
+
+def assert_materialized_semantic_judge_inputs(output_root: Path) -> None:
+    paths = sorted((output_root / "src").rglob("*.json"))
+    assert paths
+    for path in paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["semantic_judge_input"] is True
+        assert payload["delivery_status"] == SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS
+        assert payload["delivery_allowed"] is False
+        assert payload["presentation_status"] == SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS
+        assert payload["release_status"] == SEMANTIC_JUDGE_INPUT_RELEASE_STATUS
+        assert payload["release_ready"] is False
+        assert payload["can_publish_as_result"] is False
 
 
 def test_batch_runs_semantic_judge_and_matrix_per_track(tmp_path: Path) -> None:
@@ -244,7 +271,9 @@ def test_batch_accepts_short_stem_pack_and_writes_short_review_artifacts(tmp_pat
     assert summary["candidate_count"] == 2
     assert summary["release_ready"] is False
     assert summary["short_output_names"] is True
+    assert summary["failed_checks"] == []
     assert Path(summary["semantic_review_json"]).relative_to(output_root).as_posix() == "review/review.json"
+    assert_materialized_semantic_judge_inputs(output_root)
     review = json.loads(Path(summary["semantic_review_json"]).read_text(encoding="utf-8"))
     assert review["schema"] == "semantic_stem_quality_review.v1"
     assert review["review_status"] == "completed"
@@ -265,6 +294,8 @@ def test_batch_builds_mode_specific_evidence_for_short_vocal_minus_pack(tmp_path
     assert summary["batch_status"] == "completed"
     assert summary["candidate_count"] == 2
     assert summary["accepted_candidates"] == 2
+    assert summary["failed_checks"] == []
+    assert_materialized_semantic_judge_inputs(output_root)
     review = json.loads(Path(summary["semantic_review_json"]).read_text(encoding="utf-8"))
     assert review["failed_checks"] == []
     assert review["semantic_quality_verified_item_count"] == 2
@@ -287,6 +318,8 @@ def test_batch_uses_upstream_stem_manifest_mix_not_aggregate_directory(tmp_path:
     summary = run_batch(listen_manifest_roots=[], input_pack_jsons=[pack], output_root=output_root)
 
     assert summary["accepted_candidates"] == 2
+    assert summary["failed_checks"] == []
+    assert_materialized_semantic_judge_inputs(output_root)
     rows = [
         json.loads(line)
         for line in (output_root / "t001" / "judge" / "rows.jsonl").read_text(encoding="utf-8").splitlines()

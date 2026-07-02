@@ -17,7 +17,14 @@ copy, or export audio.
   `presentation_status=semantic_judge_input_not_for_listen_pack`; they are
   judge-consumable but not user-presentable listen/result artifacts.
 - With `--input-pack-json`, materializes only short JSON views under `src/`
-  and reads the existing audio referenced by the pack.
+  and reads the existing audio referenced by the pack. The short input pack is
+  a non-delivery review queue (`delivery_allowed=false`,
+  `listenable=false`, `presentation_status=semantic_review_queue_not_for_listen_pack`),
+  even when `review_queue_ready=true`. The materialized `src/*.json` views are
+  also non-listen semantic-judge inputs:
+  `semantic_judge_input=true`, `delivery_status=pending_semantic_judge`,
+  `delivery_allowed=false`, and
+  `presentation_status=semantic_judge_input_not_for_listen_pack`.
 - Groups manifests by `track_id`.
 - For each legacy track, writes:
   - `stem_semantic_judge/no_reference_stem_semantic_judge.jsonl`
@@ -53,10 +60,10 @@ release-ready gate.
 
 ## Short Pack Run
 
-Use this after creating a semantic review pack. The output `review/review.json`
-is the machine-readable semantic review artifact consumed by the listen coverage
-scorecard. Unsupported stems are reported as blockers; they are not silently
-accepted.
+Use this after creating a semantic review pack. The input pack is not a
+listen/result artifact; the output `review/review.json` is the machine-readable
+semantic review artifact consumed by the listen coverage scorecard. Unsupported
+stems are reported as blockers; they are not silently accepted.
 
 ```bash
 docker compose run --rm --no-deps ml-worker python tools/run_no_reference_stem_semantic_batch.py \

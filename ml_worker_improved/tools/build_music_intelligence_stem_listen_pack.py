@@ -27,6 +27,8 @@ REVIEW_NAME = "review.json"
 ROWS_NAME = "rows.jsonl"
 SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
+REVIEW_QUEUE_DELIVERY_STATUS = "semantic_review_pending"
+REVIEW_QUEUE_PRESENTATION_STATUS = "semantic_review_queue_not_for_listen_pack"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -178,9 +180,9 @@ def _copy_row(
         "semantic_review_required": True,
         "semantic_quality_verified": False,
         "review_status": "semantic_review_pending",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
+        "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS,
         "release_status": "listen_preview_only",
         "release_ready": False,
         "can_publish_as_result": False,
@@ -373,20 +375,21 @@ def build_music_intelligence_stem_listen_pack(
     if not selected:
         failed_checks.append("listen_audio_missing")
     failed_checks = sorted(set(failed_checks))
-    accepted = bool(selected) and not failed_checks
+    review_queue_ready = bool(selected) and not failed_checks
     stem_counts: dict[str, int] = {}
     for item in selected:
         stem_counts[item["stem_type"]] = stem_counts.get(item["stem_type"], 0) + 1
     manifest = {
         "schema": "music_intelligence_stem_listen_pack_manifest.v1",
-        "delivery_status": "accepted" if accepted else "blocked",
-        "delivery_allowed": accepted,
-        "presentation_status": "accepted_for_listen_pack" if accepted else "blocked_hard_case",
+        "delivery_status": REVIEW_QUEUE_DELIVERY_STATUS if review_queue_ready else "blocked",
+        "delivery_allowed": False,
+        "presentation_status": REVIEW_QUEUE_PRESENTATION_STATUS if review_queue_ready else "blocked_hard_case",
         "release_status": "listen_preview_only",
         "release_ready": False,
         "can_publish_as_result": False,
-        "listenable": accepted,
+        "listenable": False,
         "deliverable": False,
+        "review_queue_ready": review_queue_ready,
         "failed_checks": failed_checks,
         "music_intelligence_manifests": [str(path) for path in music_intelligence_manifests],
         "input_pack_jsons": [str(path) for path in aggregate_pack_manifests],
@@ -401,8 +404,8 @@ def build_music_intelligence_stem_listen_pack(
         "track_count": len(seen_by_track),
         "track_aliases": [{"track_alias": alias, "source_track_id": track} for track, alias in sorted(aliases_by_track.items(), key=lambda item: item[1])],
         "stem_counts": stem_counts,
-        "listen_audio_count": len(selected) if accepted else 0,
-        "listen_audio_files": selected if accepted else [],
+        "listen_audio_count": len(selected) if review_queue_ready else 0,
+        "listen_audio_files": selected if review_queue_ready else [],
         "semantic_review_required": True,
         "semantic_quality_verified": False,
         "review_status": "semantic_review_pending",
@@ -428,6 +431,7 @@ def build_music_intelligence_stem_listen_pack(
             "only_accepted_analysis_allowed_stems_packaged": True,
             "aggregate_pack_rows_are_listen_review_inputs_only": True,
             "audio_copied_without_modification": True,
+            "semantic_review_queue_not_listen_result": True,
             "semantic_review_required": True,
             "semantic_quality_verified": False,
             "release_ready_forced_false": True,
@@ -443,8 +447,8 @@ def build_music_intelligence_stem_listen_pack(
         music_intelligence_manifests=music_intelligence_manifests,
         aggregate_pack_manifests=aggregate_pack_manifests,
     )
-    write_jsonl(output_dir / SELECTED_NAME, selected if accepted else [])
-    write_jsonl(output_dir / ROWS_NAME, _review_rows(selected if accepted else []))
+    write_jsonl(output_dir / SELECTED_NAME, selected if review_queue_ready else [])
+    write_jsonl(output_dir / ROWS_NAME, _review_rows(selected if review_queue_ready else []))
     write_json(output_dir / REVIEW_NAME, review)
     (output_dir / SUMMARY_NAME).write_text(_summary_text(review), encoding="utf-8")
     write_json(output_dir / MANIFEST_NAME, manifest)
@@ -474,7 +478,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         command_args=list(argv if argv is not None else sys.argv[1:]),
     )
     print(json.dumps({"manifest_path": str(args.output_dir / MANIFEST_NAME), "delivery_status": manifest["delivery_status"], "listen_audio_count": manifest["listen_audio_count"]}, sort_keys=True))
-    return 0 if manifest["delivery_allowed"] else 2
+    return 0 if manifest.get("review_queue_ready") is True else 2
 
 
 if __name__ == "__main__":

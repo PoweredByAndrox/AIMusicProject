@@ -18,6 +18,11 @@ from tools.build_no_reference_stem_candidate_score_matrix import (  # noqa: E402
     build_stem_candidate_score_matrix,
     write_outputs as write_matrix_outputs,
 )
+from tools.artifact_status_contract import (  # noqa: E402
+    SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS,
+    SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS,
+    SEMANTIC_JUDGE_INPUT_RELEASE_STATUS,
+)
 from tools.run_no_reference_stem_semantic_judge import (  # noqa: E402
     SAFETY_FLAGS,
     run_stem_semantic_judge,
@@ -40,6 +45,8 @@ SHORT_MATRIX_SUMMARY_NAME = "summary.md"
 REVIEW_JSON_NAME = "review.json"
 REVIEW_ROWS_NAME = "rows.jsonl"
 REVIEW_SUMMARY_NAME = "summary.md"
+REVIEW_QUEUE_DELIVERY_STATUS = "semantic_review_pending"
+REVIEW_QUEUE_PRESENTATION_STATUS = "semantic_review_queue_not_for_listen_pack"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -125,21 +132,47 @@ def pack_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def validate_input_pack(payload: dict[str, Any]) -> list[str]:
     failed: list[str] = []
-    if payload.get("schema") not in {
+    schema = str(payload.get("schema") or "")
+    if schema not in {
         "music_intelligence_stem_listen_pack_manifest.v1",
         "aggregate_short_listen_pack_manifest.v1",
     }:
         failed.append("input_pack_schema_unexpected")
-    if payload.get("delivery_status") != "accepted":
-        failed.append("input_pack_delivery_status_not_accepted")
-    if payload.get("delivery_allowed") is not True:
-        failed.append("input_pack_delivery_allowed_not_true")
+    elif schema == "music_intelligence_stem_listen_pack_manifest.v1":
+        if payload.get("review_queue_ready") is not True:
+            failed.append("input_pack_review_queue_not_ready")
+        if payload.get("delivery_status") != REVIEW_QUEUE_DELIVERY_STATUS:
+            failed.append("input_pack_delivery_status_not_semantic_review_pending")
+        if payload.get("delivery_allowed") is not False:
+            failed.append("input_pack_delivery_allowed_not_false")
+        if payload.get("presentation_status") != REVIEW_QUEUE_PRESENTATION_STATUS:
+            failed.append("input_pack_presentation_status_not_review_queue")
+        if payload.get("listenable") is not False:
+            failed.append("input_pack_listenable_not_false")
+    elif schema == "aggregate_short_listen_pack_manifest.v1":
+        if payload.get("delivery_status") != "accepted":
+            failed.append("input_pack_delivery_status_not_accepted")
+        if payload.get("delivery_allowed") is not True:
+            failed.append("input_pack_delivery_allowed_not_true")
+        if payload.get("presentation_status") != "accepted_for_listen_pack":
+            failed.append("input_pack_presentation_status_not_accepted_for_listen_pack")
     if payload.get("release_ready") is True:
         failed.append("input_pack_release_ready_true")
     if payload.get("can_publish_as_result") is True:
         failed.append("input_pack_can_publish_as_result_true")
     if payload.get("failed_checks") not in ([], None):
         failed.append("input_pack_failed_checks_not_empty")
+    return failed
+
+
+def validate_music_intelligence_queue_row(row: dict[str, Any]) -> list[str]:
+    failed: list[str] = []
+    if row.get("delivery_status") != REVIEW_QUEUE_DELIVERY_STATUS:
+        failed.append("input_pack_item_delivery_status_not_semantic_review_pending")
+    if row.get("delivery_allowed") is not False:
+        failed.append("input_pack_item_delivery_allowed_not_false")
+    if row.get("presentation_status") != REVIEW_QUEUE_PRESENTATION_STATUS:
+        failed.append("input_pack_item_presentation_status_not_review_queue")
     return failed
 
 
@@ -276,10 +309,11 @@ def materialized_manifest_payload(
     stem_type = str(row.get("stem_type") or "unknown")
     payload = {
         "manifest_type": "no_reference_stem_listen_preview",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
-        "release_status": "listen_preview_only",
+        "delivery_status": SEMANTIC_JUDGE_INPUT_DELIVERY_STATUS,
+        "delivery_allowed": False,
+        "presentation_status": SEMANTIC_JUDGE_INPUT_PRESENTATION_STATUS,
+        "release_status": SEMANTIC_JUDGE_INPUT_RELEASE_STATUS,
+        "semantic_judge_input": True,
         "stem_type": stem_type,
         "track_id": track_alias,
         "source_track_id": str(row.get("source_track_id") or row.get("track_id") or ""),
@@ -308,6 +342,7 @@ def materialized_manifest_payload(
         "upstream_source_manifest": str(row.get("upstream_source_manifest") or ""),
         "source_pack_audio_path": str(row.get("artifact_relative_path") or row.get("audio_path") or ""),
         "semantic_quality_verified": False,
+        "listenable": False,
         "release_ready": False,
         "can_mark_release_ready": False,
         "can_publish_as_release": False,
@@ -338,6 +373,11 @@ def materialize_input_pack_manifests(input_pack_jsons: Sequence[Path], output_ro
             continue
         mode_specific_rows = mode_specific_candidate_rows(payload, pack_path)
         for row in pack_rows(payload):
+            if payload.get("schema") == "music_intelligence_stem_listen_pack_manifest.v1":
+                row_failed = validate_music_intelligence_queue_row(row)
+                failed.extend(row_failed)
+                if row_failed:
+                    continue
             if row.get("release_ready") is True:
                 failed.append("input_pack_item_release_ready_true")
                 continue
