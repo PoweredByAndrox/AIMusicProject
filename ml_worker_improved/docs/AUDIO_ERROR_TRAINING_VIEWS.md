@@ -38,6 +38,15 @@ Outputs:
 `minus_critic` and `vocal_critic` labels come only from exact windowed judge
 evidence. They do not require `pair_compatibility_status`.
 
+`safe_rows` counts rows that are safe to keep in the view for either training or
+score-only audit. `training_safe_rows`, `training_positive_labels`, and
+`training_negative_labels` count only strict supervised labels. For
+`minus_critic`, strict labels must use `label_source=minus_windowed_judge.jsonl`;
+for `vocal_critic`, strict labels must use
+`label_source=vocal_windowed_judge.jsonl`. No-reference rows remain safe
+score-only evidence and are counted in `score_only_safe_rows`, but they do not
+open `can_train`.
+
 `pair_critic` requires proven pair compatibility evidence.
 
 `overall_accept` requires selected-candidate evidence plus exact pair
@@ -93,7 +102,9 @@ blocker labels and delivery status remain provenance, not prediction features.
 Target
 critic scoring can use these rows because `score_target_audio_error_views.py`
 loads score-only rows, while strict target critic training still excludes them
-because their label source is not `minus_windowed_judge.jsonl`.
+because their label source is not `minus_windowed_judge.jsonl`. Manifest-level
+`can_train_*` flags use only strict training counts; RALPH-only batches can be
+large and safe for score-only audit while still reporting `can_train=false`.
 
 This route does not create pair or overall labels. Even when a selector file is
 present, accepted listen-preview rows carry `target_views=["minus_critic"]`, so

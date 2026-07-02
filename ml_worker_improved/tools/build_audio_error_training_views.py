@@ -56,6 +56,10 @@ VIEW_READINESS_RULES = {
     "pair_critic": {"min_safe": 50, "min_positive": 1, "min_negative": 1},
     "overall_accept": {"min_safe": 100, "min_positive": 1, "min_negative": 1},
 }
+STRICT_TRAINING_LABEL_SOURCES = {
+    "minus_critic": {"minus_windowed_judge.jsonl"},
+    "vocal_critic": {"vocal_windowed_judge.jsonl"},
+}
 RUN_MARKER_FILES = ("candidate_pool.jsonl", "minus_windowed_judge.jsonl", "vocal_windowed_judge.jsonl")
 ACCEPTED_PREVIEW_MINUS_JUDGE_FILE = "no_reference_minus_windowed_judge.jsonl"
 ACOUSTIC_SCALAR_FEATURE_COLUMNS = tuple(name for name in SCALAR_FEATURE_COLUMNS if not name.startswith("window_"))
@@ -1311,24 +1315,42 @@ def readiness_blockers(view_name: str, safe_rows: Sequence[dict[str, Any]]) -> l
     return blockers
 
 
+def trainable_safe_rows(view_name: str, safe_rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    strict_sources = STRICT_TRAINING_LABEL_SOURCES.get(view_name)
+    if strict_sources is None:
+        return list(safe_rows)
+    return [
+        row
+        for row in safe_rows
+        if Path(str(row.get("label_source") or "")).name in strict_sources
+    ]
+
+
 def summarize_view(view_name: str, rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     safe_rows = [row for row in rows if row.get("safe_for_this_view") is True]
     unsafe_rows = [row for row in rows if row.get("safe_for_this_view") is not True]
+    training_rows = trainable_safe_rows(view_name, safe_rows)
     positives = sum(1 for row in safe_rows if row.get("label") == 1)
     negatives = sum(1 for row in safe_rows if row.get("label") == 0)
+    training_positives = sum(1 for row in training_rows if row.get("label") == 1)
+    training_negatives = sum(1 for row in training_rows if row.get("label") == 0)
     reasons = Counter(
         reason
         for row in unsafe_rows
         for reason in str(row.get("unsafe_reason_for_this_view") or "").split(";")
         if reason
     )
-    blockers = readiness_blockers(view_name, safe_rows)
+    blockers = readiness_blockers(view_name, training_rows)
     return {
         "rows_total": len(rows),
         "safe_rows": len(safe_rows),
         "unsafe_rows": len(unsafe_rows),
+        "training_safe_rows": len(training_rows),
+        "score_only_safe_rows": len(safe_rows) - len(training_rows),
         "positive_labels": positives,
         "negative_labels": negatives,
+        "training_positive_labels": training_positives,
+        "training_negative_labels": training_negatives,
         "unsafe_reason_counts": dict(sorted(reasons.items())),
         "readiness_blockers": blockers,
         "can_train": not blockers,
@@ -1358,8 +1380,12 @@ def write_summary(path: Path, manifest: dict[str, Any]) -> None:
                 f"- rows_total: {view['rows_total']}",
                 f"- safe_rows: {view['safe_rows']}",
                 f"- unsafe_rows: {view['unsafe_rows']}",
+                f"- training_safe_rows: {view['training_safe_rows']}",
+                f"- score_only_safe_rows: {view['score_only_safe_rows']}",
                 f"- positive_labels: {view['positive_labels']}",
                 f"- negative_labels: {view['negative_labels']}",
+                f"- training_positive_labels: {view['training_positive_labels']}",
+                f"- training_negative_labels: {view['training_negative_labels']}",
                 f"- can_train: {str(view['can_train']).lower()}",
                 f"- readiness_blockers: `{json.dumps(view['readiness_blockers'], sort_keys=True)}`",
                 "",
@@ -1447,8 +1473,9 @@ def build_audio_error_training_views(
             "unsafe_count_after": repair_report.get("unsafe_count_after"),
         },
         "views": view_summaries,
-        "strict_negative_rows_found": sum(view["negative_labels"] for view in view_summaries.values()),
-        "strict_positive_rows_found": sum(view["positive_labels"] for view in view_summaries.values()),
+        "strict_negative_rows_found": sum(view["training_negative_labels"] for view in view_summaries.values()),
+        "strict_positive_rows_found": sum(view["training_positive_labels"] for view in view_summaries.values()),
+        "score_only_rows_found": sum(view["score_only_safe_rows"] for view in view_summaries.values()),
         "can_train_minus_critic": view_summaries["minus_critic"]["can_train"],
         "can_train_vocal_critic": view_summaries["vocal_critic"]["can_train"],
         "can_train_pair_critic": view_summaries["pair_critic"]["can_train"],

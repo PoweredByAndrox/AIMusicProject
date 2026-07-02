@@ -46,6 +46,13 @@ they may be scored by an already trained shadow critic to localize current
 candidate windows, but they do not train the critic because they are not exact
 target windowed judge labels.
 
+The training-view manifest mirrors that split: `positive_labels` and
+`negative_labels` include all safe rows in the view, while
+`training_positive_labels`, `training_negative_labels`, and
+`training_safe_rows` count only strict rows that the trainer can load.
+`can_train_minus_critic` and `can_train_vocal_critic` are based on those strict
+training counts, not on score-only rows.
+
 RALPH minus improvement hardcase rows imported through
 `build_audio_error_training_views.py --ralph-manifests` use the same score-only
 label source. They preserve RALPH residual/detail-drift provenance for shadow

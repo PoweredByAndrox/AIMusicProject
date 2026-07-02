@@ -88,6 +88,30 @@ def test_validator_marks_minus_trainable_only_when_both_classes_exist(tmp_path: 
     assert result["can_train_minus_critic"] is True
     assert result["views"]["minus_critic"]["positive_labels"] == 80
     assert result["views"]["minus_critic"]["negative_labels"] == 20
+    assert result["views"]["minus_critic"]["training_positive_labels"] == 80
+    assert result["views"]["minus_critic"]["training_negative_labels"] == 20
+
+
+def test_validator_keeps_no_reference_rows_score_only(tmp_path: Path) -> None:
+    from tools.validate_audio_error_training_views import validate_audio_error_training_views
+
+    rows = [base_view_row(index, label=1) for index in range(80)]
+    rows.extend(base_view_row(index + 80, label=0) for index in range(20))
+    for row in rows:
+        row["label_source"] = "no_reference_minus_windowed_judge.jsonl"
+        row["provenance_source_files"] = ["no_reference_minus_windowed_judge.jsonl"]
+    write_views(tmp_path / "views", {"minus_critic": rows})
+
+    result = validate_audio_error_training_views(tmp_path / "views")
+
+    assert result["ok"] is True
+    assert result["views"]["minus_critic"]["positive_labels"] == 80
+    assert result["views"]["minus_critic"]["negative_labels"] == 20
+    assert result["views"]["minus_critic"]["training_positive_labels"] == 0
+    assert result["views"]["minus_critic"]["training_negative_labels"] == 0
+    assert result["views"]["minus_critic"]["score_only_safe_rows"] == 100
+    assert result["can_train_minus_critic"] is False
+    assert "safe_rows_below_minimum" in result["views"]["minus_critic"]["readiness_blockers"]
 
 
 def test_validator_rejects_release_ready_true(tmp_path: Path) -> None:

@@ -866,6 +866,12 @@ def test_ralph_manifests_add_minus_score_only_hardcase_rows(tmp_path: Path) -> N
     score_rows = load_target_rows(output_dir, "minus", include_score_only_rows=True)["usable_rows"]
 
     assert manifest["ralph_manifest_rows_added"] == 2
+    assert manifest["can_train_minus_critic"] is False
+    assert manifest["views"]["minus_critic"]["training_safe_rows"] == 0
+    assert manifest["views"]["minus_critic"]["score_only_safe_rows"] == 2
+    assert manifest["views"]["minus_critic"]["training_positive_labels"] == 0
+    assert manifest["views"]["minus_critic"]["training_negative_labels"] == 0
+    assert "safe_rows_below_minimum" in manifest["views"]["minus_critic"]["readiness_blockers"]
     assert [row["label"] for row in minus_rows] == [0, 1]
     assert strict_rows == []
     assert len(score_rows) == 2

@@ -18,6 +18,7 @@ from tools.build_audio_error_training_views import (  # noqa: E402
     VIEW_FILES,
     VIEW_READINESS_RULES,
     readiness_blockers,
+    trainable_safe_rows,
 )
 
 
@@ -136,21 +137,28 @@ def validate_unsafe_row(row: dict[str, Any], row_key: str, errors: list[str]) ->
 def summarize_view(view_name: str, rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     safe_rows = [row for row in rows if row.get("safe_for_this_view") is True]
     unsafe_rows = [row for row in rows if row.get("safe_for_this_view") is not True]
+    training_rows = trainable_safe_rows(view_name, safe_rows)
     positives = sum(1 for row in safe_rows if row.get("label") == 1)
     negatives = sum(1 for row in safe_rows if row.get("label") == 0)
+    training_positives = sum(1 for row in training_rows if row.get("label") == 1)
+    training_negatives = sum(1 for row in training_rows if row.get("label") == 0)
     reasons = Counter(
         reason
         for row in unsafe_rows
         for reason in str(row.get("unsafe_reason_for_this_view") or "").split(";")
         if reason
     )
-    blockers = readiness_blockers(view_name, safe_rows)
+    blockers = readiness_blockers(view_name, training_rows)
     return {
         "rows_total": len(rows),
         "safe_rows": len(safe_rows),
         "unsafe_rows": len(unsafe_rows),
+        "training_safe_rows": len(training_rows),
+        "score_only_safe_rows": len(safe_rows) - len(training_rows),
         "positive_labels": positives,
         "negative_labels": negatives,
+        "training_positive_labels": training_positives,
+        "training_negative_labels": training_negatives,
         "unsafe_reason_counts": dict(sorted(reasons.items())),
         "readiness_blockers": blockers,
         "can_train": not blockers,
