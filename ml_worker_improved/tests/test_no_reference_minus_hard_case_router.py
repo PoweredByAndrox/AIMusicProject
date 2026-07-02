@@ -266,6 +266,108 @@ def test_router_derives_pitch_stall_from_candidate_pool_metrics(tmp_path: Path) 
     assert result["release_ready"] is False
 
 
+def test_router_detects_trained_adapter_still_full_region_blocked(tmp_path: Path) -> None:
+    run_dir = make_hard_case_run(tmp_path, blockers=[])
+    write_json(
+        run_dir / "run_manifest.json",
+        {
+            "run_id": "trained-adapter-run",
+            "status": "trained_adapter_improved_still_blocked",
+            "failure_reason": "trained_adapter_improved_still_blocked",
+            "release_ready": False,
+        },
+    )
+
+    result = run_minus_hard_case_router(
+        run_dir=run_dir,
+        output_jsonl=run_dir / "minus_hard_case_router.jsonl",
+        summary_md=run_dir / "minus_hard_case_router_summary.md",
+        registry_configs=[unit_config("minus-focused")],
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "minus_hard_case_router.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    blocker_row = next(row for row in rows if row["blocker_type"] == "trained_adapter_full_region_still_blocked")
+    assert blocker_row["recommended_route"] == "train_separator_attribution_objective"
+    assert result["recommended_route"] == "train_separator_attribution_objective"
+    assert result["can_run_without_new_models"] is False
+    assert result["release_ready"] is False
+
+
+def test_router_detects_model_gap_manifest_requires_training_objective(tmp_path: Path) -> None:
+    run_dir = make_hard_case_run(tmp_path, blockers=[])
+    write_json(
+        run_dir / "run_manifest.json",
+        {
+            "schema": "mac_melband_pitch_refiner_model_gap.v1",
+            "artifact_id": "mel-gap-run",
+            "status": "model_gap_requires_separator_training_objective",
+            "delivery_allowed": False,
+            "release_ready": False,
+        },
+    )
+
+    result = run_minus_hard_case_router(
+        run_dir=run_dir,
+        output_jsonl=run_dir / "minus_hard_case_router.jsonl",
+        summary_md=run_dir / "minus_hard_case_router_summary.md",
+        registry_configs=[unit_config("minus-focused")],
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "minus_hard_case_router.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    blocker_row = next(row for row in rows if row["blocker_type"] == "model_gap_requires_separator_training_objective")
+    assert blocker_row["recommended_route"] == "train_separator_attribution_objective"
+    assert result["recommended_route"] == "train_separator_attribution_objective"
+    assert result["can_run_without_new_models"] is False
+    assert result["release_ready"] is False
+
+
+def test_router_prioritizes_artifact_safe_route_for_damage_regression(tmp_path: Path) -> None:
+    run_dir = make_hard_case_run(tmp_path, blockers=[])
+    write_jsonl(
+        run_dir / "minus_windowed_judge.jsonl",
+        [
+            {
+                "track_id": "track-002",
+                "candidate_id": "pair-a",
+                "candidate_config_id": "local_registered__htdemucs_ft__both__shared",
+                "candidate_family": "balanced_pair_default",
+                "minus_decision": "blocked_hard_case",
+                "damage_regression_rows": 2,
+            }
+        ],
+    )
+
+    result = run_minus_hard_case_router(
+        run_dir=run_dir,
+        output_jsonl=run_dir / "minus_hard_case_router.jsonl",
+        summary_md=run_dir / "minus_hard_case_router_summary.md",
+        registry_configs=[
+            unit_config("minus-focused"),
+            unit_config(
+                "artifact-safe",
+                family="artifact_safe_existing_model",
+                routes=("generate_artifact_safe_variants",),
+            ),
+        ],
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "minus_hard_case_router.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    blocker_row = next(row for row in rows if row["blocker_type"] == "pitch_guard_damage_regression")
+    assert blocker_row["recommended_route"] == "generate_artifact_safe_variants"
+    assert result["recommended_route"] == "generate_artifact_safe_variants"
+    assert result["available_route_configs"] == ["artifact-safe"]
+    assert result["release_ready"] is False
+
+
 def test_router_reports_unsupported_route_unavailable(tmp_path: Path) -> None:
     run_dir = make_hard_case_run(tmp_path, blockers=["severe_phase_collapse"])
 

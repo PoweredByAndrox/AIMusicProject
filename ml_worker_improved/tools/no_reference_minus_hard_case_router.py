@@ -41,6 +41,9 @@ SAFETY_FLAGS = {
 BLOCKER_ROUTE = {
     "pitch_guard_full_region_stalled": "train_separator_attribution_objective",
     "scalar_score_only_pitch_guard_progress": "train_separator_attribution_objective",
+    "trained_adapter_full_region_still_blocked": "train_separator_attribution_objective",
+    "model_gap_requires_separator_training_objective": "train_separator_attribution_objective",
+    "pitch_guard_damage_regression": "generate_artifact_safe_variants",
     "severe_phase_collapse": "generate_phase_safe_variants",
     "severe_phase_comb_filtering": "generate_phase_safe_variants",
     "severe_vocal_bleed_in_minus": "generate_minus_focused_variants",
@@ -52,8 +55,8 @@ BLOCKER_ROUTE = {
 ROUTE_PRIORITY = (
     "train_separator_attribution_objective",
     "generate_phase_safe_variants",
-    "generate_minus_focused_variants",
     "generate_artifact_safe_variants",
+    "generate_minus_focused_variants",
     "segment_blend_needed",
     "blocked_hard_case",
 )
@@ -162,6 +165,54 @@ def pitch_guard_stall_blocker(row: dict[str, Any]) -> str | None:
     return "pitch_guard_full_region_stalled"
 
 
+def damage_regression_blocker(row: dict[str, Any]) -> str | None:
+    if row.get("damage_regressed") is True or row.get("damage_regression") is True:
+        return "pitch_guard_damage_regression"
+    regression_rows = _first_number(
+        row,
+        (
+            "damage_regression_rows",
+            "damage_regressed_rows",
+            "damage_regression_count",
+            "instrumental_damage_regression_rows",
+        ),
+    )
+    if regression_rows is not None and regression_rows > 0:
+        return "pitch_guard_damage_regression"
+    return None
+
+
+def blockers_from_manifest(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    blockers: list[tuple[str, str]] = []
+    values: list[Any] = []
+    for key in (
+        "status",
+        "failure_reason",
+        "dominant_failure_reason",
+        "dominant_failure_class",
+        "model_gap_status",
+    ):
+        if manifest.get(key):
+            values.append(manifest[key])
+    for key in ("safety_blockers", "failure_labels", "issue_labels", "blockers"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            values.extend(value)
+        elif isinstance(value, dict):
+            values.extend(value.keys())
+        elif value:
+            values.append(value)
+    if str(manifest.get("schema") or "") == "mac_melband_pitch_refiner_model_gap.v1":
+        values.append("model_gap_requires_separator_training_objective")
+    for value in values:
+        text = str(value)
+        if text == "trained_adapter_improved_still_blocked":
+            blockers.append(("trained_adapter_full_region_still_blocked", ""))
+        elif text in BLOCKER_ROUTE:
+            blockers.append((text, ""))
+    return blockers
+
+
 def blockers_from_minus_rows(rows: Iterable[dict[str, Any]]) -> list[tuple[str, str]]:
     blockers: list[tuple[str, str]] = []
     for row in rows:
@@ -185,6 +236,9 @@ def blockers_from_minus_rows(rows: Iterable[dict[str, Any]]) -> list[tuple[str, 
         stall_blocker = pitch_guard_stall_blocker(row)
         if stall_blocker is not None:
             blockers.append((stall_blocker, candidate_id))
+        regression_blocker = damage_regression_blocker(row)
+        if regression_blocker is not None:
+            blockers.append((regression_blocker, candidate_id))
     return blockers
 
 
@@ -220,7 +274,7 @@ def build_rows(
     candidate_rows = read_jsonl(run_dir / "candidate_pool.jsonl")
     minus_count = candidate_minus_count(candidate_rows)
     minus_families = candidate_minus_families(candidate_rows)
-    detected = blockers_from_minus_rows(candidate_rows + minus_rows)
+    detected = blockers_from_manifest(manifest) + blockers_from_minus_rows(candidate_rows + minus_rows)
     if str(manifest.get("failure_reason") or "") == "missing_safe_mode_candidate" or "missing_safe_mode_candidate" in set(manifest.get("safety_blockers") or []):
         detected.append(("missing_safe_mode_candidate", ""))
     if minus_count > 0 and len(minus_families) <= 1:

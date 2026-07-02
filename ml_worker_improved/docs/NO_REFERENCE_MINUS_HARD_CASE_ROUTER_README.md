@@ -48,6 +48,9 @@ Each JSONL row records:
 - `severe_phase_comb_filtering`
 - `pitch_guard_full_region_stalled`
 - `scalar_score_only_pitch_guard_progress`
+- `trained_adapter_full_region_still_blocked`
+- `model_gap_requires_separator_training_objective`
+- `pitch_guard_damage_regression`
 - `missing_safe_mode_candidate`
 - `only_one_minus_family`
 - `low_minus_candidate_diversity`
@@ -68,8 +71,14 @@ instead of faking a candidate.
 
 `train_separator_attribution_objective` is a diagnostic planning route for
 cases where pitch-guard evidence shows scalar-score improvement but the full
-failing region count stays blocked. It does not start training, publish audio,
-or bypass the normal `release_ready=false` safety contract.
+failing region count stays blocked, trained adapter runs still leave all
+regions blocked, or a Mac model-gap manifest explicitly requires a separator
+training objective. It does not start training, publish audio, or bypass the
+normal `release_ready=false` safety contract.
+
+`generate_artifact_safe_variants` is preferred over minus-focused expansion
+when guard rows report damage regression, because a louder or more aggressive
+minus route is not useful if it clears leakage by damaging the instrumental.
 
 The router can derive these pitch-guard blockers from `candidate_pool.jsonl` or
 `minus_windowed_judge.jsonl` row metrics even when an upstream writer has not
@@ -77,6 +86,12 @@ emitted an explicit blocker string. If before/after pitch-guard region counts
 are equal and non-zero, the row is treated as `pitch_guard_full_region_stalled`;
 if the best scalar score also decreased, it is treated as
 `scalar_score_only_pitch_guard_progress`.
+Rows with `damage_regressed=true` or positive `damage_regression_rows` are
+treated as `pitch_guard_damage_regression`. Run manifests with
+`status=trained_adapter_improved_still_blocked` are normalized to
+`trained_adapter_full_region_still_blocked`; manifests with
+`schema=mac_melband_pitch_refiner_model_gap.v1` are normalized to
+`model_gap_requires_separator_training_objective`.
 
 ## CLI
 
