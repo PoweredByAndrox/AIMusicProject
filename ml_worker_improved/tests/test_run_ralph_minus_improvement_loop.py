@@ -47,6 +47,36 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
             recipes["actual_masked_residue_guarded"].output_artifact_key,
             "minus_actual_masked_residue_flac",
         )
+        self.assertNotIn("focus_window_guarded", recipes)
+
+    def test_focus_recipe_is_added_only_when_focus_windows_exist(self) -> None:
+        module = _load_module()
+
+        no_focus = {
+            recipe.name
+            for recipe in module.default_candidate_recipes(
+                focus_windows_jsonl="focus.jsonl",
+                focus_window_count=0,
+            )
+        }
+        with_focus = {
+            recipe.name: recipe
+            for recipe in module.default_candidate_recipes(
+                focus_windows_jsonl="focus.jsonl",
+                focus_track_id="track-a",
+                focus_candidate_id="cand-a",
+                max_focus_windows=4,
+                focus_window_count=2,
+            )
+        }
+
+        self.assertNotIn("focus_window_guarded", no_focus)
+        self.assertIn("focus_window_guarded", with_focus)
+        self.assertEqual(
+            with_focus["focus_window_guarded"].output_artifact_key,
+            "minus_focus_window_cleanup_flac",
+        )
+        self.assertIn("--focus-windows-jsonl", with_focus["focus_window_guarded"].arguments)
 
     def test_no_change_candidate_is_rejected_even_if_release_like(self) -> None:
         module = _load_module()

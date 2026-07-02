@@ -48,6 +48,12 @@ For hardcase debugging, pass `--focus-windows-jsonl` with scored
 it does not relax the RALPH delivery gate and is not used to mark a candidate
 accepted.
 
+When focus windows are present, the loop also adds a conservative
+`focus_window_guarded` candidate. It uses the critic-selected blocked windows as a
+generalized router input, not as per-track hardcoded timestamps. This candidate is
+still subject to the same RALPH policy; if it reduces vocal residue by creating a
+detail/RMS dip, it remains rejected and must not be promoted to a listen pack.
+
 ## Runtime
 
 Run only inside Docker:

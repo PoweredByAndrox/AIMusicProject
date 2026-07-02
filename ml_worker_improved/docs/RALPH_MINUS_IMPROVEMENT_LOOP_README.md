@@ -26,6 +26,10 @@ metrics for blocked minus windows selected by the target audio-error critic. Thi
 is diagnostic evidence only: `focus_evaluation_used_for_delivery=false`, and
 blocked/rejected candidates remain blocked.
 
+`focus_window_guarded` is enabled only when the focus JSONL resolves to at least
+one blocked window. It is a guarded candidate, not a fallback: failed focus-window
+attenuation remains diagnostic evidence and does not create a release artifact.
+
 The route keeps `produce_only_release_ready=true`: if every candidate is rejected, it writes `delivery_status=blocked`, `delivery_allowed=false`, `presentation_status=blocked_from_listen_pack`, and `release_status=blocked_for_listening`. Rejected candidates must not be promoted to a listen pack or release.
 
 For tracks without a verified reference stem bundle, this route can only provide internal proxy release-gate evidence. It does not replace an exact/reference waveform audit when the delivery contract requires one.

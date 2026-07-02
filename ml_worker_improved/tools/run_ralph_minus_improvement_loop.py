@@ -46,8 +46,15 @@ class MinusAcceptancePolicy:
     maximum_air_dip_db: float = -0.12
 
 
-def default_candidate_recipes() -> tuple[MinusCandidateRecipe, ...]:
-    return (
+def default_candidate_recipes(
+    *,
+    focus_windows_jsonl: str = "",
+    focus_track_id: str = "",
+    focus_candidate_id: str = "",
+    max_focus_windows: int = 16,
+    focus_window_count: int = 0,
+) -> tuple[MinusCandidateRecipe, ...]:
+    recipes: list[MinusCandidateRecipe] = [
         MinusCandidateRecipe(
             name="actual_masked_residue_guarded",
             tool_path=TOOLS_DIR / "apply_actual_masked_residue_minus_cleanup.py",
@@ -118,7 +125,33 @@ def default_candidate_recipes() -> tuple[MinusCandidateRecipe, ...]:
                 "0.04",
             ),
         ),
-    )
+    ]
+    if focus_windows_jsonl and focus_window_count > 0:
+        recipes.append(
+            MinusCandidateRecipe(
+                name="focus_window_guarded",
+                tool_path=TOOLS_DIR / "apply_focus_window_minus_cleanup.py",
+                output_artifact_key="minus_focus_window_cleanup_flac",
+                listen_label="02_focus_window_guarded_minus.flac",
+                arguments=(
+                    "--focus-windows-jsonl",
+                    str(focus_windows_jsonl),
+                    "--focus-track-id",
+                    str(focus_track_id or ""),
+                    "--focus-candidate-id",
+                    str(focus_candidate_id or ""),
+                    "--max-focus-windows",
+                    str(int(max_focus_windows)),
+                    "--strength",
+                    "0.025",
+                    "--mask-power",
+                    "1.35",
+                    "--smoothing-sec",
+                    "0.08",
+                ),
+            )
+        )
+    return tuple(recipes)
 
 
 def load_audio(path: Path, target_sample_rate: int | None = None) -> tuple[np.ndarray, int]:
@@ -784,7 +817,13 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
 
     policy = MinusAcceptancePolicy()
     candidate_records: list[dict[str, Any]] = []
-    recipes = default_candidate_recipes()
+    recipes = default_candidate_recipes(
+        focus_windows_jsonl=str(args.focus_windows_jsonl or ""),
+        focus_track_id=str(args.focus_track_id or ""),
+        focus_candidate_id=str(args.focus_candidate_id or ""),
+        max_focus_windows=int(args.max_focus_windows),
+        focus_window_count=len(focus_windows),
+    )
     for index, recipe in enumerate(recipes, start=1):
         emit_progress(
             progress_path,
@@ -916,6 +955,7 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         "focus_windows": focus_windows,
         "focus_base_summary": focus_base_summary,
         "focus_evaluation_used_for_delivery": False,
+        "focus_candidate_recipe_enabled": any(recipe.name == "focus_window_guarded" for recipe in recipes),
         "policy": policy.__dict__,
         "base_summary": base_summary,
         "candidates": [
