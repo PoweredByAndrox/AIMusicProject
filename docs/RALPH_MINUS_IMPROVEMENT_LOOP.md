@@ -51,6 +51,16 @@ For hardcase debugging, pass `--focus-windows-jsonl` with scored
 it does not relax the RALPH delivery gate and is not used to mark a candidate
 accepted.
 
+Eligible focus rows are ranked by hardcase risk before `--max-focus-windows` is
+applied. This prevents early low-risk rows in the JSONL from hiding later
+blocked or higher-risk low-confidence windows.
+
+To continue from a previous RALPH result, use
+`tools/build_ralph_residual_focus_windows.py` to convert the selected
+candidate's `top_vocal_residue_windows` into a fresh `focus.jsonl`. That focus
+view is generated from metric evidence in the manifest and remains
+diagnostic-only (`delivery_allowed=false`).
+
 When focus windows are present, the loop also adds a conservative
 `focus_window_guarded` candidate. It uses the critic-selected blocked windows as a
 generalized router input, not as per-track hardcoded timestamps. This candidate is

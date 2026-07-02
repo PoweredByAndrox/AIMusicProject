@@ -570,6 +570,14 @@ def _is_low_confidence_accept(
     return False
 
 
+def _focus_window_risk_key(window: dict[str, Any]) -> tuple[float, float, float, float]:
+    blocked_priority = 1.0 if window.get("focus_reason") == "blocked_or_negative" else 0.0
+    block_probability = _as_float(window.get("predicted_block_probability"), 0.0)
+    accept_probability = _as_float(window.get("predicted_accept_probability"), 1.0)
+    start_sec = _as_float(window.get("start_sec"), 0.0)
+    return (-blocked_priority, -block_probability, accept_probability, start_sec)
+
+
 def load_focus_windows(
     path: Path | None,
     *,
@@ -618,8 +626,9 @@ def load_focus_windows(
                 "true_label": row.get("true_label"),
             }
         )
-        if max_windows > 0 and len(windows) >= max_windows:
-            break
+    windows.sort(key=_focus_window_risk_key)
+    if max_windows > 0:
+        return windows[:max_windows]
     return windows
 
 

@@ -103,6 +103,58 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         self.assertIn("--focus-min-block-probability", args)
         self.assertIn("0.15", args)
 
+    def test_focus_windows_are_ranked_by_hardcase_risk_before_limit(self) -> None:
+        module = _load_module()
+        focus_jsonl = self.temp_path / "focus.jsonl"
+        rows = [
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "critic_decision": "accept_candidate",
+                "predicted_accept_probability": 0.84,
+                "predicted_block_probability": 0.16,
+                "true_label": 1,
+                "window_start_sec": 0.0,
+                "window_end_sec": 6.0,
+            },
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "critic_decision": "accept_candidate",
+                "predicted_accept_probability": 0.78,
+                "predicted_block_probability": 0.22,
+                "true_label": 1,
+                "window_start_sec": 100.0,
+                "window_end_sec": 106.0,
+            },
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "critic_decision": "blocked_hard_case",
+                "predicted_accept_probability": 0.20,
+                "predicted_block_probability": 0.91,
+                "window_start_sec": 50.0,
+                "window_end_sec": 56.0,
+            },
+        ]
+        focus_jsonl.write_text(
+            "\n".join(json.dumps(row, sort_keys=True) for row in rows),
+            encoding="utf-8",
+        )
+
+        windows = module.load_focus_windows(
+            focus_jsonl,
+            track_id="track-a",
+            candidate_id="cand-a",
+            max_windows=2,
+            include_low_confidence_accepts=True,
+            max_accept_probability=0.85,
+            min_block_probability=0.0,
+        )
+
+        self.assertEqual([window["start_sec"] for window in windows], [50.0, 100.0])
+        self.assertEqual([window["focus_reason"] for window in windows], ["blocked_or_negative", "low_confidence_accept"])
+
     def test_no_change_candidate_is_rejected_even_if_release_like(self) -> None:
         module = _load_module()
 
