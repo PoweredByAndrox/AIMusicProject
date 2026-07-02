@@ -28,6 +28,10 @@ human CSV.
 - `--score-mode vocal|minus|both` controls the decision matrix. Vocal and minus
   modes evaluate one stem independently; `both` is for pair compatibility, not
   default optimizer selection.
+- In `--score-mode minus`, input rows may provide `vocal_companion_path` instead
+  of `vocal_path` when the vocal-side audio is only a residual/source-conservation
+  companion from an instrumental route. The judge uses it as analysis input but
+  preserves it separately in output; it is not promoted to `selected_vocal_path`.
 - In `both` mode, the top-level `decision` follows the pair compatibility gate.
   A blocked pair remains `blocked_hard_case` even when the legacy shared
   `overall_no_reference_score` is high, and pair blockers are copied into

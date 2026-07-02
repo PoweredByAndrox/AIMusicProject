@@ -38,15 +38,57 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def manifest_stem_paths(manifest: dict[str, Any]) -> dict[str, str]:
+def manifest_stem_entries(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     stems = manifest.get("stems")
     if not isinstance(stems, dict):
         return {}
-    paths: dict[str, str] = {}
+    entries: dict[str, dict[str, Any]] = {}
     for stem, value in stems.items():
         if isinstance(value, dict) and value.get("path"):
-            paths[str(stem)] = str(value["path"])
-    return paths
+            entries[str(stem)] = dict(value)
+            entries[str(stem)]["path"] = str(value["path"])
+    return entries
+
+
+def manifest_stem_paths(manifest: dict[str, Any]) -> dict[str, str]:
+    return {stem: str(entry["path"]) for stem, entry in manifest_stem_entries(manifest).items()}
+
+
+def explicit_stem_entry(manifest: dict[str, Any], names: Sequence[str]) -> dict[str, Any]:
+    entries = manifest_stem_entries(manifest)
+    for name in names:
+        entry = entries.get(name)
+        if entry:
+            return entry
+    return {}
+
+
+def explicit_vocal_entry(manifest: dict[str, Any]) -> dict[str, Any]:
+    return explicit_stem_entry(manifest, ("vocals", "vocal"))
+
+
+def vocal_entry_role(*, target_stem: str, entry: dict[str, Any]) -> str:
+    if not entry:
+        return ""
+    if entry.get("residual_companion") is True:
+        return "residual_companion"
+    if target_stem in VOCAL_TARGET_STEMS:
+        return "selected_vocal_candidate"
+    return "minus_route_vocal_companion"
+
+
+def is_selected_vocal_role(role: str) -> bool:
+    return role == "selected_vocal_candidate"
+
+
+def vocal_entry_payload(*, path: str, role: str, source: str = "", model_id: str = "") -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "role": str(role),
+        "source": str(source),
+        "model_id": str(model_id),
+        "is_selected_vocal_candidate": is_selected_vocal_role(role),
+    }
 
 
 def explicit_minus_path(stem_paths: dict[str, str]) -> str:
@@ -89,27 +131,38 @@ def minus_route_id_for_candidate(candidate: dict[str, Any], model_id: str) -> st
     return model_id
 
 
-def build_vocal_companion_map(candidates: Sequence[dict[str, Any]]) -> dict[str, str]:
-    companions: dict[str, str] = {}
+def build_vocal_companion_map(candidates: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    companions: dict[str, dict[str, Any]] = {}
     for candidate in sorted(candidates, key=candidate_sort_key):
         target_stem = str(candidate.get("target_stem") or "").lower()
         track_id = str(candidate.get("track_id") or "")
         if not track_id:
             continue
         manifest_path = Path(str(candidate.get("candidate_manifest") or ""))
-        stem_paths: dict[str, str] = {}
+        vocal_entry: dict[str, Any] = {}
         if manifest_path.exists():
-            stem_paths = manifest_stem_paths(read_json(manifest_path))
-        vocal_path = explicit_vocal_path(stem_paths)
+            manifest = read_json(manifest_path)
+            vocal_entry = explicit_vocal_entry(manifest)
+        vocal_path = str(vocal_entry.get("path") or "")
         if not vocal_path and target_stem in VOCAL_TARGET_STEMS:
             vocal_path = str(candidate.get("audio_path") or "")
+            vocal_entry = {"path": vocal_path, "source": "target_audio_path", "model_output": True}
         if vocal_path:
-            companions.setdefault(track_id, vocal_path)
+            role = vocal_entry_role(target_stem=target_stem, entry=vocal_entry)
+            companions.setdefault(
+                track_id,
+                vocal_entry_payload(
+                    path=vocal_path,
+                    role=role,
+                    source=str(vocal_entry.get("source") or ""),
+                    model_id=str(candidate.get("model_id") or ""),
+                ),
+            )
     return companions
 
 
 def build_minus_row(
-    candidate: dict[str, Any], *, vocal_companions: dict[str, str] | None = None
+    candidate: dict[str, Any], *, vocal_companions: dict[str, dict[str, Any]] | None = None
 ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     target_stem = str(candidate.get("target_stem") or "").lower()
     if target_stem not in MINUS_TARGET_STEMS | VOCAL_TARGET_STEMS:
@@ -136,7 +189,18 @@ def build_minus_row(
     elif not minus_path:
         return None, None
     track_id = str(candidate.get("track_id") or "")
-    vocal_path = explicit_vocal_path(stem_paths) or (vocal_companions or {}).get(track_id, "")
+    own_vocal_entry = explicit_vocal_entry(manifest)
+    own_vocal_path = str(own_vocal_entry.get("path") or explicit_vocal_path(stem_paths))
+    if own_vocal_path:
+        vocal_info = vocal_entry_payload(
+            path=own_vocal_path,
+            role=vocal_entry_role(target_stem=target_stem, entry=own_vocal_entry),
+            source=str(own_vocal_entry.get("source") or ""),
+            model_id=str(candidate.get("model_id") or manifest.get("model_id") or manifest.get("model_name") or ""),
+        )
+    else:
+        vocal_info = dict((vocal_companions or {}).get(track_id, {}))
+    vocal_path = str(vocal_info.get("path") or "")
     if not minus_path:
         return None, {"track_id": track_id, "skip_reason": "missing_minus_path"}
     if not vocal_path:
@@ -149,8 +213,7 @@ def build_minus_row(
     source_audio_path = str(
         candidate.get("source_audio_path") or manifest.get("source_audio_path") or manifest.get("audio_path") or ""
     )
-    return (
-        {
+    row = {
             "schema": "testing_stuff_music_minus_windowed_judge_candidate_row.v1",
             "track_id": track_id,
             "candidate_id": f"{track_id}__minus__{route_id}",
@@ -159,8 +222,10 @@ def build_minus_row(
             "minus_path": minus_path,
             "instrumental_path": minus_path,
             "selected_minus_path": minus_path,
-            "vocal_path": vocal_path,
-            "selected_vocal_path": vocal_path,
+            "vocal_companion_path": vocal_path,
+            "vocal_companion_role": str(vocal_info.get("role") or ""),
+            "vocal_companion_source": str(vocal_info.get("source") or ""),
+            "vocal_companion_model_id": str(vocal_info.get("model_id") or ""),
             "stem_paths": stem_paths,
             "candidate_manifest": str(manifest_path),
             "source_manifest": str(manifest_path),
@@ -176,9 +241,12 @@ def build_minus_row(
             "release_status": "not_release_ready",
             "release_ready": False,
             "forbidden_actions": list(FORBIDDEN_ACTIONS),
-        },
-        None,
-    )
+        }
+    if vocal_info.get("is_selected_vocal_candidate") is True:
+        row["vocal_path"] = vocal_path
+        row["selected_vocal_path"] = vocal_path
+        row["vocal_path_role"] = "selected_vocal_candidate"
+    return (row, None)
 
 
 def build_minus_rows(candidates: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:

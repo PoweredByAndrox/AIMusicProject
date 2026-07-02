@@ -225,6 +225,41 @@ def test_windowed_output_preserves_candidate_route_metadata(tmp_path: Path) -> N
     assert judged["route_family"] == "demucs"
 
 
+def test_minus_mode_uses_vocal_companion_without_selected_vocal_alias(tmp_path: Path) -> None:
+    vocal = sine(440, 15.0)
+    minus = sine(120, 15.0)
+    mix = vocal + minus
+    base = candidate_row(tmp_path, candidate_id="instrumental-route", mix=mix, vocal=vocal, minus=minus)
+    row = {
+        "track_id": base["track_id"],
+        "candidate_id": base["candidate_id"],
+        "mix_path": base["mix_path"],
+        "vocal_companion_path": base["vocal_path"],
+        "vocal_companion_role": "residual_companion",
+        "vocal_companion_source": "residual_from_raw_minus_instrumental",
+        "instrumental_path": base["instrumental_path"],
+        "stem_type": "minus",
+        "selected_minus_path": base["instrumental_path"],
+    }
+
+    result = judge_candidate_rows_windowed(
+        [row],
+        cache_jsonl=tmp_path / "cache.jsonl",
+        window_seconds=6.0,
+        max_windows_per_candidate=3,
+        score_mode="minus",
+    )
+    judged = result["rows"][0]
+
+    assert judged["vocal_path"] == ""
+    assert "selected_vocal_path" not in judged
+    assert judged["vocal_companion_path"] == base["vocal_path"]
+    assert judged["vocal_analysis_path"] == base["vocal_path"]
+    assert judged["vocal_companion_role"] == "residual_companion"
+    assert judged["vocal_companion_source"] == "residual_from_raw_minus_instrumental"
+    assert judged["selected_minus_path"] == base["instrumental_path"]
+
+
 def test_streaming_output_resumes_existing_checkpoint_rows(tmp_path: Path) -> None:
     vocal = sine(440, 15.0)
     minus = sine(120, 15.0)

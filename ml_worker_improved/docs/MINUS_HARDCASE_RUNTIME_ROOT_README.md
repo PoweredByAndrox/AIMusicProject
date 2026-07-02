@@ -30,6 +30,12 @@ The bridge accepts:
 - repair manifests with embedded `candidate_row`;
 - JSONL rows with `mix_path`, `vocal_path`, and `minus_path`.
 
+For instrumental/minus routes, a `stems.vocals` entry marked
+`residual_companion=true` is preserved as `vocal_companion_path`, not
+`selected_vocal_path`. That companion is usable for minus-only diagnostic
+scoring/source-conservation analysis, but it is not a production vocal model
+result.
+
 For macOS shared-workspace runs, default rewrites normalize old Mac-local paths
 into the mounted Windows project path:
 

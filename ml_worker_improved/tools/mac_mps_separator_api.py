@@ -324,6 +324,10 @@ def _summarize_stems(run_dir: Path) -> dict[str, Any]:
             "duration_sec": info.get("duration_sec"),
             "rms": info.get("rms"),
             "peak": info.get("peak"),
+            "role": info.get("role"),
+            "source": info.get("source"),
+            "model_output": info.get("model_output"),
+            "residual_companion": info.get("residual_companion"),
         }
     return {"stem_manifest_exists": True, "stems": stems}
 

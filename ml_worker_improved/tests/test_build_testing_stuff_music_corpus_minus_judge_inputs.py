@@ -30,6 +30,7 @@ def execution_row(
     include_vocal_companion: bool = True,
     include_minus_stem: bool = True,
     target_source: str = "model_output",
+    vocal_residual_companion: bool = False,
 ) -> dict:
     audio_dir = tmp_path / track_id / target_stem / (output_subdir or model_id)
     minus_path = audio_dir / "minus.flac"
@@ -48,6 +49,14 @@ def execution_row(
         stems["instrumental"] = {"path": str(minus_path)}
     if include_vocal_companion:
         stems["vocals"] = {"path": str(vocal_path)}
+        if vocal_residual_companion:
+            stems["vocals"].update(
+                {
+                    "source": "residual_from_raw_minus_instrumental",
+                    "model_output": False,
+                    "residual_companion": True,
+                }
+            )
     target_audio_path = vocal_path if target_stem in {"vocal", "vocals"} else minus_path
     write_json(
         manifest_path,
@@ -114,8 +123,10 @@ def test_builds_minus_windowed_judge_candidate_rows_from_completed_minus_executi
     assert row["minus_path"].endswith("minus.flac")
     assert row["instrumental_path"] == row["minus_path"]
     assert row["selected_minus_path"] == row["minus_path"]
-    assert row["vocal_path"].endswith("vocals.flac")
-    assert row["selected_vocal_path"] == row["vocal_path"]
+    assert row["vocal_companion_path"].endswith("vocals.flac")
+    assert row["vocal_companion_role"] == "minus_route_vocal_companion"
+    assert "selected_vocal_path" not in row
+    assert "vocal_path" not in row
     assert row["stem_paths"]["melody"].endswith("melody.flac")
     assert row["candidate_manifest"].endswith("stem_manifest.json")
     assert row["score_mode"] == "minus"
@@ -169,6 +180,8 @@ def test_builds_minus_rows_from_vocal_instrumental_execution_manifest(tmp_path: 
     assert row["minus_path"].endswith("minus.flac")
     assert row["selected_minus_path"] == row["minus_path"]
     assert row["vocal_path"].endswith("vocals.flac")
+    assert row["selected_vocal_path"] == row["vocal_path"]
+    assert row["vocal_path_role"] == "selected_vocal_candidate"
     assert row["stem_type"] == "minus"
     assert row["score_mode"] == "minus"
     assert row["delivery_allowed"] is False
@@ -194,6 +207,7 @@ def test_pairs_minus_candidate_with_separate_vocal_companion(tmp_path: Path) -> 
     assert row["selected_minus_path"] == row["minus_path"]
     assert row["vocal_path"].endswith("vocals.flac")
     assert row["selected_vocal_path"] == row["vocal_path"]
+    assert row["vocal_path_role"] == "selected_vocal_candidate"
     assert row["minus_path"] != row["vocal_path"]
     assert row["candidate_manifest"].endswith("minus/ir_minus/stem_manifest.json")
 
@@ -213,8 +227,10 @@ def test_pairs_minus_candidate_with_all_stems_companion_manifest(tmp_path: Path)
     assert "track_a__minus__ir_minus" in candidate_ids
     ir_row = next(row for row in result["rows"] if row["candidate_id"] == "track_a__minus__ir_minus")
     assert ir_row["minus_path"].endswith("minus/ir_minus/minus.flac")
-    assert ir_row["vocal_path"].endswith("minus/htdemucs_6s/vocals.flac")
-    assert ir_row["minus_path"] != ir_row["vocal_path"]
+    assert ir_row["vocal_companion_path"].endswith("minus/htdemucs_6s/vocals.flac")
+    assert ir_row["vocal_companion_role"] == "minus_route_vocal_companion"
+    assert "selected_vocal_path" not in ir_row
+    assert ir_row["minus_path"] != ir_row["vocal_companion_path"]
     assert result["summary"]["delivery_allowed"] is False
     assert result["summary"]["release_ready"] is False
 
@@ -233,6 +249,32 @@ def test_pairs_minus_candidate_with_deterministic_vocal_companion(tmp_path: Path
 
     row = result["rows"][0]
     assert row["vocal_path"].endswith("vocal/a_vocal/vocals.flac")
+    assert row["selected_vocal_path"] == row["vocal_path"]
+
+
+def test_instrumental_residual_vocal_is_companion_not_selected_vocal(tmp_path: Path) -> None:
+    execution_jsonl = write_jsonl(
+        tmp_path / "execution.jsonl",
+        [
+            execution_row(
+                tmp_path,
+                target_stem="instrumental",
+                model_id="becruily_instrumental_vocals",
+                vocal_residual_companion=True,
+            )
+        ],
+    )
+
+    result = build_inputs(execution_results_jsonls=[execution_jsonl])
+
+    assert result["summary"]["candidate_count"] == 1
+    row = result["rows"][0]
+    assert row["minus_path"].endswith("instrumental/becruily_instrumental_vocals/minus.flac")
+    assert row["vocal_companion_path"].endswith("instrumental/becruily_instrumental_vocals/vocals.flac")
+    assert row["vocal_companion_role"] == "residual_companion"
+    assert row["vocal_companion_source"] == "residual_from_raw_minus_instrumental"
+    assert "vocal_path" not in row
+    assert "selected_vocal_path" not in row
 
 
 def test_candidate_ids_distinguish_same_model_different_minus_routes(tmp_path: Path) -> None:

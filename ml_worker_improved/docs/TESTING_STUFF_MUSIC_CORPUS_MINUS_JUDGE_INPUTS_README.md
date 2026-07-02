@@ -14,6 +14,11 @@ The bridge is diagnostic and fail-closed:
   `minus`/`instrumental` path plus a vocal companion path;
 - reads the completed `stem_manifest.json` to preserve the exact minus path,
   vocal companion path, and optional stem paths such as `melody`;
+- writes `selected_vocal_path` only when the companion comes from a dedicated
+  `target_stem=vocal`/`vocals` route. If a minus/instrumental route exposes
+  `vocals.flac` only as a residual/source-conservation companion, the row uses
+  `vocal_companion_path` plus `vocal_companion_role` instead, so it is not
+  confused with a production vocal model result;
 - skips minus candidates whose manifest is missing, whose minus path is absent,
   or whose vocal companion path is absent;
 - skips legacy or tampered minus candidates whose manifest provenance says the

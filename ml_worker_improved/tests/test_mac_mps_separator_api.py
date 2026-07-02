@@ -183,6 +183,49 @@ def test_mac_api_job_manifest_is_diagnostic_only(tmp_path):
     assert manifest["presentation_status"] == "diagnostic_mps_api_only"
 
 
+def test_mac_api_stem_summary_preserves_residual_companion_role(tmp_path):
+    module = _load_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    vocals_path = run_dir / "vocals.flac"
+    instrumental_path = run_dir / "instrumental.flac"
+    vocals_path.write_bytes(b"vocals")
+    instrumental_path.write_bytes(b"instrumental")
+    (run_dir / "stem_manifest.json").write_text(
+        """
+{
+  "stems": {
+    "vocals": {
+      "path": "VOCALS_PATH",
+      "role": "companion",
+      "source": "residual_from_raw_minus_instrumental",
+      "model_output": false,
+      "residual_companion": true
+    },
+    "instrumental": {
+      "path": "INSTRUMENTAL_PATH",
+      "role": "target",
+      "source": "model_output",
+      "model_output": true
+    }
+  }
+}
+""".replace("VOCALS_PATH", str(vocals_path).replace("\\", "\\\\")).replace(
+            "INSTRUMENTAL_PATH", str(instrumental_path).replace("\\", "\\\\")
+        ),
+        encoding="utf-8",
+    )
+
+    summary = module._summarize_stems(run_dir)
+
+    assert summary["stems"]["vocals"]["role"] == "companion"
+    assert summary["stems"]["vocals"]["source"] == "residual_from_raw_minus_instrumental"
+    assert summary["stems"]["vocals"]["model_output"] is False
+    assert summary["stems"]["vocals"]["residual_companion"] is True
+    assert summary["stems"]["instrumental"]["role"] == "target"
+    assert summary["stems"]["instrumental"]["model_output"] is True
+
+
 def test_mac_api_config_preserves_venv_python_path(tmp_path):
     module = _load_module()
     project_root = tmp_path / "AIMusicProject_win"

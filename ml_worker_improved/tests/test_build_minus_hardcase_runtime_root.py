@@ -188,6 +188,47 @@ class BuildMinusHardcaseRuntimeRootTest(unittest.TestCase):
             self.assertEqual(rows[0]["minus_path"], minus)
             self.assertEqual(rows[0]["stem_paths"]["vocals"]["path"], vocal)
 
+    def test_residual_vocal_companion_from_instrumental_manifest_is_not_selected_vocal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            mix = touch_audio(tmp_path / "run" / "raw_ref.flac")
+            vocal = touch_audio(tmp_path / "run" / "vocals.flac")
+            minus = touch_audio(tmp_path / "run" / "instrumental.flac")
+            manifest = write_json(
+                tmp_path / "run" / "stem_manifest.json",
+                {
+                    "source_audio_path": mix,
+                    "target_stem": "instrumental",
+                    "model_id": "becruily_instrumental_vocals",
+                    "stems": {
+                        "vocals": {
+                            "path": vocal,
+                            "source": "residual_from_raw_minus_instrumental",
+                            "model_output": False,
+                            "residual_companion": True,
+                        },
+                        "instrumental": {"path": minus, "source": "model_output", "model_output": True},
+                    },
+                    "artifacts": {"raw_ref_flac": mix},
+                },
+            )
+
+            result = build_minus_hardcase_runtime_root(
+                candidate_manifests=[manifest],
+                candidate_jsonls=[],
+                output_dir=tmp_path / "out",
+                path_rewrites=[],
+            )
+
+            rows = read_jsonl(tmp_path / "out" / "candidate_pool.jsonl")
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertEqual(rows[0]["minus_path"], minus)
+            self.assertEqual(rows[0]["vocal_path"], "")
+            self.assertEqual(rows[0]["selected_vocal_path"], "")
+            self.assertEqual(rows[0]["vocal_companion_path"], vocal)
+            self.assertEqual(rows[0]["vocal_companion_role"], "residual_companion")
+            self.assertEqual(rows[0]["vocal_companion_source"], "residual_from_raw_minus_instrumental")
+
     def test_candidate_jsonl_rows_are_normalized_and_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

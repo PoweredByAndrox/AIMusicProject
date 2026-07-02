@@ -158,6 +158,34 @@ def stem_path(payload: dict[str, Any], *names: str) -> str:
     return ""
 
 
+def stem_entry(payload: dict[str, Any], *names: str) -> dict[str, Any]:
+    stems = payload.get("stems")
+    if not isinstance(stems, dict):
+        return {}
+    for name in names:
+        value = stems.get(name)
+        if isinstance(value, dict) and value.get("path"):
+            return dict(value)
+        if isinstance(value, str):
+            return {"path": value}
+    return {}
+
+
+def normalize_target_stem(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"instrumental", "instrumentals", "minus"}:
+        return "instrumental"
+    if text in {"vocal", "vocals", "voice"}:
+        return "vocals"
+    return text
+
+
+def vocal_entry_is_companion(payload: dict[str, Any], entry: dict[str, Any]) -> bool:
+    if entry.get("residual_companion") is True:
+        return True
+    return normalize_target_stem(payload.get("target_stem")) == "instrumental"
+
+
 def first_present(*values: Any) -> Any:
     for value in values:
         if value:
@@ -184,6 +212,8 @@ def normalize_candidate_row(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     mix_path = normalize_path(row.get("mix_path") or row.get("source_audio_path") or row.get("raw_audio_path"), rewrites)
     vocal_path = normalize_path(row.get("vocal_path") or row.get("selected_vocal_path"), rewrites)
+    vocal_companion_path = normalize_path(row.get("vocal_companion_path") or row.get("vocal_analysis_path"), rewrites)
+    vocal_analysis_path = vocal_path or vocal_companion_path
     minus_path = normalize_path(
         row.get("minus_path") or row.get("instrumental_path") or row.get("selected_minus_path") or row.get("rendered_minus_candidate_path"),
         rewrites,
@@ -192,7 +222,7 @@ def normalize_candidate_row(
     track_id = str(row.get("track_id") or stable_hash(mix_path or source_manifest.parent.name)[:12])
     route_id = str(row.get("route_id") or row.get("minus_route_id") or row.get("model_id") or row.get("candidate_config_id") or candidate_id)
     reasons: list[str] = []
-    for field, value in (("mix_path", mix_path), ("vocal_path", vocal_path), ("minus_path", minus_path)):
+    for field, value in (("mix_path", mix_path), ("vocal_analysis_path", vocal_analysis_path), ("minus_path", minus_path)):
         if not value:
             reasons.append(f"missing_{field}")
         elif validate_audio and not path_exists(value):
@@ -220,6 +250,10 @@ def normalize_candidate_row(
         "source_audio_path": mix_path,
         "vocal_path": vocal_path,
         "selected_vocal_path": vocal_path,
+        "vocal_companion_path": vocal_companion_path,
+        "vocal_companion_role": str(row.get("vocal_companion_role") or ""),
+        "vocal_companion_source": str(row.get("vocal_companion_source") or ""),
+        "vocal_companion_model_id": str(row.get("vocal_companion_model_id") or ""),
         "minus_path": minus_path,
         "instrumental_path": minus_path,
         "selected_minus_path": minus_path,
@@ -264,8 +298,9 @@ def row_from_manifest(
         payload.get("raw_audio_path"),
         payload.get("source_audio_path"),
     )
+    vocal_entry = stem_entry(payload, "vocals", "vocal")
     vocal_path = first_present(
-        stem_path(payload, "vocals", "vocal"),
+        vocal_entry.get("path"),
         nested_get(payload, "artifacts", "vocals_flac"),
         nested_get(payload, "audio", "vocals"),
         payload.get("vocal_path"),
@@ -290,8 +325,12 @@ def row_from_manifest(
         "source_candidate_family": str(model.get("family") or payload.get("candidate_family") or "minus_hardcase_manifest"),
         "mix_path": mix_path,
         "source_audio_path": mix_path,
-        "vocal_path": vocal_path,
-        "selected_vocal_path": vocal_path,
+        "vocal_path": "" if vocal_entry_is_companion(payload, vocal_entry) else vocal_path,
+        "selected_vocal_path": "" if vocal_entry_is_companion(payload, vocal_entry) else vocal_path,
+        "vocal_companion_path": vocal_path if vocal_entry_is_companion(payload, vocal_entry) else "",
+        "vocal_companion_role": "residual_companion" if vocal_entry.get("residual_companion") is True else ("minus_route_vocal_companion" if vocal_entry_is_companion(payload, vocal_entry) else ""),
+        "vocal_companion_source": str(vocal_entry.get("source") or ""),
+        "vocal_companion_model_id": model_id if vocal_entry_is_companion(payload, vocal_entry) else "",
         "minus_path": minus_path,
         "instrumental_path": minus_path,
         "selected_minus_path": minus_path,

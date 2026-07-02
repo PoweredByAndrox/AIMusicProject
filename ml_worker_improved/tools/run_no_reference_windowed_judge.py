@@ -108,6 +108,10 @@ def audio_stat(path: Path) -> dict[str, Any]:
     return {"file_size": int(stat.st_size), "file_mtime": round(float(stat.st_mtime), 6)}
 
 
+def candidate_vocal_analysis_path(row: dict[str, Any]) -> str:
+    return str(row.get("vocal_path") or row.get("selected_vocal_path") or row.get("vocal_companion_path") or "")
+
+
 def audio_duration(path: Path) -> float:
     info = audio_info(path)
     if info.samplerate <= 0:
@@ -245,7 +249,7 @@ def select_windows(
 
 def metric_cache_key(row: dict[str, Any], window: dict[str, Any]) -> str:
     mix_path = resolve_path(row["mix_path"])
-    vocal_path = resolve_path(row["vocal_path"])
+    vocal_path = resolve_path(candidate_vocal_analysis_path(row))
     instrumental_path = resolve_path(row.get("instrumental_path") or row.get("minus_path"))
     payload = {
         "metric_version": METRIC_VERSION,
@@ -253,6 +257,9 @@ def metric_cache_key(row: dict[str, Any], window: dict[str, Any]) -> str:
         "candidate_id": str(row.get("candidate_id") or ""),
         "mix_path": str(row.get("mix_path") or ""),
         "vocal_path": str(row.get("vocal_path") or ""),
+        "vocal_companion_path": str(row.get("vocal_companion_path") or ""),
+        "vocal_analysis_path": candidate_vocal_analysis_path(row),
+        "vocal_companion_role": str(row.get("vocal_companion_role") or ""),
         "instrumental_path": str(row.get("instrumental_path") or row.get("minus_path") or ""),
         "window_start_sec": window["start_sec"],
         "window_duration_sec": window["duration_sec"],
@@ -285,6 +292,9 @@ def cache_row(row: dict[str, Any], window: dict[str, Any], metrics: dict[str, An
         "track_id": str(row.get("track_id") or ""),
         "candidate_id": str(row.get("candidate_id") or ""),
         "vocal_path": str(row.get("vocal_path") or ""),
+        "vocal_companion_path": str(row.get("vocal_companion_path") or ""),
+        "vocal_analysis_path": candidate_vocal_analysis_path(row),
+        "vocal_companion_role": str(row.get("vocal_companion_role") or ""),
         "instrumental_path": str(row.get("instrumental_path") or row.get("minus_path") or ""),
         "metrics": metrics,
     }
@@ -296,7 +306,7 @@ def judge_window(
     audio_cache: AudioWindowCache | None = None,
 ) -> dict[str, Any]:
     mix_path = resolve_path(row["mix_path"])
-    vocal_path = resolve_path(row["vocal_path"])
+    vocal_path = resolve_path(candidate_vocal_analysis_path(row))
     instrumental_path = resolve_path(row.get("instrumental_path") or row.get("minus_path"))
     mix, sample_rate = read_window_cached(mix_path, float(window["start_sec"]), float(window["duration_sec"]), audio_cache)
     vocal, vocal_rate = read_window_cached(vocal_path, float(window["start_sec"]), float(window["duration_sec"]), audio_cache)
@@ -511,8 +521,10 @@ def judge_candidate_windowed(
     score_mode: str = "both",
 ) -> tuple[dict[str, Any], int, int, int]:
     score_mode = validate_mode(score_mode)
-    required = ["track_id", "candidate_id", "mix_path", "vocal_path"]
+    required = ["track_id", "candidate_id", "mix_path"]
     missing = [key for key in required if not row.get(key)]
+    if not candidate_vocal_analysis_path(row):
+        missing.append("vocal_path_or_vocal_companion_path")
     if not row.get("instrumental_path") and not row.get("minus_path"):
         missing.append("instrumental_path")
     if missing:
@@ -563,6 +575,11 @@ def judge_candidate_windowed(
         "window_duration_sec",
         "selected_vocal_path",
         "selected_minus_path",
+        "vocal_companion_path",
+        "vocal_companion_role",
+        "vocal_companion_source",
+        "vocal_companion_model_id",
+        "vocal_path_role",
         "route_id",
         "route_family",
         "model_id",
@@ -581,7 +598,9 @@ def judge_candidate_windowed(
         "track_id": str(row["track_id"]),
         "candidate_id": str(row["candidate_id"]),
         "mix_path": str(row["mix_path"]),
-        "vocal_path": str(row["vocal_path"]),
+        "vocal_path": str(row.get("vocal_path") or ""),
+        "vocal_companion_path": str(row.get("vocal_companion_path") or ""),
+        "vocal_analysis_path": candidate_vocal_analysis_path(row),
         "instrumental_path": str(row.get("instrumental_path") or row.get("minus_path")),
         "minus_path": str(row.get("minus_path") or row.get("instrumental_path")),
         "candidate_manifest": str(row.get("candidate_manifest") or row.get("source_manifest") or ""),
@@ -619,7 +638,15 @@ def judge_candidate_rows_windowed(
     total_windows = 0
     total_hits = 0
     total_misses = 0
-    for row in sorted(rows, key=lambda item: (str(item.get("track_id", "")), str(item.get("candidate_id", "")), str(item.get("vocal_path", "")), str(item.get("instrumental_path") or item.get("minus_path") or ""))):
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("track_id", "")),
+            str(item.get("candidate_id", "")),
+            candidate_vocal_analysis_path(item),
+            str(item.get("instrumental_path") or item.get("minus_path") or ""),
+        ),
+    ):
         judged, windows, hits, misses = judge_candidate_windowed(
             row,
             cache=cache,
@@ -679,6 +706,8 @@ def candidate_checkpoint_key(
         "metric_version": METRIC_VERSION,
         "mix_path": path_fingerprint(str(row.get("mix_path") or "")),
         "vocal_path": path_fingerprint(str(row.get("vocal_path") or "")),
+        "vocal_companion_path": path_fingerprint(str(row.get("vocal_companion_path") or "")),
+        "vocal_analysis_path": path_fingerprint(candidate_vocal_analysis_path(row)),
         "instrumental_path": path_fingerprint(str(row.get("instrumental_path") or row.get("minus_path") or "")),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
@@ -690,7 +719,7 @@ def sorted_candidate_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]
         key=lambda item: (
             str(item.get("track_id", "")),
             str(item.get("candidate_id", "")),
-            str(item.get("vocal_path", "")),
+            candidate_vocal_analysis_path(item),
             str(item.get("instrumental_path") or item.get("minus_path") or ""),
         ),
     )
