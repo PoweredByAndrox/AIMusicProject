@@ -26,6 +26,7 @@ def test_negative_harvest_batch_plans_runtime_jobs_without_training(tmp_path: Pa
         enable_audio_preview_render=True,
         require_preview_audio_for_preview_ready=True,
         continue_on_failure=True,
+        allow_non_testing_stuff_input=True,
         execute=False,
     )
 
@@ -58,6 +59,7 @@ def test_negative_harvest_batch_writes_no_release_ready_when_input_empty(tmp_pat
         enable_audio_preview_render=True,
         require_preview_audio_for_preview_ready=True,
         continue_on_failure=True,
+        allow_non_testing_stuff_input=True,
         execute=False,
     )
 
@@ -101,3 +103,84 @@ def test_harvest_counts_strict_positive_and_negative_windows(tmp_path: Path) -> 
     assert counts["strict_negative_windows"] == 1
     assert counts["blocker_counts"]["severe_vocal_bleed_in_minus"] == 1
     assert counts["final_status_counts"]["needs_more_candidates"] == 1
+
+
+def test_negative_harvest_batch_rejects_flstudio_corpus(tmp_path: Path) -> None:
+    from tools.run_strict_negative_harvest_batch import run_strict_negative_harvest_batch
+
+    input_dir = tmp_path / "testing_flstudio_music"
+    input_dir.mkdir()
+
+    try:
+        run_strict_negative_harvest_batch(
+            input_audio_dir=input_dir,
+            output_dir=tmp_path / "harvest",
+            model_dir=tmp_path / "models",
+            max_tracks=1,
+            profile="balanced",
+            candidate_diversity_profile="balanced",
+            enable_conditional_hard_case_routes=True,
+            enable_audio_preview_render=True,
+            require_preview_audio_for_preview_ready=True,
+            continue_on_failure=True,
+            allow_non_testing_stuff_input=True,
+            execute=False,
+        )
+    except ValueError as exc:
+        assert str(exc) == "forbidden_input_audio_dir:testing_flstudio_music"
+    else:
+        raise AssertionError("expected forbidden_input_audio_dir")
+
+
+def test_negative_harvest_batch_requires_testing_stuff_by_default(tmp_path: Path) -> None:
+    from tools.run_strict_negative_harvest_batch import run_strict_negative_harvest_batch
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    try:
+        run_strict_negative_harvest_batch(
+            input_audio_dir=input_dir,
+            output_dir=tmp_path / "harvest",
+            model_dir=tmp_path / "models",
+            max_tracks=1,
+            profile="balanced",
+            candidate_diversity_profile="balanced",
+            enable_conditional_hard_case_routes=True,
+            enable_audio_preview_render=True,
+            require_preview_audio_for_preview_ready=True,
+            continue_on_failure=True,
+            execute=False,
+        )
+    except ValueError as exc:
+        assert str(exc) == "input_audio_dir_must_be_testing_stuff_music"
+    else:
+        raise AssertionError("expected input_audio_dir_must_be_testing_stuff_music")
+
+
+def test_negative_harvest_batch_rejects_stale_run_dirs(tmp_path: Path) -> None:
+    from tools.run_strict_negative_harvest_batch import run_strict_negative_harvest_batch
+
+    input_dir = tmp_path / "testing_stuff_music"
+    input_dir.mkdir()
+    output_dir = tmp_path / "harvest"
+    (output_dir / "run_001_old").mkdir(parents=True)
+
+    try:
+        run_strict_negative_harvest_batch(
+            input_audio_dir=input_dir,
+            output_dir=output_dir,
+            model_dir=tmp_path / "models",
+            max_tracks=1,
+            profile="balanced",
+            candidate_diversity_profile="balanced",
+            enable_conditional_hard_case_routes=True,
+            enable_audio_preview_render=True,
+            require_preview_audio_for_preview_ready=True,
+            continue_on_failure=True,
+            execute=False,
+        )
+    except ValueError as exc:
+        assert str(exc) == "stale_run_dirs_present:1"
+    else:
+        raise AssertionError("expected stale_run_dirs_present")

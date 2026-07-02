@@ -23,6 +23,8 @@ RUNS_FILE = "negative_harvest_runs.jsonl"
 SUMMARY_FILE = "negative_harvest_summary.md"
 PROGRESS_FILE = "negative_harvest_progress.jsonl"
 OWNED_OUTPUT_FILES = (MANIFEST_FILE, RUNS_FILE, SUMMARY_FILE, PROGRESS_FILE)
+FORBIDDEN_INPUT_DIR_TERMS = ("testing_flstudio_music",)
+REQUIRED_INPUT_DIR_TERMS = ("testing_stuff_music", "host_testing_stuff_music")
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -70,7 +72,29 @@ def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
             yield payload
 
 
-def prepare_output_dir(output_dir: Path) -> None:
+def normalized_path_text(path: Path) -> str:
+    return str(path).replace("\\", "/").lower()
+
+
+def validate_input_audio_dir(input_audio_dir: Path, *, allow_non_testing_stuff_input: bool) -> None:
+    text = normalized_path_text(input_audio_dir)
+    forbidden = [term for term in FORBIDDEN_INPUT_DIR_TERMS if term in text]
+    if forbidden:
+        raise ValueError(f"forbidden_input_audio_dir:{','.join(forbidden)}")
+    if not allow_non_testing_stuff_input and not any(term in text for term in REQUIRED_INPUT_DIR_TERMS):
+        raise ValueError("input_audio_dir_must_be_testing_stuff_music")
+
+
+def existing_run_dirs(output_dir: Path) -> list[Path]:
+    if not output_dir.exists():
+        return []
+    return sorted(path for path in output_dir.glob("run_*") if path.is_dir())
+
+
+def prepare_output_dir(output_dir: Path, *, allow_stale_run_dirs: bool) -> None:
+    stale = existing_run_dirs(output_dir)
+    if stale and not allow_stale_run_dirs:
+        raise ValueError(f"stale_run_dirs_present:{len(stale)}")
     output_dir.mkdir(parents=True, exist_ok=True)
     for name in OWNED_OUTPUT_FILES:
         path = output_dir / name
@@ -291,9 +315,12 @@ def run_strict_negative_harvest_batch(
     enable_audio_preview_render: bool,
     require_preview_audio_for_preview_ready: bool,
     continue_on_failure: bool,
+    allow_non_testing_stuff_input: bool = False,
+    allow_stale_run_dirs: bool = False,
     execute: bool = True,
 ) -> dict[str, Any]:
-    prepare_output_dir(output_dir)
+    validate_input_audio_dir(input_audio_dir, allow_non_testing_stuff_input=allow_non_testing_stuff_input)
+    prepare_output_dir(output_dir, allow_stale_run_dirs=allow_stale_run_dirs)
     progress(
         output_dir,
         {
@@ -304,6 +331,7 @@ def run_strict_negative_harvest_batch(
             "candidate_diversity_profile": candidate_diversity_profile,
             "execute": bool(execute),
             "expected_acceleration_mode": "gpu_inference_for_runtime_candidates",
+            "input_corpus_contract": "testing_stuff_music_only",
             "training_started": False,
             "separator_training_started": False,
         },
@@ -400,6 +428,9 @@ def run_strict_negative_harvest_batch(
         "model_dir": str(model_dir),
         "profile": profile,
         "candidate_diversity_profile": candidate_diversity_profile,
+        "input_corpus_contract": "testing_stuff_music_only",
+        "allow_non_testing_stuff_input": bool(allow_non_testing_stuff_input),
+        "allow_stale_run_dirs": bool(allow_stale_run_dirs),
         "tracks_discovered": len(audio_files),
         "execute": bool(execute),
         "strict_negative_rows_found": example_counts["strict_negative_windows"],
@@ -428,6 +459,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--enable-audio-preview-render", type=parse_bool, default=True)
     parser.add_argument("--require-preview-audio-for-preview-ready", type=parse_bool, default=True)
     parser.add_argument("--continue-on-failure", type=parse_bool, default=True)
+    parser.add_argument("--allow-non-testing-stuff-input", type=parse_bool, default=False)
+    parser.add_argument("--allow-stale-run-dirs", type=parse_bool, default=False)
     parser.add_argument("--execute", type=parse_bool, default=True)
     return parser.parse_args(argv)
 
@@ -445,6 +478,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         enable_audio_preview_render=args.enable_audio_preview_render,
         require_preview_audio_for_preview_ready=args.require_preview_audio_for_preview_ready,
         continue_on_failure=args.continue_on_failure,
+        allow_non_testing_stuff_input=args.allow_non_testing_stuff_input,
+        allow_stale_run_dirs=args.allow_stale_run_dirs,
         execute=args.execute,
     )
     return 0 if manifest["tracks_failed"] == 0 or args.continue_on_failure else 1

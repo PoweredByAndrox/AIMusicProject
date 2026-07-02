@@ -188,6 +188,9 @@ still writes the required artifacts.
   can set `output_status=audio_preview_ready`.
 - Audio previews are bounded listening/evaluation artifacts only. They are not
   release-ready and cannot be published as final results.
+- Bounded preview manifests use `presentation_status=diagnostic_preview_only`
+  while `delivery_allowed=false`; they must not be treated as accepted listen
+  pack artifacts.
 - Model manifest/version metadata is recorded in `run_manifest.json`.
 - Local separator jobs use only existing project entrypoints and
   `worker/model_registry.py` entries. Unavailable configs are skipped, not

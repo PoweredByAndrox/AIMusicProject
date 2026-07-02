@@ -96,7 +96,7 @@ Strict negative harvest batch:
 ```bash
 docker compose run --rm ml-worker python tools/run_strict_negative_harvest_batch.py \
   --input-audio-dir /host_testing_stuff_music \
-  --output-dir /app/lab_artifacts/audio_error_grounding/negative_harvest_batch_001 \
+  --output-dir /app/lab_artifacts/audio_error_grounding/neg_b001 \
   --model-dir /app/lab_artifacts/no_reference_ml_critic/models \
   --max-tracks 20 \
   --profile balanced \
@@ -106,3 +106,9 @@ docker compose run --rm ml-worker python tools/run_strict_negative_harvest_batch
   --require-preview-audio-for-preview-ready true \
   --continue-on-failure true
 ```
+
+Use a fresh `--output-dir` for every harvest batch. The wrapper rejects stale
+`run_*` directories by default so old runtime roots cannot silently inflate
+strict positive/negative counts. It also rejects `testing_flstudio_music` and,
+unless a test-only bypass is explicitly enabled, requires the input corpus path
+to be `testing_stuff_music` / `/host_testing_stuff_music`.

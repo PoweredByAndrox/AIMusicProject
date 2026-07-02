@@ -14,6 +14,7 @@ from tools.run_autonomous_no_reference_pipeline import (
     evaluate_pair_compatibility,
     main,
     select_best_candidate,
+    validate_candidate_pool_rows,
 )
 
 
@@ -149,6 +150,7 @@ def test_autonomous_controller_runs_full_mocked_pipeline_from_one_command(tmp_pa
     assert manifest["preview"]["audio_preview_ready"] is True
     assert manifest["preview"]["rendered_preview_audio_count"] == 2
     assert preview["preview_status"] == "audio_preview_ready"
+    assert preview["presentation_status"] == "diagnostic_preview_only"
     assert preview["accepted_pair_ready"] is True
     assert preview["manifest_preview_ready"] is True
     assert preview["audio_preview_ready"] is True
@@ -192,6 +194,32 @@ def test_learned_accept_cannot_bypass_script_blocker() -> None:
     ]
 
     assert select_best_candidate(rows, "minus") is None
+
+
+def test_candidate_pool_rejects_stem_sum_minus_provenance(tmp_path: Path) -> None:
+    mix_path = write_wav(tmp_path / "audio" / "song.wav", sine(220, 1.0))
+    vocal_path = write_wav(tmp_path / "audio" / "vocal.wav", sine(440, 1.0))
+    minus_path = write_wav(tmp_path / "audio" / "minus.wav", sine(120, 1.0))
+
+    usable, invalid = validate_candidate_pool_rows(
+        [
+            {
+                "track_id": "song",
+                "candidate_id": "stem-sum-minus",
+                "mix_path": mix_path,
+                "vocal_path": vocal_path,
+                "minus_path": minus_path,
+                "instrumental_path": minus_path,
+                "candidate_origin": "nonvocal_stem_sum",
+                "candidate_family": "full_stem_pack_minus",
+                "is_complete_pair": True,
+            }
+        ]
+    )
+
+    assert usable == []
+    assert invalid
+    assert "forbidden_minus_provenance:stem_sum_marker" in invalid[0]["skip_reason"]
 
 
 def test_failed_pair_compatibility_does_not_publish_output() -> None:

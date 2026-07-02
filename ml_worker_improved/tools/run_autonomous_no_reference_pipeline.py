@@ -63,6 +63,20 @@ REQUIRED_OUTPUTS = {
     "hard_case_route_policy": "hard_case_route_policy.json",
     "hard_case_route_policy_summary": "hard_case_route_policy_summary.md",
 }
+FORBIDDEN_MINUS_PROVENANCE_TERMS = {
+    "stem_sum",
+    "stems_sum",
+    "summed_stems",
+    "sum_nonvocal",
+    "nonvocal_sum",
+    "non_vocal_sum",
+    "nonvocal_stem_sum",
+    "non_vocal_stem_sum",
+    "sum_of_stems",
+    "assembled_stems",
+    "full_stem_pack_minus",
+}
+NONVOCAL_STEM_NAMES = {"drums", "bass", "other", "guitar", "piano", "keys", "strings", "synth", "wind"}
 
 SAFETY_FLAGS = {
     "codex_required_at_runtime": False,
@@ -180,12 +194,39 @@ def merge_candidate_rows(existing_rows: Iterable[dict[str, Any]], new_rows: Iter
     )
 
 
+def minus_provenance_blockers(row: dict[str, Any]) -> list[str]:
+    provenance_fields = (
+        "candidate_origin",
+        "candidate_family",
+        "source_candidate_family",
+        "route_id",
+        "model_id",
+        "minus_model_id",
+        "source_tool",
+        "source_manifest",
+        "candidate_manifest",
+    )
+    joined = " ".join(str(row.get(field) or "").lower() for field in provenance_fields)
+    blockers: list[str] = []
+    if any(term in joined for term in FORBIDDEN_MINUS_PROVENANCE_TERMS):
+        blockers.append("forbidden_minus_provenance:stem_sum_marker")
+
+    stem_paths = row.get("stem_paths")
+    if isinstance(stem_paths, dict):
+        nonvocal_entries = [name for name in stem_paths if str(name).lower() in NONVOCAL_STEM_NAMES]
+        instrumental_entry = stem_paths.get("instrumental") or stem_paths.get("minus")
+        if len(nonvocal_entries) >= 2 and not instrumental_entry:
+            blockers.append("forbidden_minus_provenance:nonvocal_stem_collection_without_instrumental")
+    return sorted(set(blockers))
+
+
 def validate_candidate_pool_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     usable: list[dict[str, Any]] = []
     invalid: list[dict[str, Any]] = []
     for row in rows:
         minus_path = str(row.get("minus_path") or row.get("instrumental_path") or "")
         reasons: list[str] = []
+        reasons.extend(minus_provenance_blockers(row))
         if row.get("release_ready") is True:
             reasons.append("release_ready_candidate_forbidden")
         if row.get("is_complete_pair") is False:
@@ -313,7 +354,7 @@ def preview_manifest_for(status: str, selected_rows: list[dict[str, Any]], pair_
         "preview_render_attempted": False,
         "preview_render_skipped": False,
         "preview_render_failed": preview_status == "preview_blocked_safety_contract",
-        "presentation_status": "accepted_for_listen_pack" if status in {"preview_ready", "audio_preview_ready"} else status,
+        "presentation_status": "diagnostic_preview_only" if status in {"preview_ready", "audio_preview_ready"} else status,
         "release_status": "listen_preview_only",
         "delivery_allowed": False,
         "selected_vocal_candidate_id": str(selected.get("selected_vocal_candidate_id") or pair_row.get("selected_vocal_candidate_id") or ""),

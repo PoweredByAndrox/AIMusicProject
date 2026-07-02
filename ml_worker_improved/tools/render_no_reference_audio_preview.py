@@ -266,6 +266,7 @@ def base_preview_manifest(
         "preview_render_attempted": False,
         "preview_render_skipped": False,
         "preview_render_failed": False,
+        "presentation_status": "diagnostic_preview_only",
         "selected_vocal_candidate_id": str(selected.get("selected_vocal_candidate_id") or pair.get("selected_vocal_candidate_id") or ""),
         "selected_minus_candidate_id": str(selected.get("selected_minus_candidate_id") or pair.get("selected_minus_candidate_id") or ""),
         "selected_vocal_path": selected_vocal_path,
