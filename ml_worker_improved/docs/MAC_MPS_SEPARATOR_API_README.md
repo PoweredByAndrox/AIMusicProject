@@ -15,6 +15,11 @@ Mac artifact output is fail-closed:
 - if the mount is missing, unwritable, outside the mounted project, or not under
   `artifacts`, `lab_artifacts`, or `artifact_rag`, the API returns a blocked
   in-memory manifest and does not create Mac-local artifacts;
+- future result roots under
+  `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,
+  `/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
+  `/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, or
+  `/tmp/artifacts` are forbidden and blocked by the shared mount preflight;
 - passed manifests include `mount_preflight`, `mac_windows_project_mount`, and
   `windows_output_path`.
 

@@ -148,6 +148,27 @@ def test_remote_api_runner_blocks_without_windows_project_mount_before_ssh() -> 
     assert result["mount_preflight"]["can_write_route_artifacts"] is False
 
 
+def test_remote_api_runner_blocks_mac_local_result_root_before_ssh() -> None:
+    def fake_runner(*_args, **_kwargs):
+        raise AssertionError("runner must not be called")
+
+    result = run_macos_remote_api_command(
+        ssh_target="mac",
+        ssh_key="key",
+        mac_artifact_root="/Users/andrejviluha/aimusic_local_artifacts/host_artifacts",
+        mac_windows_project_mount="/Users/andrejviluha/AIMusicProject_win",
+        artifact_subdir="loop/it999_mac",
+        command="true",
+        runner=fake_runner,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["returncode"] == 78
+    assert result["blocked_reason"] == "mac_output_path_uses_forbidden_local_artifact_root"
+    assert result["delivery_allowed"] is False
+    assert result["mount_preflight"]["can_write_route_artifacts"] is False
+
+
 def test_parse_args_accepts_command_file_instead_of_inline_command(tmp_path: Path) -> None:
     command_file = tmp_path / "cmd.sh"
     command_file.write_text("python3 - <<'PY'\nprint('quoted')\nPY\n", encoding="utf-8")

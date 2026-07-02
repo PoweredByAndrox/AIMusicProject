@@ -28,6 +28,11 @@ Current local-network contract:
   `/tmp`, or Apple-container scratch as the final artifact location; the
   configured home path above is valid only because it is an SMB-mounted Windows
   project share;
+- forbidden result roots are
+  `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,
+  `/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
+  `/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, and
+  `/tmp/artifacts`; the client blocks these before opening SSH;
 - if SMB authentication or the write/read/delete probe fails, the route is
   blocked instead of creating Mac-local listen/result artifacts.
 

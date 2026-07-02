@@ -25,6 +25,7 @@ if str(TOOLS_PARENT) not in sys.path:
 from tools.mac_windows_mount_preflight import (  # noqa: E402
     ALLOWED_PROJECT_ARTIFACT_ROOTS,
     DEFAULT_WINDOWS_PROJECT_ROOT,
+    FORBIDDEN_MAC_LOCAL_ARTIFACT_ROOTS,
     PROBE_DIR_NAME,
     SCHEMA as MOUNT_PREFLIGHT_SCHEMA,
 )
@@ -65,12 +66,37 @@ def _windows_join(root: str, parts: Sequence[str]) -> str:
     return f"{normalized}\\{suffix}" if suffix else normalized
 
 
+def _is_posix_relative_to(path: PurePosixPath, root: PurePosixPath) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def build_remote_mount_preflight(
     *,
     mac_windows_project_mount: str | None,
     mac_output_path: str,
     windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT,
 ) -> dict[str, Any]:
+    output = PurePosixPath(str(mac_output_path).rstrip("/"))
+    for forbidden_root_value in FORBIDDEN_MAC_LOCAL_ARTIFACT_ROOTS:
+        forbidden_root = PurePosixPath(forbidden_root_value)
+        if output == forbidden_root or _is_posix_relative_to(output, forbidden_root):
+            return {
+                "schema": MOUNT_PREFLIGHT_SCHEMA,
+                "preflight_status": "blocked",
+                "blocked_reason": "mac_output_path_uses_forbidden_local_artifact_root",
+                "can_write_route_artifacts": False,
+                "mac_windows_project_mount": str(mac_windows_project_mount or ""),
+                "mac_output_path": str(output),
+                "windows_project_root": str(windows_project_root),
+                "windows_output_path": "",
+                "allowed_project_artifact_roots": list(ALLOWED_PROJECT_ARTIFACT_ROOTS),
+                "forbidden_mac_local_artifact_root": str(forbidden_root),
+                "probe_status": "not_run",
+            }
     if not mac_windows_project_mount:
         return {
             "schema": MOUNT_PREFLIGHT_SCHEMA,
@@ -85,7 +111,6 @@ def build_remote_mount_preflight(
             "probe_status": "not_run",
         }
     mount = PurePosixPath(str(mac_windows_project_mount).rstrip("/"))
-    output = PurePosixPath(str(mac_output_path).rstrip("/"))
     try:
         relative = output.relative_to(mount)
     except ValueError:

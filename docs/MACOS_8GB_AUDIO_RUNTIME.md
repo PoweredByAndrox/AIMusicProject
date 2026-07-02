@@ -134,17 +134,24 @@ Current verified mount contract:
 - SSH key: `%USERPROFILE%\.ssh\id_ed25519_phone`
 
 If the Mac-side SMB mount stops responding, long audio jobs must not keep
-running as blind jobs against `/Users/andrejviluha/AIMusicProject_win`. Copy the
-required short input pack only to a short-lived local Mac scratch root such as:
+running as blind jobs against `/Users/andrejviluha/AIMusicProject_win`, and they
+must not switch to a Mac-local result root. Block the route, repair/remount the
+Windows project share, then rerun with output roots directly under:
 
 ```text
-/Users/$USER/aimusic_local_artifacts/
+/Users/andrejviluha/AIMusicProject_win/artifacts
+/Users/andrejviluha/AIMusicProject_win/lab_artifacts
+/Users/andrejviluha/AIMusicProject_win/artifact_rag
 ```
 
-Run the Mac/MPS job locally only as short-lived staging, then sync the completed
-artifact root back into `D:\AIMusicProject\artifacts`. The copied-back artifact
-must still keep `delivery_allowed=false` unless the normal delivery contract
-later accepts it.
+The forbidden future result roots are
+`/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,
+`/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
+`/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, and
+`/tmp/artifacts`. They may appear in historical manifests or short-lived
+non-result scratch evidence only; do not use them for `--output-dir`,
+`--artifacts-root`, `--mac-artifact-root`, manifests, progress logs, listen
+packs, or provenance maps.
 
 From-zero Windows bootstrap and connect commands:
 

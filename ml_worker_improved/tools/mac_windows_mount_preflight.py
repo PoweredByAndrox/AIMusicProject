@@ -12,6 +12,13 @@ SCHEMA = "mac_windows_project_mount_preflight.v1"
 DEFAULT_WINDOWS_PROJECT_ROOT = r"D:\AIMusicProject"
 ALLOWED_PROJECT_ARTIFACT_ROOTS = ("artifacts", "lab_artifacts", "artifact_rag")
 PROBE_DIR_NAME = ".aimusic_mount_probe"
+FORBIDDEN_MAC_LOCAL_ARTIFACT_ROOTS = (
+    "/Users/andrejviluha/aimusic_local_artifacts/host_artifacts",
+    "/Users/andrejviluha/aimusic_local_artifacts/mac_api",
+    "/Users/andrejviluha/win_artifacts",
+    "/Users/andrejviluha/artifacts",
+    "/tmp/artifacts",
+)
 
 
 def _safe_resolve(path: Path) -> Path:
@@ -53,6 +60,14 @@ def _windows_join(root: str, parts: Iterable[str]) -> str:
     return f"{normalized}\\{suffix}" if suffix else normalized
 
 
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def preflight_mac_windows_project_mount(
     *,
     mac_windows_project_mount: Path | str | None,
@@ -60,6 +75,16 @@ def preflight_mac_windows_project_mount(
     windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT,
 ) -> dict[str, Any]:
     output = _safe_resolve(Path(output_path))
+    for forbidden_root_value in FORBIDDEN_MAC_LOCAL_ARTIFACT_ROOTS:
+        forbidden_root = _safe_resolve(Path(forbidden_root_value))
+        if output == forbidden_root or _is_relative_to(output, forbidden_root):
+            return _blocked(
+                reason="mac_output_path_uses_forbidden_local_artifact_root",
+                mac_windows_project_mount=Path(mac_windows_project_mount) if mac_windows_project_mount else None,
+                output_path=output,
+                windows_project_root=windows_project_root,
+                extra={"forbidden_mac_local_artifact_root": str(forbidden_root)},
+            )
     if mac_windows_project_mount is None or str(mac_windows_project_mount).strip() == "":
         return _blocked(
             reason="mac_windows_project_mount_missing",

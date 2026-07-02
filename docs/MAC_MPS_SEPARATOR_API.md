@@ -21,7 +21,13 @@ powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
   - `mdx23c_vocals`
   - `melband_roformer_vocals`
   - `scnet_xl_ihf_musdb18`
-- Outputs must stay under the configured shared artifacts root.
+- Outputs must stay under the configured shared artifacts root:
+  `/Users/andrejviluha/AIMusicProject_win/artifacts`.
+- Forbidden future result roots are
+  `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,
+  `/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
+  `/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, and
+  `/tmp/artifacts`.
 - Job ids are short Windows-safe aliases and must not include raw track names.
 - Every job writes `manifest.json`, `progress.jsonl`, `run.log`, and model
   output under `run/`.
@@ -38,6 +44,8 @@ powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
   ml_worker_improved/tools/mac_mps_separator_api.py \
   --project-root /Users/andrejviluha/AIMusicProject_win \
   --artifacts-root /Users/andrejviluha/AIMusicProject_win/artifacts \
+  --mac-windows-project-mount /Users/andrejviluha/AIMusicProject_win \
+  --windows-project-root 'D:\AIMusicProject' \
   --python-bin /Users/andrejviluha/aimusic_mps_venv/bin/python \
   --host 0.0.0.0 \
   --port 8765

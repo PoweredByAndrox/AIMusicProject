@@ -23,6 +23,24 @@ function ConvertTo-RemoteSingleQuoted {
     return "'" + $Value.Replace("'", "'""'""'") + "'"
 }
 
+$ForbiddenMacLocalArtifactRoots = @(
+    "/Users/andrejviluha/aimusic_local_artifacts/host_artifacts",
+    "/Users/andrejviluha/aimusic_local_artifacts/mac_api",
+    "/Users/andrejviluha/win_artifacts",
+    "/Users/andrejviluha/artifacts",
+    "/tmp/artifacts"
+)
+
+function Get-ForbiddenMacLocalArtifactRoot {
+    param([string]$Command)
+    foreach ($root in $ForbiddenMacLocalArtifactRoots) {
+        if ($Command.Contains($root)) {
+            return $root
+        }
+    }
+    return $null
+}
+
 if (-not (Get-Command "ssh" -ErrorAction SilentlyContinue)) {
     throw "Required command is missing from PATH: ssh"
 }
@@ -53,6 +71,11 @@ if ([string]::IsNullOrWhiteSpace($RemoteCommand)) {
     Write-Host ("ssh -i `"{0}`" -o IdentitiesOnly=yes -o BatchMode=yes {1}" -f $sshKeyPath, $target)
     & ssh @sshArgs
     exit $LASTEXITCODE
+}
+
+$forbiddenRoot = Get-ForbiddenMacLocalArtifactRoot -Command $RemoteCommand
+if (-not [string]::IsNullOrWhiteSpace($forbiddenRoot)) {
+    throw "Forbidden Mac-local result artifact root in RemoteCommand: $forbiddenRoot. Write result artifacts directly under $MacProjectRoot/artifacts, $MacProjectRoot/lab_artifacts, or $MacProjectRoot/artifact_rag."
 }
 
 $remoteRoot = ConvertTo-RemoteSingleQuoted -Value $MacProjectRoot
