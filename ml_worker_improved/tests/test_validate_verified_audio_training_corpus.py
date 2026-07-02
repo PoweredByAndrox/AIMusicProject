@@ -48,7 +48,20 @@ def test_verified_corpus_passes_only_verified_existing_audio(tmp_path: Path) -> 
         tmp_path / "examples.jsonl",
         [
             _row(tmp_path, "a", "track-a", human_verified=True, reference_verified=False),
-            _row(tmp_path, "b", "track-b", human_verified=False, reference_verified=True),
+            _row(
+                tmp_path,
+                "b",
+                "track-b",
+                human_verified=False,
+                reference_verified=True,
+                source_gate={
+                    "accepted_machine_gate": False,
+                    "reference_verified": True,
+                    "trainable_ground_truth": True,
+                    "full_mix_reconstruction_status": "accepted",
+                    "source_mix_1_to_1_claim_allowed": True,
+                },
+            ),
         ],
     )
 
@@ -64,6 +77,39 @@ def test_verified_corpus_passes_only_verified_existing_audio(tmp_path: Path) -> 
     assert manifest["release_ready"] is False
     rows = _read_jsonl(Path(manifest["row_report_jsonl"]))
     assert all(row["safe_for_training"] is True for row in rows)
+
+
+def test_reference_verified_row_without_trainable_ground_truth_gate_fails_closed(tmp_path: Path) -> None:
+    examples = _write_jsonl(
+        tmp_path / "examples.jsonl",
+        [
+            _row(
+                tmp_path,
+                "badref",
+                "track-bad",
+                human_verified=False,
+                reference_verified=True,
+                source_gate={
+                    "accepted_machine_gate": False,
+                    "reference_verified": True,
+                    "trainable_ground_truth": False,
+                    "full_mix_reconstruction_status": "rejected",
+                    "source_mix_1_to_1_claim_allowed": False,
+                },
+            ),
+        ],
+    )
+
+    manifest = validate_verified_audio_training_corpus(
+        audio_training_examples_jsonl=examples,
+        output_dir=tmp_path / "out",
+        min_unique_tracks=1,
+    )
+
+    rows = _read_jsonl(Path(manifest["row_report_jsonl"]))
+    assert manifest["corpus_validation_status"] == "failed"
+    assert "missing_trainable_ground_truth_provenance" in rows[0]["unsafe_reasons"]
+    assert "rejected_full_mix_reconstruction" in rows[0]["unsafe_reasons"]
 
 
 def test_dirty_or_unverified_rows_fail_closed(tmp_path: Path) -> None:

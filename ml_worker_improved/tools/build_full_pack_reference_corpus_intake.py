@@ -169,6 +169,26 @@ def permission_status_from_ground_truth(payload: dict[str, Any]) -> str:
     return permission
 
 
+def ground_truth_source_gate(payload: dict[str, Any]) -> dict[str, Any]:
+    full_mix_contract = payload.get("full_mix_reconstruction_contract")
+    if not isinstance(full_mix_contract, dict):
+        full_mix_contract = {}
+    reconstruction_status = str(full_mix_contract.get("status") or "").strip().lower()
+    source_mix_1_to_1_claim_allowed = full_mix_contract.get("can_claim_source_mix_1_to_1") is True
+    blocker_reasons: list[str] = []
+    if reconstruction_status != "accepted":
+        blocker_reasons.append("full_mix_reconstruction_not_accepted")
+    if not source_mix_1_to_1_claim_allowed:
+        blocker_reasons.append("source_mix_1_to_1_not_claimable")
+    return {
+        "reference_verified": True,
+        "trainable_ground_truth": not blocker_reasons,
+        "full_mix_reconstruction_status": reconstruction_status or "missing",
+        "source_mix_1_to_1_claim_allowed": source_mix_1_to_1_claim_allowed,
+        "blocker_reasons": blocker_reasons,
+    }
+
+
 def load_gap_rows(gap_plan_json: Path) -> tuple[list[dict[str, Any]], list[str]]:
     plan = read_json(gap_plan_json)
     failed = collect_true_flag_failures("gap_plan", plan)
@@ -243,9 +263,12 @@ def candidate_row(
     permission_status = permission_status_from_ground_truth(payload)
     source_audio_path = resolved_path((payload.get("mix") or {}).get("path") if isinstance(payload.get("mix"), dict) else "", base_dir=manifest_path.parent)
     target_audio_path = resolved_path(stem_payload.get("path"), base_dir=manifest_path.parent)
+    source_gate = ground_truth_source_gate(payload)
     reasons: list[str] = []
     if contract.get("verified") is not True:
         reasons.append("not_reference_verified")
+    if source_gate["trainable_ground_truth"] is not True:
+        reasons.append("ground_truth_reconstruction_not_trainable")
     if source_domain not in ALLOWED_SOURCE_DOMAINS:
         reasons.append("source_domain_not_allowed")
     if source_domain == "synthetic_fixture":
@@ -279,6 +302,7 @@ def candidate_row(
         "target_audio_path": target_audio_path,
         "target_audio_sha256": str(stem_payload.get("sha256") or ""),
         "reference_verified": contract.get("verified") is True,
+        "source_gate": source_gate,
         "required_reference_stem_count": int(gap.get("required_reference_stem_count") or 0),
         "release_ready": False,
         "can_publish_as_result": False,
@@ -306,6 +330,7 @@ def audio_training_example(row: dict[str, Any]) -> dict[str, Any]:
         "notes": "full_pack_reference_corpus_intake",
         "trainable": True,
         "training_target": "audio_separator_or_stem_adapter",
+        "source_gate": row["source_gate"],
         "safety": {
             "not_release_artifact": True,
             "requires_eval_before_promotion": True,

@@ -45,11 +45,13 @@ synthetic `human_negative_feedback:<rating>` hard-eval reason so hard-eval rows
 never lose their rejection cause.
 
 Verified `ground_truth_manifest.json` bundles are imported as audio-training
-examples when `ground_truth_contract.verified=true` and the rights/permission
-status is trainable. `user_owned` is normalized to `project_owned`. If the
-ground-truth contract says the source mix cannot be claimed as a one-to-one sum
-of imported stems, the example remains trainable but carries
-`source_mix_1_to_1_claim_allowed=false` for downstream evaluators.
+examples only when `ground_truth_contract.verified=true`, the rights/permission
+status is trainable, and `full_mix_reconstruction_contract.status=accepted`
+with `can_claim_source_mix_1_to_1=true`. `user_owned` is normalized to
+`project_owned`. If the source mix cannot be claimed as a one-to-one sum of
+imported stems, the bundle remains diagnostic/reference evidence only and is
+written to `excluded_examples.jsonl` with
+`ground_truth_reconstruction_not_trainable`.
 Reference intake and raw-reference recovery material builders also reject
 non-production artifact roots such as `dbg_loop`, `dbg_loop_tmp`, `test_*`,
 smoke, debug, or fixture paths under `lab_artifacts`; those rows stay forensic
@@ -607,7 +609,8 @@ does not create listen or release artifacts.
 Before a merged corpus enters GPU training, validate it with
 `tools/validate_verified_audio_training_corpus.py`. This gate requires every
 training row to have existing source/target audio, trainable permission, and
-either human or reference verification. It also blocks track leakage across
+either accepted-machine-gated human verification or reference verification with
+`source_gate.trainable_ground_truth=true`. It also blocks track leakage across
 split labels and never marks any artifact release-ready.
 
 After a shared adapter matrix finishes, use

@@ -616,25 +616,58 @@ def permission_status_from_ground_truth(payload: dict[str, Any]) -> str:
     return rights_status or "requires_review"
 
 
-def ground_truth_audio_training_examples(path: Path, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    contract = payload.get("ground_truth_contract")
-    if not isinstance(contract, dict) or contract.get("verified") is not True:
-        return []
-    permission_status = permission_status_from_ground_truth(payload)
-    if permission_status not in TRAINABLE_PERMISSION_STATUSES and permission_status not in GROUND_TRUTH_PERMISSION_STATUSES:
-        return []
-    mix = payload.get("mix")
-    stems = payload.get("stems")
-    if not isinstance(mix, dict) or not isinstance(stems, dict):
-        return []
-    source_path = docker_visible_manifest_path(path, mix.get("path"))
-    if not source_path:
-        return []
+def ground_truth_source_gate(payload: dict[str, Any]) -> dict[str, Any]:
     full_mix_contract = payload.get("full_mix_reconstruction_contract")
     if not isinstance(full_mix_contract, dict):
         full_mix_contract = {}
+    reconstruction_status = str(full_mix_contract.get("status") or "").strip().lower()
+    source_mix_1_to_1_claim_allowed = full_mix_contract.get("can_claim_source_mix_1_to_1") is True
+    blocker_reasons: list[str] = []
+    if reconstruction_status != "accepted":
+        blocker_reasons.append("full_mix_reconstruction_not_accepted")
+    if not source_mix_1_to_1_claim_allowed:
+        blocker_reasons.append("source_mix_1_to_1_not_claimable")
+    return {
+        "reference_verified": True,
+        "trainable_ground_truth": not blocker_reasons,
+        "full_mix_reconstruction_status": reconstruction_status or "missing",
+        "source_mix_1_to_1_claim_allowed": source_mix_1_to_1_claim_allowed,
+        "blocker_reasons": blocker_reasons,
+    }
+
+
+def ground_truth_context(path: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
+    contract = payload.get("ground_truth_contract")
+    if not isinstance(contract, dict) or contract.get("verified") is not True:
+        return None
+    permission_status = permission_status_from_ground_truth(payload)
+    if permission_status not in TRAINABLE_PERMISSION_STATUSES and permission_status not in GROUND_TRUTH_PERMISSION_STATUSES:
+        return None
+    mix = payload.get("mix")
+    stems = payload.get("stems")
+    if not isinstance(mix, dict) or not isinstance(stems, dict):
+        return None
+    source_path = docker_visible_manifest_path(path, mix.get("path"))
+    if not source_path:
+        return None
+    return {
+        "contract": contract,
+        "permission_status": permission_status,
+        "source_path": source_path,
+        "stems": stems,
+        "source_gate": ground_truth_source_gate(payload),
+    }
+
+
+def ground_truth_audio_training_examples(path: Path, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    context = ground_truth_context(path, payload)
+    if context is None:
+        return []
+    source_gate = context["source_gate"]
+    if source_gate["trainable_ground_truth"] is not True:
+        return []
     examples: list[dict[str, Any]] = []
-    for raw_stem, stem_payload in stems.items():
+    for raw_stem, stem_payload in context["stems"].items():
         if not isinstance(stem_payload, dict):
             continue
         target_path = docker_visible_manifest_path(path, stem_payload.get("path"))
@@ -648,7 +681,7 @@ def ground_truth_audio_training_examples(path: Path, payload: dict[str, Any]) ->
                 "track_id": str(payload.get("track_name") or path.parent.name),
                 "stem_type": normalized_stem,
                 "manifest_path": str(path),
-                "source_audio_path": source_path,
+                "source_audio_path": context["source_path"],
                 "target_audio_path": target_path,
                 "target_audio_sha256": str(stem_payload.get("sha256") or ""),
                 "model_id": "verified_ground_truth_bundle",
@@ -656,22 +689,53 @@ def ground_truth_audio_training_examples(path: Path, payload: dict[str, Any]) ->
                 "human_score": None,
                 "human_verified": False,
                 "reference_verified": True,
-                "permission_status": "project_owned" if permission_status == "user_owned" else permission_status,
+                "permission_status": "project_owned" if context["permission_status"] == "user_owned" else context["permission_status"],
                 "split": "train",
                 "notes": (
-                    f"ground_truth_contract={contract.get('mode')}; "
-                    f"can_claim_source_mix_1_to_1={full_mix_contract.get('can_claim_source_mix_1_to_1')}"
+                    f"ground_truth_contract={context['contract'].get('mode')}; "
+                    f"can_claim_source_mix_1_to_1={source_gate['source_mix_1_to_1_claim_allowed']}"
                 ),
                 "trainable": True,
                 "training_target": "audio_separator_or_stem_adapter",
+                "source_gate": source_gate,
                 "safety": {
                     "not_release_artifact": True,
                     "requires_eval_before_promotion": True,
-                    "source_mix_1_to_1_claim_allowed": full_mix_contract.get("can_claim_source_mix_1_to_1") is True,
+                    "source_mix_1_to_1_claim_allowed": source_gate["source_mix_1_to_1_claim_allowed"],
                 },
             }
         )
     return examples
+
+
+def ground_truth_excluded_examples(path: Path, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    context = ground_truth_context(path, payload)
+    if context is None or context["source_gate"]["trainable_ground_truth"] is True:
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw_stem, stem_payload in context["stems"].items():
+        if not isinstance(stem_payload, dict):
+            continue
+        target_path = docker_visible_manifest_path(path, stem_payload.get("path"))
+        if not target_path:
+            continue
+        normalized_stem = "vocal" if raw_stem == "vocals" else ("minus" if raw_stem == "instrumental" else str(raw_stem))
+        rows.append(
+            {
+                "schema": "generic_finetuning_excluded_example.v1",
+                "id": stable_hash(["ground_truth_excluded", str(path), normalized_stem, target_path])[:16],
+                "track_id": str(payload.get("track_name") or path.parent.name),
+                "stem_type": normalized_stem,
+                "manifest_path": str(path),
+                "exclude_reason": "ground_truth_reconstruction_not_trainable",
+                "delivery_status": "",
+                "presentation_status": "",
+                "human_verified": False,
+                "human_rating": "",
+                "source_gate": context["source_gate"],
+            }
+        )
+    return rows
 
 
 def hard_eval_case(row: dict[str, Any], feedback: HumanFeedback | None = None) -> dict[str, Any]:
@@ -751,10 +815,12 @@ def build_corpus(
         if payload is None:
             continue
         ground_truth_examples = ground_truth_audio_training_examples(path, payload)
-        if ground_truth_examples:
+        ground_truth_exclusions = ground_truth_excluded_examples(path, payload)
+        if ground_truth_examples or ground_truth_exclusions:
             ground_truth_manifest_count += 1
             ground_truth_audio_count += len(ground_truth_examples)
             audio_rows.extend(ground_truth_examples)
+            excluded_rows.extend(ground_truth_exclusions)
         row = inventory_row(path, artifact_root, payload)
         if not row["track_id"] and not row["delivery_status"] and not row["presentation_status"]:
             continue

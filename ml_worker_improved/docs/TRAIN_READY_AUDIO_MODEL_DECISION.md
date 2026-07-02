@@ -15,7 +15,8 @@ Required per row:
 - `permission_status` in `owned`, `licensed`, `cleared`, `project_owned`
 - `human_verified=true` or `reference_verified=true`
 - human-only rows must carry `source_gate.accepted_machine_gate=true`; reference
-  rows remain eligible through `reference_verified=true`
+  rows must carry `source_gate.trainable_ground_truth=true` with accepted
+  full-mix reconstruction and `source_mix_1_to_1_claim_allowed=true`
 - existing `source_audio_path`
 - existing `target_audio_path`
 - no `release_ready=true`
@@ -290,10 +291,11 @@ When candidate `ground_truth_manifest.json` bundles are available, run
 `tools/build_full_pack_reference_corpus_intake.py` with the gap plan, current
 approved audio-training examples, and one or more `--candidate-root` paths. The
 intake accepts only required stems from new `(track_id, stem_type)` pairs with
-`ground_truth_contract.verified=true`, trainable rights, user-supplied/FL
-source provenance, and existing source/target audio paths. Duplicate,
-synthetic, unverified, missing-rights, or missing-audio rows are rejected with
-machine-readable reasons. Outputs stay short (`intake.json`, `rows.jsonl`,
+`ground_truth_contract.verified=true`, accepted full-mix reconstruction,
+`can_claim_source_mix_1_to_1=true`, trainable rights, user-supplied/FL source
+provenance, and existing source/target audio paths. Duplicate, synthetic,
+unverified, rejected-reconstruction, missing-rights, or missing-audio rows are
+rejected with machine-readable reasons. Outputs stay short (`intake.json`, `rows.jsonl`,
 `audio.jsonl`, `progress.jsonl`, `summary.md`) and are not listen artifacts.
 
 After `tools/build_full_pack_raw_reference_verified_bundles.py`, run

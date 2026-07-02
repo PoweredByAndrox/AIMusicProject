@@ -150,7 +150,7 @@ def accepted_claim_with_structured_blockers_manifest(tmp_path: Path) -> Path:
     )
 
 
-def verified_ground_truth_manifest(tmp_path: Path) -> Path:
+def verified_ground_truth_manifest(tmp_path: Path, *, source_mix_1_to_1: bool = True) -> Path:
     root = tmp_path / "lab" / "golden_audio" / "verified_gt"
     (root / "stems").mkdir(parents=True, exist_ok=True)
     (root / "source_mix.flac").write_bytes(b"mix")
@@ -166,7 +166,10 @@ def verified_ground_truth_manifest(tmp_path: Path) -> Path:
                 "vocals": {"path": "stems/vocals.flac", "sha256": "vocalsha"},
                 "instrumental": {"path": "stems/instrumental.flac", "sha256": "minussha"},
             },
-            "full_mix_reconstruction_contract": {"can_claim_source_mix_1_to_1": False},
+            "full_mix_reconstruction_contract": {
+                "status": "accepted" if source_mix_1_to_1 else "rejected",
+                "can_claim_source_mix_1_to_1": source_mix_1_to_1,
+            },
             "report_alignment_contract": {"rights_status": "user_owned"},
         },
     )
@@ -264,7 +267,26 @@ def test_builds_audio_examples_from_verified_ground_truth_bundle(tmp_path: Path)
     assert {row["stem_type"] for row in rows} == {"minus", "vocal"}
     assert {row["permission_status"] for row in rows} == {"project_owned"}
     assert all(row["reference_verified"] is True for row in rows)
-    assert all(row["safety"]["source_mix_1_to_1_claim_allowed"] is False for row in rows)
+    assert all(row["safety"]["source_mix_1_to_1_claim_allowed"] is True for row in rows)
+    assert all(row["source_gate"]["trainable_ground_truth"] is True for row in rows)
+
+
+def test_rejected_ground_truth_reconstruction_is_not_audio_trainable(tmp_path: Path) -> None:
+    verified_ground_truth_manifest(tmp_path, source_mix_1_to_1=False)
+
+    manifest = build_corpus(
+        artifact_root=tmp_path / "lab",
+        output_dir=tmp_path / "out",
+        human_feedback_jsonls=[],
+        permission_default="requires_review",
+    )
+
+    assert manifest["summary"]["ground_truth_manifests"] == 1
+    assert manifest["summary"]["ground_truth_audio_training_examples"] == 0
+    assert manifest["summary"]["audio_training_examples"] == 0
+    excluded = read_jsonl(tmp_path / "out" / "excluded_examples.jsonl")
+    assert excluded[0]["exclude_reason"] == "ground_truth_reconstruction_not_trainable"
+    assert excluded[0]["source_gate"]["trainable_ground_truth"] is False
 
 
 def test_hard_eval_rows_are_not_controller_training_examples_by_default(tmp_path: Path) -> None:

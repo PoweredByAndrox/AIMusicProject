@@ -96,6 +96,7 @@ def _ground_truth_bundle(
     source: str = "FL Studio split mixer tracks plus full mix supplied by user",
     verified: bool = True,
     rights_status: str = "user_owned",
+    source_mix_1_to_1: bool = True,
 ) -> Path:
     bundle = root / name
     mix = _audio(bundle / "source_mix.flac")
@@ -108,6 +109,10 @@ def _ground_truth_bundle(
         {
             "track_name": track_id,
             "ground_truth_contract": {"verified": verified, "source": source},
+            "full_mix_reconstruction_contract": {
+                "status": "accepted" if source_mix_1_to_1 else "rejected",
+                "can_claim_source_mix_1_to_1": source_mix_1_to_1,
+            },
             "mix": {"path": Path(mix).name},
             "stems": stem_payload,
             "report_alignment_contract": {"rights_status": rights_status},
@@ -164,7 +169,35 @@ def test_intake_accepts_only_new_verified_required_reference_stems(tmp_path: Pat
     assert {row["permission_status"] for row in examples} == {"project_owned"}
     assert all(row["trainable"] is True for row in examples)
     assert all(row["reference_verified"] is True for row in examples)
+    assert all(row["source_gate"]["trainable_ground_truth"] is True for row in examples)
     assert all(len(path.name) <= 32 for path in (tmp_path / "out").iterdir() if path.is_file())
+
+
+def test_intake_rejects_rejected_full_mix_reconstruction(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates"
+    _ground_truth_bundle(
+        candidates,
+        "rejected_reconstruction",
+        track_id="track-b",
+        stems=["drums"],
+        source_mix_1_to_1=False,
+    )
+
+    manifest = build_full_pack_reference_corpus_intake(
+        gap_plan_json=_gap_plan(tmp_path),
+        existing_audio_training_examples_jsonl=_existing_examples(tmp_path),
+        candidate_roots=[candidates],
+        output_dir=tmp_path / "out",
+    )
+
+    assert manifest["intake_status"] == "no_accepted_references"
+    assert manifest["accepted_reference_rows"] == 0
+    assert manifest["accepted_audio_training_examples"] == 0
+    assert manifest["rejected_reference_rows"] == 1
+    rows = _read_jsonl(tmp_path / "out" / "rows.jsonl")
+    assert rows[0]["intake_status"] == "rejected"
+    assert "ground_truth_reconstruction_not_trainable" in rows[0]["rejection_reasons"]
+    assert rows[0]["source_gate"]["trainable_ground_truth"] is False
 
 
 def test_intake_rejects_debug_test_artifact_ground_truth_bundles(tmp_path: Path) -> None:
