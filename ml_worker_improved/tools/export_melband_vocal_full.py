@@ -40,6 +40,11 @@ from export_melband_vocal_preview import (  # noqa: E402
 MODEL_ID = "melband_roformer_vocals"
 MODEL_DISPLAY_NAME = "MelBand RoFormer vocal checkpoint"
 MODEL_INPUT_STEM = "full_track"
+VENDOR_CPU_FALLBACK_MARKERS = (
+    "run inference on cpu",
+    "running inference on cpu",
+    "cpu inference",
+)
 
 
 def _emit(message: str) -> None:
@@ -92,6 +97,31 @@ def verify_cuda_inference_device(device_id: int) -> dict[str, Any]:
         "device_id": int(device_id),
         "device_count": device_count,
         "device_name": str(cuda.get_device_name(int(device_id))),
+        "requested_device": f"cuda:{int(device_id)}",
+        "resolved_device": f"cuda:{int(device_id)}",
+        "acceleration_mode": "cuda_gpu_inference",
+    }
+
+
+def inspect_vendor_inference_runtime(
+    *,
+    stdout: str,
+    stderr: str,
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    combined_log = f"{stdout}\n{stderr}".lower()
+    matched_markers = [marker for marker in VENDOR_CPU_FALLBACK_MARKERS if marker in combined_log]
+    cpu_fallback_detected = bool(matched_markers)
+    expected_mode = str(preflight.get("acceleration_mode") or "cuda_gpu_inference")
+    actual_mode = "cpu_inference_fallback" if cpu_fallback_detected else expected_mode
+    return {
+        "expected_acceleration_mode": expected_mode,
+        "actual_acceleration_mode": actual_mode,
+        "vendor_cpu_fallback_detected": cpu_fallback_detected,
+        "gpu_inference_skipped": cpu_fallback_detected,
+        "fallback_markers": matched_markers,
+        "delivery_blocking": cpu_fallback_detected,
+        "delivery_blocker_reason": "vendor_reported_cpu_inference_fallback" if cpu_fallback_detected else None,
     }
 
 
@@ -166,9 +196,13 @@ def build_full_track_stem_manifest(
     stem_provenance: dict[str, dict[str, Any]] | None = None,
     residual_companion_materialized: bool = False,
     cuda_preflight: dict[str, Any] | None = None,
+    inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
 ) -> dict[str, Any]:
     stem_provenance = stem_provenance or {}
+    inference_runtime = inference_runtime or {}
+    fallback_used = bool(inference_runtime.get("vendor_cpu_fallback_detected"))
+    delivery_blocking_runtime = bool(inference_runtime.get("delivery_blocking"))
     target_stem = choose_primary_stem(primary_stem=primary_stem, stem_provenance=stem_provenance)
     target_audio_path = instrumental_flac_path if target_stem == "instrumental" else vocals_flac_path
     vocals_summary = {
@@ -205,8 +239,8 @@ def build_full_track_stem_manifest(
             "full_track": True,
             "preview": False,
             "benchmark_compatible": True,
-            "fallback_used": False,
-            "hidden_inference": False,
+            "fallback_used": fallback_used,
+            "hidden_inference": delivery_blocking_runtime,
             "registered_model_candidate": True,
             "per_track_hardcode_allowed": False,
             "residual_companion_materialized": bool(residual_companion_materialized),
@@ -215,8 +249,13 @@ def build_full_track_stem_manifest(
             "docker_runtime_required": True,
             "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
             "gpu_inference_required": True,
-            "gpu_inference_skipped": False,
+            "gpu_inference_skipped": bool(inference_runtime.get("gpu_inference_skipped")),
+            "actual_acceleration_mode": inference_runtime.get(
+                "actual_acceleration_mode",
+                (cuda_preflight or {}).get("acceleration_mode", "cuda_gpu_inference"),
+            ),
             "cuda_preflight": dict(cuda_preflight or {}),
+            "inference_runtime": dict(inference_runtime),
         },
         "stems": {
             "vocals": vocals_summary,
@@ -234,6 +273,11 @@ def build_full_track_stem_manifest(
             "duration_sec": round(float(frames) / float(sample_rate), 6) if sample_rate else 0.0,
         },
         "elapsed_sec": round(float(elapsed_sec), 3),
+        "delivery_allowed": False,
+        "delivery_status": "blocked_runtime_contract" if delivery_blocking_runtime else "not_evaluated",
+        "presentation_status": (
+            "blocked_from_delivery" if delivery_blocking_runtime else "blocked_until_reference_gate"
+        ),
     }
 
 
@@ -259,6 +303,7 @@ def write_full_track_stem_manifest(
     stem_provenance: dict[str, dict[str, Any]] | None = None,
     residual_companion_materialized: bool = False,
     cuda_preflight: dict[str, Any] | None = None,
+    inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
 ) -> Path:
     manifest = build_full_track_stem_manifest(
@@ -281,6 +326,7 @@ def write_full_track_stem_manifest(
         stem_provenance=stem_provenance,
         residual_companion_materialized=residual_companion_materialized,
         cuda_preflight=cuda_preflight,
+        inference_runtime=inference_runtime,
         primary_stem=primary_stem,
     )
     manifest_path = output_dir / "stem_manifest.json"
@@ -635,6 +681,17 @@ def main() -> None:
             print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n", flush=True)
         if completed.stderr.strip():
             print(completed.stderr, end="" if completed.stderr.endswith("\n") else "\n", flush=True)
+        inference_runtime = inspect_vendor_inference_runtime(
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+            preflight=cuda_preflight,
+        )
+        if inference_runtime["vendor_cpu_fallback_detected"]:
+            _emit(
+                "vendor_cpu_fallback_detected "
+                f"actual_acceleration_mode={inference_runtime['actual_acceleration_mode']} "
+                f"markers={','.join(inference_runtime['fallback_markers'])}"
+            )
 
         vocals_wav = try_resolve_model_output_path(model_output_dir, "vocals")
         instrumental_wav = try_resolve_model_output_path(model_output_dir, "instrumental")
@@ -762,6 +819,7 @@ def main() -> None:
             stem_provenance=resolved_stems["stem_provenance"],
             residual_companion_materialized=bool(resolved_stems["residual_companion_materialized"]),
             cuda_preflight=cuda_preflight,
+            inference_runtime=inference_runtime,
             primary_stem=target_stem,
         )
 

@@ -29,16 +29,17 @@ EPSILON = 1.0e-12
 DEFAULT_MIN_SDR_DB = 20.0
 DEFAULT_MIN_COSINE_PERCENT = 95.0
 DEFAULT_MAX_RESIDUAL_PEAK_DBFS = -45.0
+DEFAULT_STREAM_BLOCK_FRAMES = 262_144
 
 
 def _load_audio(path: str | Path) -> tuple[np.ndarray, int]:
-    audio, sample_rate = sf.read(path, always_2d=False)
-    return np.asarray(audio, dtype=np.float64), int(sample_rate)
+    audio, sample_rate = sf.read(path, always_2d=False, dtype="float32")
+    return np.asarray(audio, dtype=np.float32), int(sample_rate)
 
 
 def _normalize_audio_shape(reference_audio: np.ndarray, candidate_audio: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    reference = np.asarray(reference_audio, dtype=np.float64)
-    candidate = np.asarray(candidate_audio, dtype=np.float64)
+    reference = np.asarray(reference_audio)
+    candidate = np.asarray(candidate_audio)
     if reference.ndim > 2 or candidate.ndim > 2:
         raise ValueError("expected mono or stereo audio arrays")
     if reference.ndim != candidate.ndim:
@@ -49,6 +50,106 @@ def _normalize_audio_shape(reference_audio: np.ndarray, candidate_audio: np.ndar
     if frame_count <= 0:
         raise ValueError("reference and candidate must contain at least one frame")
     return reference[:frame_count], candidate[:frame_count]
+
+
+def _read_streaming_metrics_and_evidence_head(
+    *,
+    reference_path: str | Path,
+    candidate_path: str | Path,
+    max_evidence_frames: int | None,
+    block_frames: int = DEFAULT_STREAM_BLOCK_FRAMES,
+) -> dict[str, Any]:
+    if block_frames <= 0:
+        raise ValueError(f"block_frames must be positive, got {block_frames}")
+    if max_evidence_frames is not None and int(max_evidence_frames) <= 0:
+        raise ValueError(f"max_evidence_frames must be positive when provided, got {max_evidence_frames}")
+
+    with sf.SoundFile(str(reference_path), mode="r") as reference_file, sf.SoundFile(
+        str(candidate_path),
+        mode="r",
+    ) as candidate_file:
+        if reference_file.samplerate != candidate_file.samplerate:
+            raise ValueError(
+                f"sample-rate mismatch: reference={reference_file.samplerate}, "
+                f"candidate={candidate_file.samplerate}"
+            )
+        if reference_file.channels != candidate_file.channels:
+            raise ValueError(
+                f"channel-count mismatch: reference={reference_file.channels}, candidate={candidate_file.channels}"
+            )
+
+        sample_rate = int(reference_file.samplerate)
+        reference_frame_count = int(reference_file.frames)
+        candidate_frame_count = int(candidate_file.frames)
+        compared_frame_count = min(reference_frame_count, candidate_frame_count)
+        if compared_frame_count <= 0:
+            raise ValueError("reference and candidate must contain at least one frame")
+
+        evidence_frame_limit = (
+            min(compared_frame_count, int(max_evidence_frames))
+            if max_evidence_frames is not None
+            else compared_frame_count
+        )
+        reference_head_chunks: list[np.ndarray] = []
+        candidate_head_chunks: list[np.ndarray] = []
+        reference_energy = 0.0
+        candidate_energy = 0.0
+        residual_energy = 0.0
+        dot_product = 0.0
+        residual_peak = 0.0
+        residual_value_count = 0
+        frames_read = 0
+
+        while frames_read < compared_frame_count:
+            frames_to_read = min(int(block_frames), compared_frame_count - frames_read)
+            reference_block = reference_file.read(frames_to_read, dtype="float32", always_2d=False)
+            candidate_block = candidate_file.read(frames_to_read, dtype="float32", always_2d=False)
+            reference_block = np.asarray(reference_block, dtype=np.float32)
+            candidate_block = np.asarray(candidate_block, dtype=np.float32)
+            residual_block = reference_block - candidate_block
+
+            reference_energy += float(np.sum(np.square(reference_block), dtype=np.float64))
+            candidate_energy += float(np.sum(np.square(candidate_block), dtype=np.float64))
+            residual_energy += float(np.sum(np.square(residual_block), dtype=np.float64))
+            dot_product += float(
+                np.dot(
+                    reference_block.reshape(-1).astype(np.float64, copy=False),
+                    candidate_block.reshape(-1).astype(np.float64, copy=False),
+                )
+            )
+            residual_peak = max(residual_peak, float(np.max(np.abs(residual_block))))
+            residual_value_count += int(residual_block.size)
+
+            if frames_read < evidence_frame_limit:
+                keep_frames = min(evidence_frame_limit - frames_read, reference_block.shape[0])
+                reference_head_chunks.append(reference_block[:keep_frames].copy())
+                candidate_head_chunks.append(candidate_block[:keep_frames].copy())
+            frames_read += int(reference_block.shape[0])
+
+    reference_head = np.concatenate(reference_head_chunks, axis=0) if reference_head_chunks else np.empty(0)
+    candidate_head = np.concatenate(candidate_head_chunks, axis=0) if candidate_head_chunks else np.empty(0)
+    residual_rms = math.sqrt((residual_energy / max(residual_value_count, 1)) + EPSILON)
+    cosine_denominator = math.sqrt(reference_energy) * math.sqrt(candidate_energy) + EPSILON
+    metrics = {
+        "sdr_db": float(10.0 * math.log10((reference_energy + EPSILON) / (residual_energy + EPSILON))),
+        "cosine_percent": float(100.0 * dot_product / cosine_denominator),
+        "residual_rms_dbfs": float(20.0 * math.log10(max(residual_rms, EPSILON))),
+        "residual_peak_dbfs": _dbfs_from_peak(residual_peak),
+        "compared_frame_count": int(compared_frame_count),
+        "reference_frame_count": int(reference_frame_count),
+        "candidate_frame_count": int(candidate_frame_count),
+        "truncated_to_overlap": bool(reference_frame_count != candidate_frame_count),
+    }
+    return {
+        "sample_rate": sample_rate,
+        "reference_frame_count": int(reference_frame_count),
+        "candidate_frame_count": int(candidate_frame_count),
+        "compared_frame_count": int(compared_frame_count),
+        "evidence_frame_count": int(reference_head.shape[0]),
+        "reference_evidence_audio": reference_head,
+        "candidate_evidence_audio": candidate_head,
+        "metrics": metrics,
+    }
 
 
 def _dbfs_from_peak(value: float) -> float:
@@ -113,16 +214,16 @@ def write_exact_reference_listen_audit(
     max_defect_ranges: int = DEFAULT_MAX_DEFECT_RANGES,
     max_offset_samples: int = 0,
     reference_stems: dict[str, np.ndarray] | None = None,
+    max_evidence_frames: int | None = None,
 ) -> dict[str, Any]:
-    reference_audio, reference_sample_rate = _load_audio(reference_path)
-    candidate_audio, candidate_sample_rate = _load_audio(candidate_path)
-    if reference_sample_rate != candidate_sample_rate:
-        raise ValueError(
-            f"sample-rate mismatch: reference={reference_sample_rate}, candidate={candidate_sample_rate}"
-        )
-
-    reference_aligned, candidate_aligned = _normalize_audio_shape(reference_audio, candidate_audio)
-    residual = reference_aligned - candidate_aligned
+    streamed = _read_streaming_metrics_and_evidence_head(
+        reference_path=reference_path,
+        candidate_path=candidate_path,
+        max_evidence_frames=max_evidence_frames,
+    )
+    reference_sample_rate = int(streamed["sample_rate"])
+    reference_audio = streamed["reference_evidence_audio"]
+    candidate_audio = streamed["candidate_evidence_audio"]
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -140,18 +241,31 @@ def write_exact_reference_listen_audit(
         max_offset_samples=max_offset_samples,
         apply_gain_correction=False,
         reference_stems=reference_stems,
+        max_evidence_frames=max_evidence_frames,
     )
 
-    metrics = {
-        "sdr_db": _sdr_db(reference_aligned, candidate_aligned),
-        "cosine_percent": _cosine_percent(reference_aligned, candidate_aligned),
-        "residual_rms_dbfs": _dbfs_from_rms(residual),
-        "residual_peak_dbfs": _dbfs_from_peak(float(np.max(np.abs(residual)))),
-        "compared_frame_count": int(reference_aligned.shape[0]),
-        "reference_frame_count": int(reference_audio.shape[0]),
-        "candidate_frame_count": int(candidate_audio.shape[0]),
-        "truncated_to_overlap": bool(reference_audio.shape[0] != candidate_audio.shape[0]),
-    }
+    metrics = dict(streamed["metrics"])
+    evidence_scope = dict(evidence_report.get("artifact_scope", {}))
+    if metrics["compared_frame_count"] > streamed["evidence_frame_count"]:
+        evidence_scope = {
+            "mode": "head_truncated",
+            "aligned_frame_count": int(metrics["compared_frame_count"]),
+            "artifact_frame_count": int(streamed["evidence_frame_count"]),
+            "max_evidence_frames": int(max_evidence_frames) if max_evidence_frames is not None else None,
+            "waveform_forensic_scope": "evidence_head_only",
+            "exact_metrics_scope": "full_overlap_streaming",
+        }
+        evidence_report["artifact_scope"] = evidence_scope
+        report_rel_path = evidence_report.get("evidence_artifacts", {}).get("report_json")
+        if report_rel_path:
+            evidence_report_path = evidence_dir / str(report_rel_path)
+            if evidence_report_path.exists():
+                persisted_evidence = json.loads(evidence_report_path.read_text(encoding="utf-8"))
+                persisted_evidence["artifact_scope"] = evidence_scope
+                evidence_report_path.write_text(
+                    json.dumps(persisted_evidence, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
     failed_checks = _build_failed_checks(
         sdr_db=metrics["sdr_db"],
         cosine_percent=metrics["cosine_percent"],
@@ -161,6 +275,8 @@ def write_exact_reference_listen_audit(
         min_cosine_percent=min_cosine_percent,
         max_residual_peak_dbfs=max_residual_peak_dbfs,
     )
+    if evidence_scope.get("waveform_forensic_scope") == "evidence_head_only":
+        failed_checks.append("waveform_forensic_scope_truncated")
     delivery_status = "accepted" if not failed_checks else "rejected"
     audit_report = {
         "schema_version": 1,
@@ -169,12 +285,12 @@ def write_exact_reference_listen_audit(
         "reference": {
             "path": str(reference_path),
             "sample_rate": reference_sample_rate,
-            "frame_count": int(reference_audio.shape[0]),
+            "frame_count": int(metrics["reference_frame_count"]),
         },
         "candidate": {
             "path": str(candidate_path),
-            "sample_rate": candidate_sample_rate,
-            "frame_count": int(candidate_audio.shape[0]),
+            "sample_rate": reference_sample_rate,
+            "frame_count": int(metrics["candidate_frame_count"]),
         },
         "thresholds": {
             "min_sdr_db": float(min_sdr_db),
@@ -186,6 +302,7 @@ def write_exact_reference_listen_audit(
             "status": "available",
             "output_dir": "forensic_evidence",
             "evidence_artifacts": evidence_report["evidence_artifacts"],
+            "artifact_scope": evidence_scope,
             "waveform_status": evidence_report["waveform_forensics"]["status"],
             "defect_ranges": evidence_report["waveform_forensics"]["defect_ranges"],
         },
@@ -224,10 +341,11 @@ def main() -> int:
     parser.add_argument("--envelope-window-sec", type=float, default=DEFAULT_ENVELOPE_WINDOW_SEC)
     parser.add_argument("--max-defect-ranges", type=int, default=DEFAULT_MAX_DEFECT_RANGES)
     parser.add_argument("--max-offset-samples", type=int, default=0)
+    parser.add_argument("--max-evidence-frames", type=int)
     parser.add_argument("--reference-stem", action="append", default=[], help="Named source stem in NAME=PATH form.")
     args = parser.parse_args()
 
-    _, sample_rate = _load_audio(args.reference)
+    sample_rate = int(sf.info(args.reference).samplerate)
     reference_stems = _load_named_reference_stems(args.reference_stem, expected_sample_rate=sample_rate)
     report = write_exact_reference_listen_audit(
         reference_path=args.reference,
@@ -243,6 +361,7 @@ def main() -> int:
         max_defect_ranges=args.max_defect_ranges,
         max_offset_samples=args.max_offset_samples,
         reference_stems=reference_stems,
+        max_evidence_frames=args.max_evidence_frames,
     )
     print(
         json.dumps(

@@ -26,6 +26,7 @@ from worker.model_registry import ModelRegistry, default_model_registry  # noqa:
 
 
 DEFAULT_SAMPLE_RATE = quality_gate.DEFAULT_SAMPLE_RATE
+DEFAULT_EXACT_AUDIT_MAX_EVIDENCE_FRAMES = 262_144
 ADAPTIVE_REPAIR_BASE_MODEL_LABELS = frozenset(
     {
         "scnet",
@@ -257,6 +258,7 @@ def write_exact_reference_audit_bundle(
     output_dir: Path,
     stem_names: Sequence[str],
     thresholds: quality_gate.ObjectiveThresholds,
+    max_evidence_frames: int | None = DEFAULT_EXACT_AUDIT_MAX_EVIDENCE_FRAMES,
 ) -> dict[str, Any]:
     ground_truth_payload = read_candidate_manifest(ground_truth_manifest)
     candidate_payload = read_candidate_manifest(candidate_manifest)
@@ -285,6 +287,7 @@ def write_exact_reference_audit_bundle(
             min_cosine_percent=95.0,
             max_residual_peak_dbfs=-45.0,
             defect_threshold_dbfs=-60.0,
+            max_evidence_frames=max_evidence_frames,
         )
         delivery_status = audit_report["delivery"]["status"]
         if delivery_status != "accepted":
@@ -296,6 +299,7 @@ def write_exact_reference_audit_bundle(
             "failed_checks": audit_report["delivery"]["failed_checks"],
             "report_json": str(stem_output_dir / "exact_reference_listen_audit.json"),
             "forensic_evidence_dir": str(stem_output_dir / "forensic_evidence"),
+            "forensic_evidence_scope": audit_report.get("forensic_evidence", {}).get("artifact_scope", {}),
             "metrics": audit_report["metrics"],
         }
     if failed_stems:
@@ -312,6 +316,7 @@ def write_exact_reference_audit_bundle(
         "delivery_status": delivery_status,
         "delivery_reason": delivery_reason,
         "output_dir": str(output_dir),
+        "max_evidence_frames": int(max_evidence_frames) if max_evidence_frames is not None else None,
         "failed_stems": failed_stems,
         "skipped_stems": skipped_stems,
         "stems": stem_reports,
@@ -664,6 +669,7 @@ def run_model_zoo_benchmark(
     include_unavailable_registry_candidates: bool = True,
     next_candidate_limit: int = 5,
     require_no_reference_candidates: bool = False,
+    exact_audit_max_evidence_frames: int | None = DEFAULT_EXACT_AUDIT_MAX_EVIDENCE_FRAMES,
 ) -> dict[str, Any]:
     if not candidate_manifests:
         raise ValueError("at least one candidate manifest is required")
@@ -682,6 +688,7 @@ def run_model_zoo_benchmark(
             output_dir=output_dir / "exact_reference_listen_audits" / candidate_file_label,
             stem_names=stem_names,
             thresholds=thresholds,
+            max_evidence_frames=exact_audit_max_evidence_frames,
         )
         report = quality_gate.evaluate_candidate_manifest(
             ground_truth_manifest=ground_truth_manifest,
@@ -756,6 +763,10 @@ def run_model_zoo_benchmark(
             "no_reference_candidate_contract_enforced": require_no_reference_candidates,
             "require_no_reference_candidates": require_no_reference_candidates,
             "exact_reference_listen_audit_enforced": True,
+            "exact_reference_evidence_bounded": exact_audit_max_evidence_frames is not None,
+            "exact_reference_max_evidence_frames": (
+                int(exact_audit_max_evidence_frames) if exact_audit_max_evidence_frames is not None else None
+            ),
             "ralph_ai_delivery_contract_enforced": True,
             "best_of_bad_candidate_delivery_forbidden": True,
             "rejected_candidates_are_diagnostic_only": True,
@@ -826,6 +837,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry-runtime-root", type=Path, default=Path("/app"))
     parser.add_argument("--next-candidate-limit", type=int, default=5)
     parser.add_argument(
+        "--exact-audit-max-evidence-frames",
+        type=int,
+        default=DEFAULT_EXACT_AUDIT_MAX_EVIDENCE_FRAMES,
+        help="Bound heavy exact-audit trace/residual artifacts while keeping full-audio metrics.",
+    )
+    parser.add_argument(
         "--available-registry-candidates-only",
         action="store_true",
         help="Do not suggest registered models whose required paths are missing.",
@@ -859,6 +876,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--max-offset-seconds must not be negative")
     if args.next_candidate_limit < 0:
         raise ValueError("--next-candidate-limit must not be negative")
+    if args.exact_audit_max_evidence_frames is not None and args.exact_audit_max_evidence_frames <= 0:
+        raise ValueError("--exact-audit-max-evidence-frames must be positive when provided")
 
     thresholds = quality_gate.ObjectiveThresholds(
         min_sdr_db=args.min_sdr_db,
@@ -879,6 +898,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         include_unavailable_registry_candidates=not bool(args.available_registry_candidates_only),
         next_candidate_limit=args.next_candidate_limit,
         require_no_reference_candidates=bool(args.require_no_reference_candidates),
+        exact_audit_max_evidence_frames=args.exact_audit_max_evidence_frames,
     )
     print(
         json.dumps(

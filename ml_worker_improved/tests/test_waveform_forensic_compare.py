@@ -193,6 +193,77 @@ class TestWaveformForensicCompare(unittest.TestCase):
             self.assertEqual(residual_sample_rate, sample_rate)
             self.assertEqual(residual_audio.shape[0], residual_frame_count)
 
+    def test_writes_bounded_forensic_evidence_without_truncating_metrics(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        frame_count = sample_rate
+        time = np.arange(frame_count, dtype=np.float64) / sample_rate
+        reference = (0.20 * np.sin(2.0 * np.pi * 110.0 * time)).astype(np.float32)
+        candidate = reference.copy()
+        candidate[int(0.6 * sample_rate) : int(0.7 * sample_rate)] += 0.10
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            report = module.write_waveform_forensic_evidence_pack(
+                reference_audio=reference,
+                candidate_audio=candidate,
+                sample_rate=sample_rate,
+                output_dir=output_dir,
+                stem_name="drums",
+                defect_threshold_dbfs=-50.0,
+                max_evidence_frames=1024,
+            )
+
+            self.assertEqual(report["artifact_scope"]["mode"], "head_truncated")
+            self.assertEqual(report["artifact_scope"]["aligned_frame_count"], frame_count)
+            self.assertEqual(report["artifact_scope"]["artifact_frame_count"], 1024)
+            self.assertEqual(report["waveform_forensics"]["alignment"]["aligned_frame_count"], frame_count)
+            artifacts = report["evidence_artifacts"]
+            with np.load(output_dir / artifacts["trace_npz"]) as trace:
+                self.assertEqual(trace["reference_aligned"].shape[0], 1024)
+                self.assertEqual(trace["residual"].shape[0], 1024)
+            residual_audio, _ = sf.read(output_dir / artifacts["residual_audio_wav"])
+            self.assertEqual(residual_audio.shape[0], 1024)
+
+    def test_evidence_pack_reuses_prebuilt_analysis_arrays(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        frame_count = sample_rate
+        time = np.arange(frame_count, dtype=np.float64) / sample_rate
+        reference = (0.20 * np.sin(2.0 * np.pi * 110.0 * time)).astype(np.float32)
+        candidate = reference.copy()
+        candidate[int(0.2 * sample_rate) : int(0.3 * sample_rate)] += 0.10
+        analysis_arrays = module._build_analysis_arrays(
+            reference_audio=reference,
+            candidate_audio=candidate,
+            sample_rate=sample_rate,
+            max_offset_samples=0,
+            apply_gain_correction=False,
+        )
+        original_builder = module._build_analysis_arrays
+
+        def fail_if_rebuilt(*_args, **_kwargs):
+            raise AssertionError("analysis arrays were rebuilt")
+
+        module._build_analysis_arrays = fail_if_rebuilt
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                report = module.write_waveform_forensic_evidence_pack(
+                    reference_audio=reference,
+                    candidate_audio=candidate,
+                    sample_rate=sample_rate,
+                    output_dir=Path(temp_dir),
+                    stem_name="drums",
+                    defect_threshold_dbfs=-50.0,
+                    max_evidence_frames=1024,
+                    analysis_arrays=analysis_arrays,
+                )
+        finally:
+            module._build_analysis_arrays = original_builder
+
+        self.assertEqual(report["artifact_scope"]["aligned_frame_count"], frame_count)
+        self.assertEqual(report["waveform_forensics"]["alignment"]["aligned_frame_count"], frame_count)
+
     def test_evidence_pack_rejects_path_like_stem_name(self) -> None:
         module = _load_module()
         sample_rate = 8000

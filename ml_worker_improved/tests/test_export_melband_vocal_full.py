@@ -72,6 +72,9 @@ def test_full_track_manifest_is_quality_gate_compatible(tmp_path: Path) -> None:
     assert manifest["contract"]["full_track"] is True
     assert manifest["contract"]["benchmark_compatible"] is True
     assert manifest["contract"]["fallback_used"] is False
+    assert manifest["delivery_allowed"] is False
+    assert manifest["delivery_status"] == "not_evaluated"
+    assert manifest["presentation_status"] == "blocked_until_reference_gate"
     assert manifest["stems"]["vocals"]["path"] == str(vocals_path)
     assert manifest["stems"]["instrumental"]["path"] == str(instrumental_path)
     assert manifest["artifacts"]["raw_ref_flac"] == str(raw_ref_path)
@@ -167,7 +170,54 @@ def test_verify_cuda_inference_device_returns_device_evidence(monkeypatch: pytes
         "device_id": 1,
         "device_count": 2,
         "device_name": "Unit Test GPU 1",
+        "requested_device": "cuda:1",
+        "resolved_device": "cuda:1",
+        "acceleration_mode": "cuda_gpu_inference",
     }
+
+
+def test_vendor_cpu_fallback_blocks_manifest_delivery(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    vocals_path = output_dir / "vocals.flac"
+    instrumental_path = output_dir / "instrumental.flac"
+    raw_ref_path = output_dir / "raw_ref.flac"
+    output_dir.mkdir()
+    for path in (source_audio_path, vocals_path, instrumental_path, raw_ref_path):
+        _write_tiny_flac(path)
+
+    runtime = module.inspect_vendor_inference_runtime(
+        stdout="CUDA is not available. Run inference on CPU. It will be very slow...\n",
+        stderr="",
+        preflight={"acceleration_mode": "native_macos_mps_diagnostic"},
+    )
+    manifest = module.build_full_track_stem_manifest(
+        source_audio_path=source_audio_path,
+        vocals_flac_path=vocals_path,
+        instrumental_flac_path=instrumental_path,
+        raw_ref_flac_path=raw_ref_path,
+        repo_path=Path("/repo"),
+        model_path=Path("/model.ckpt"),
+        config_template_path=Path("/config.yaml"),
+        runtime_config_path=Path("/runtime.yaml"),
+        device_id=0,
+        num_overlap=2,
+        sample_rate=44100,
+        frames=44100,
+        elapsed_sec=1.0,
+        postprocess={"name": None},
+        cuda_preflight={"acceleration_mode": "native_macos_mps_diagnostic"},
+        inference_runtime=runtime,
+    )
+
+    assert runtime["vendor_cpu_fallback_detected"] is True
+    assert manifest["contract"]["fallback_used"] is True
+    assert manifest["contract"]["hidden_inference"] is True
+    assert manifest["execution_contract"]["gpu_inference_skipped"] is True
+    assert manifest["execution_contract"]["actual_acceleration_mode"] == "cpu_inference_fallback"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["delivery_status"] == "blocked_runtime_contract"
 
 
 def test_melband_preflight_accepts_explicit_native_macos_mps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,6 +441,7 @@ def test_main_rejects_two_stem_config_when_model_omits_vocals(tmp_path: Path, mo
         return module.subprocess.CompletedProcess(command, 0, stdout="fake inference\n", stderr="")
 
     monkeypatch.setattr(module, "require_docker_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(module, "verify_cuda_inference_device", lambda _device_id: {"device_id": 0, "device_count": 1, "device_name": "test"})
     monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     monkeypatch.setattr(module, "apply_light_debleed_presence", _neutral_audio)

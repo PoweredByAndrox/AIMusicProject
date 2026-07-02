@@ -82,23 +82,37 @@ class TestWriteExactReferenceListenAudit(unittest.TestCase):
                 min_cosine_percent=99.0,
                 max_residual_peak_dbfs=-90.0,
                 defect_threshold_dbfs=-50.0,
+                max_evidence_frames=1024,
             )
 
             self.assertEqual(report["delivery"]["status"], "rejected")
             self.assertEqual(report["delivery"]["reason"], "exact_reference_threshold_failed")
             self.assertIn("sdr_below_threshold", report["delivery"]["failed_checks"])
             self.assertIn("residual_peak_above_threshold", report["delivery"]["failed_checks"])
+            self.assertIn("waveform_forensic_scope_truncated", report["delivery"]["failed_checks"])
             self.assertEqual(report["comparison_mode"], "exact_reference_listen_audit")
             self.assertEqual(report["reference"]["path"], str(reference_path))
             self.assertEqual(report["candidate"]["path"], str(candidate_path))
 
             evidence = report["forensic_evidence"]
             self.assertEqual(evidence["status"], "available")
+            self.assertEqual(evidence["artifact_scope"]["mode"], "head_truncated")
+            self.assertEqual(evidence["artifact_scope"]["aligned_frame_count"], frame_count)
+            self.assertEqual(evidence["artifact_scope"]["artifact_frame_count"], 1024)
+            self.assertEqual(evidence["artifact_scope"]["waveform_forensic_scope"], "evidence_head_only")
+            self.assertEqual(evidence["artifact_scope"]["exact_metrics_scope"], "full_overlap_streaming")
+            self.assertEqual(report["metrics"]["compared_frame_count"], frame_count)
             for artifact_path in evidence["evidence_artifacts"].values():
                 self.assertTrue((output_dir / evidence["output_dir"] / artifact_path).exists(), artifact_path)
 
             persisted = json.loads((output_dir / "exact_reference_listen_audit.json").read_text(encoding="utf-8"))
             self.assertEqual(persisted["delivery"]["status"], "rejected")
+            persisted_evidence = json.loads(
+                (output_dir / evidence["output_dir"] / evidence["evidence_artifacts"]["report_json"]).read_text(
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual(persisted_evidence["artifact_scope"]["mode"], "head_truncated")
 
 
 if __name__ == "__main__":

@@ -181,6 +181,14 @@ class TestRunModelZooBenchmark(unittest.TestCase):
             self.assertFalse(report["contract"]["fallback_used"])
             self.assertTrue(report["contract"]["reference_assisted"])
             self.assertTrue(report["contract"]["acceptance_requires_delivery_accepted"])
+            self.assertTrue(report["contract"]["exact_reference_evidence_bounded"])
+            self.assertEqual(report["contract"]["exact_reference_max_evidence_frames"], 262144)
+            self.assertEqual(
+                report["ranked_candidates"][1]["exact_reference_stem_reports"]["vocals"]["forensic_evidence_scope"][
+                    "mode"
+                ],
+                "full_aligned",
+            )
             self.assertTrue((root / "benchmark" / "model_zoo_benchmark_manifest.json").exists())
             self.assertTrue(
                 (root / "benchmark" / "objective_reports" / "01_degraded_model_objective_report.json").exists()

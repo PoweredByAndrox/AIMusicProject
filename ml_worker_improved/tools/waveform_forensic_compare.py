@@ -371,13 +371,18 @@ def compare_waveforms_forensically(
     max_offset_samples: int = 0,
     apply_gain_correction: bool = False,
     reference_stems: Mapping[str, np.ndarray] | None = None,
+    analysis_arrays: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    arrays = _build_analysis_arrays(
-        reference_audio=reference_audio,
-        candidate_audio=candidate_audio,
-        sample_rate=sample_rate,
-        max_offset_samples=max_offset_samples,
-        apply_gain_correction=apply_gain_correction,
+    arrays = (
+        dict(analysis_arrays)
+        if analysis_arrays is not None
+        else _build_analysis_arrays(
+            reference_audio=reference_audio,
+            candidate_audio=candidate_audio,
+            sample_rate=sample_rate,
+            max_offset_samples=max_offset_samples,
+            apply_gain_correction=apply_gain_correction,
+        )
     )
     residual = arrays["residual"]
     abs_error = arrays["abs_error"]
@@ -573,17 +578,23 @@ def write_waveform_forensic_evidence_pack(
     max_offset_samples: int = 0,
     apply_gain_correction: bool = False,
     reference_stems: Mapping[str, np.ndarray] | None = None,
+    max_evidence_frames: int | None = None,
+    analysis_arrays: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     safe_stem_name = _validate_stem_name(stem_name)
     safe_max_offset_samples = _validate_max_offset_samples(max_offset_samples)
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    arrays = _build_analysis_arrays(
-        reference_audio=reference_audio,
-        candidate_audio=candidate_audio,
-        sample_rate=sample_rate,
-        max_offset_samples=safe_max_offset_samples,
-        apply_gain_correction=apply_gain_correction,
+    arrays = (
+        dict(analysis_arrays)
+        if analysis_arrays is not None
+        else _build_analysis_arrays(
+            reference_audio=reference_audio,
+            candidate_audio=candidate_audio,
+            sample_rate=sample_rate,
+            max_offset_samples=safe_max_offset_samples,
+            apply_gain_correction=apply_gain_correction,
+        )
     )
     report = compare_waveforms_forensically(
         reference_audio=reference_audio,
@@ -596,7 +607,26 @@ def write_waveform_forensic_evidence_pack(
         max_offset_samples=safe_max_offset_samples,
         apply_gain_correction=apply_gain_correction,
         reference_stems=reference_stems,
+        analysis_arrays=arrays,
     )
+    aligned_frame_count = int(arrays["reference"].shape[0])
+    if max_evidence_frames is not None and int(max_evidence_frames) <= 0:
+        raise ValueError(f"max_evidence_frames must be positive when provided, got {max_evidence_frames}")
+    artifact_frame_count = (
+        min(aligned_frame_count, int(max_evidence_frames))
+        if max_evidence_frames is not None
+        else aligned_frame_count
+    )
+    artifact_reference = arrays["reference"][:artifact_frame_count]
+    artifact_candidate = arrays["candidate"][:artifact_frame_count]
+    artifact_residual = arrays["residual"][:artifact_frame_count]
+    artifact_abs_error = arrays["abs_error"][:artifact_frame_count]
+    artifact_scope = {
+        "mode": "head_truncated" if artifact_frame_count < aligned_frame_count else "full_aligned",
+        "aligned_frame_count": aligned_frame_count,
+        "artifact_frame_count": int(artifact_frame_count),
+        "max_evidence_frames": int(max_evidence_frames) if max_evidence_frames is not None else None,
+    }
 
     trace_path = target_dir / f"{safe_stem_name}_waveform_trace.npz"
     residual_audio_path = target_dir / f"{safe_stem_name}_residual_aligned.wav"
@@ -606,17 +636,17 @@ def write_waveform_forensic_evidence_pack(
 
     np.savez_compressed(
         trace_path,
-        reference_aligned=arrays["reference"].astype(np.float32),
-        candidate_aligned=arrays["candidate"].astype(np.float32),
-        residual=arrays["residual"].astype(np.float32),
-        abs_error=arrays["abs_error"].astype(np.float32),
+        reference_aligned=artifact_reference.astype(np.float32),
+        candidate_aligned=artifact_candidate.astype(np.float32),
+        residual=artifact_residual.astype(np.float32),
+        abs_error=artifact_abs_error.astype(np.float32),
     )
-    sf.write(residual_audio_path, arrays["residual"].astype(np.float32), sample_rate, subtype="FLOAT")
+    sf.write(residual_audio_path, artifact_residual.astype(np.float32), sample_rate, subtype="FLOAT")
     _write_waveform_overlay_svg(
         path=overlay_svg_path,
-        reference=arrays["reference"],
-        candidate=arrays["candidate"],
-        residual=arrays["residual"],
+        reference=artifact_reference,
+        candidate=artifact_candidate,
+        residual=artifact_residual,
     )
     _write_residual_histogram_svg(path=histogram_svg_path, abs_error=arrays["abs_error"])
 
@@ -631,6 +661,7 @@ def write_waveform_forensic_evidence_pack(
         "schema_version": 1,
         "stem_name": safe_stem_name,
         "sample_rate": int(sample_rate),
+        "artifact_scope": artifact_scope,
         "waveform_forensics": report,
         "evidence_artifacts": _relative_artifact_paths(target_dir, artifact_paths),
     }
@@ -639,7 +670,7 @@ def write_waveform_forensic_evidence_pack(
 
 
 def _load_audio(path: str | Path) -> tuple[np.ndarray, int]:
-    audio, sample_rate = sf.read(path, always_2d=False)
+    audio, sample_rate = sf.read(path, always_2d=False, dtype="float32")
     return np.asarray(audio), int(sample_rate)
 
 
