@@ -273,6 +273,12 @@ def test_instrumental_residual_vocal_is_companion_not_selected_vocal(tmp_path: P
     assert row["vocal_companion_path"].endswith("instrumental/becruily_instrumental_vocals/vocals.flac")
     assert row["vocal_companion_role"] == "residual_companion"
     assert row["vocal_companion_source"] == "residual_from_raw_minus_instrumental"
+    assert row["stem_type"] == "minus"
+    assert row["score_mode"] == "minus"
+    assert row["source_manifest_target_stem"] == "instrumental"
+    assert row["canonical_stem_type"] == "instrumental"
+    assert row["user_facing_stem_role"] == "minus"
+    assert row["manifest_stem_name"] == "instrumental"
     assert "vocal_path" not in row
     assert "selected_vocal_path" not in row
 

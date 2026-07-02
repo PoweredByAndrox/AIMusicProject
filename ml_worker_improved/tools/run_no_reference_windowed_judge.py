@@ -569,6 +569,10 @@ def judge_candidate_windowed(
     provenance_fields = (
         "stem_type",
         "source_stem",
+        "source_manifest_target_stem",
+        "canonical_stem_type",
+        "user_facing_stem_role",
+        "manifest_stem_name",
         "base_candidate_id",
         "alternate_candidate_id",
         "window_start_sec",
@@ -709,6 +713,10 @@ def candidate_checkpoint_key(
         "vocal_companion_path": path_fingerprint(str(row.get("vocal_companion_path") or "")),
         "vocal_analysis_path": path_fingerprint(candidate_vocal_analysis_path(row)),
         "instrumental_path": path_fingerprint(str(row.get("instrumental_path") or row.get("minus_path") or "")),
+        "source_manifest_target_stem": str(row.get("source_manifest_target_stem") or ""),
+        "canonical_stem_type": str(row.get("canonical_stem_type") or ""),
+        "user_facing_stem_role": str(row.get("user_facing_stem_role") or ""),
+        "manifest_stem_name": str(row.get("manifest_stem_name") or ""),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 

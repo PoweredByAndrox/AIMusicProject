@@ -14,6 +14,14 @@ The bridge is diagnostic and fail-closed:
   `minus`/`instrumental` path plus a vocal companion path;
 - reads the completed `stem_manifest.json` to preserve the exact minus path,
   vocal companion path, and optional stem paths such as `melody`;
+- preserves role-safe naming metadata for minus rows:
+  - `stem_type=minus` remains the downstream product role / score mode;
+  - `source_manifest_target_stem` records the source manifest target, for
+    example `instrumental`;
+  - `canonical_stem_type` and `manifest_stem_name` record the source/model stem
+    selected from the manifest;
+  - `user_facing_stem_role=minus` records the listener-facing role without
+    renaming the underlying audio file;
 - writes `selected_vocal_path` only when the companion comes from a dedicated
   `target_stem=vocal`/`vocals` route. If a minus/instrumental route exposes
   `vocals.flac` only as a residual/source-conservation companion, the row uses

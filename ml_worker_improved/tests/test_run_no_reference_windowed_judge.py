@@ -240,6 +240,10 @@ def test_minus_mode_uses_vocal_companion_without_selected_vocal_alias(tmp_path: 
         "instrumental_path": base["instrumental_path"],
         "stem_type": "minus",
         "selected_minus_path": base["instrumental_path"],
+        "source_manifest_target_stem": "instrumental",
+        "canonical_stem_type": "instrumental",
+        "user_facing_stem_role": "minus",
+        "manifest_stem_name": "instrumental",
     }
 
     result = judge_candidate_rows_windowed(
@@ -258,6 +262,10 @@ def test_minus_mode_uses_vocal_companion_without_selected_vocal_alias(tmp_path: 
     assert judged["vocal_companion_role"] == "residual_companion"
     assert judged["vocal_companion_source"] == "residual_from_raw_minus_instrumental"
     assert judged["selected_minus_path"] == base["instrumental_path"]
+    assert judged["source_manifest_target_stem"] == "instrumental"
+    assert judged["canonical_stem_type"] == "instrumental"
+    assert judged["user_facing_stem_role"] == "minus"
+    assert judged["manifest_stem_name"] == "instrumental"
 
 
 def test_streaming_output_resumes_existing_checkpoint_rows(tmp_path: Path) -> None:
@@ -652,6 +660,54 @@ def test_streaming_checkpoint_key_depends_on_score_mode(tmp_path: Path) -> None:
 
     rows = [json.loads(line) for line in output_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert [row["score_mode"] for row in rows] == ["vocal", "minus"]
+
+
+def test_streaming_checkpoint_key_depends_on_role_safe_stem_metadata(tmp_path: Path) -> None:
+    vocal = sine(440, 15.0)
+    minus = sine(120, 15.0)
+    mix = vocal + minus
+    row = {
+        **candidate_row(tmp_path, candidate_id="instrumental-route", mix=mix, vocal=vocal, minus=minus),
+        "stem_type": "minus",
+        "selected_minus_path": str(tmp_path / "instrumental-route" / "minus.wav"),
+    }
+    role_safe_row = {
+        **row,
+        "source_manifest_target_stem": "instrumental",
+        "canonical_stem_type": "instrumental",
+        "user_facing_stem_role": "minus",
+        "manifest_stem_name": "instrumental",
+    }
+    output_jsonl = tmp_path / "streamed_role_safe.jsonl"
+    summary_md = tmp_path / "streamed_role_safe.md"
+    cache_jsonl = tmp_path / "cache_role_safe.jsonl"
+
+    write_outputs_streaming(
+        [row],
+        output_jsonl=output_jsonl,
+        summary_md=summary_md,
+        cache_jsonl=cache_jsonl,
+        window_seconds=6.0,
+        max_windows_per_candidate=3,
+        score_mode="minus",
+    )
+    write_outputs_streaming(
+        [role_safe_row],
+        output_jsonl=output_jsonl,
+        summary_md=summary_md,
+        cache_jsonl=cache_jsonl,
+        window_seconds=6.0,
+        max_windows_per_candidate=3,
+        score_mode="minus",
+    )
+
+    rows = [json.loads(line) for line in output_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) == 2
+    assert "source_manifest_target_stem" not in rows[0]
+    assert rows[1]["source_manifest_target_stem"] == "instrumental"
+    assert rows[1]["canonical_stem_type"] == "instrumental"
+    assert rows[1]["user_facing_stem_role"] == "minus"
+    assert rows[1]["manifest_stem_name"] == "instrumental"
 
 
 def test_streaming_checkpoint_key_depends_on_window_step_seconds(tmp_path: Path) -> None:

@@ -106,6 +106,45 @@ def manifest_target_source(manifest: dict[str, Any]) -> str:
     return str(manifest.get("target_source") or "")
 
 
+def source_manifest_target_stem(candidate: dict[str, Any], manifest: dict[str, Any]) -> str:
+    return str(manifest.get("target_stem") or candidate.get("target_stem") or "").strip().lower()
+
+
+def selected_minus_manifest_stem_name(*, source_target_stem: str, stem_paths: dict[str, str], minus_path: str) -> str:
+    if source_target_stem in MINUS_TARGET_STEMS and stem_paths.get(source_target_stem):
+        return source_target_stem
+    normalized_minus_path = str(minus_path or "").replace("\\", "/").lower()
+    for stem_name in ("minus", "instrumental"):
+        stem_path = str(stem_paths.get(stem_name) or "").replace("\\", "/").lower()
+        if stem_path and normalized_minus_path and stem_path == normalized_minus_path:
+            return stem_name
+    if source_target_stem in MINUS_TARGET_STEMS:
+        return source_target_stem
+    return "minus"
+
+
+def minus_role_metadata(
+    *,
+    candidate: dict[str, Any],
+    manifest: dict[str, Any],
+    stem_paths: dict[str, str],
+    minus_path: str,
+) -> dict[str, str]:
+    source_target_stem = source_manifest_target_stem(candidate, manifest)
+    manifest_stem_name = selected_minus_manifest_stem_name(
+        source_target_stem=source_target_stem,
+        stem_paths=stem_paths,
+        minus_path=minus_path,
+    )
+    canonical_stem_type = source_target_stem if source_target_stem in MINUS_TARGET_STEMS else manifest_stem_name
+    return {
+        "source_manifest_target_stem": source_target_stem,
+        "canonical_stem_type": canonical_stem_type,
+        "user_facing_stem_role": "minus",
+        "manifest_stem_name": manifest_stem_name,
+    }
+
+
 def candidate_target_source(candidate: dict[str, Any], manifest: dict[str, Any]) -> str:
     execution_result = candidate.get("execution_result")
     execution_candidate = (
@@ -213,6 +252,12 @@ def build_minus_row(
     source_audio_path = str(
         candidate.get("source_audio_path") or manifest.get("source_audio_path") or manifest.get("audio_path") or ""
     )
+    role_metadata = minus_role_metadata(
+        candidate=candidate,
+        manifest=manifest,
+        stem_paths=stem_paths,
+        minus_path=minus_path,
+    )
     row = {
             "schema": "testing_stuff_music_minus_windowed_judge_candidate_row.v1",
             "track_id": track_id,
@@ -236,6 +281,7 @@ def build_minus_row(
             "minus_route_id": route_id,
             "route_family": str(candidate.get("route_family") or ""),
             "source_execution_results_jsonl": str(candidate.get("source_execution_results_jsonl") or ""),
+            **role_metadata,
             "delivery_allowed": False,
             "presentation_status": "diagnostic_candidate_for_minus_judge_only",
             "release_status": "not_release_ready",
