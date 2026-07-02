@@ -10,6 +10,10 @@ Mac artifact output is fail-closed:
   normally `/Users/andrejviluha/AIMusicProject_win/artifacts`;
 - `--mac-windows-project-mount` must point at the mounted Windows project root,
   normally `/Users/andrejviluha/AIMusicProject_win`;
+- if either option is omitted, the API uses those canonical paths by default;
+- server startup fails before accepting jobs when the configured
+  `--artifacts-root` is forbidden, outside the mounted Windows project, or not
+  under `/Users/andrejviluha/AIMusicProject_win/artifacts`;
 - every job runs `mac_windows_project_mount_preflight.v1` before creating its
   output directory or starting a worker thread;
 - if the mount is missing, unwritable, outside the mounted project, or not under

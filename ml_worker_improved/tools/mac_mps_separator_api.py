@@ -24,6 +24,8 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from mac_windows_mount_preflight import (  # noqa: E402
+    CANONICAL_MAC_ARTIFACT_ROOT,
+    CANONICAL_MAC_WINDOWS_PROJECT_MOUNT,
     DEFAULT_WINDOWS_PROJECT_ROOT,
     preflight_mac_windows_project_mount,
 )
@@ -55,13 +57,27 @@ def build_config(
     mac_windows_project_mount: Optional[Path] = None,
     windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT,
 ) -> MacMpsApiConfig:
+    resolved_mount = Path(mac_windows_project_mount or CANONICAL_MAC_WINDOWS_PROJECT_MOUNT).expanduser().resolve()
+    resolved_artifacts_root = Path(artifacts_root).expanduser().resolve()
+    mount_preflight = preflight_mac_windows_project_mount(
+        mac_windows_project_mount=resolved_mount,
+        output_path=resolved_artifacts_root,
+        windows_project_root=windows_project_root,
+    )
+    if mount_preflight.get("preflight_status") != "passed":
+        reason = str(mount_preflight.get("blocked_reason") or "mac_windows_project_mount_preflight_failed")
+        raise ValueError(f"mac_mps_api_artifacts_root_preflight_failed:{reason}")
+    try:
+        relative_artifacts_root = resolved_artifacts_root.relative_to(resolved_mount)
+    except ValueError as exc:
+        raise ValueError("mac_mps_api_artifacts_root_outside_windows_project_mount") from exc
+    if not relative_artifacts_root.parts or relative_artifacts_root.parts[0] != "artifacts":
+        raise ValueError("mac_mps_api_artifacts_root_must_be_under_windows_artifacts")
     return MacMpsApiConfig(
         project_root=Path(project_root).expanduser().resolve(),
-        artifacts_root=Path(artifacts_root).expanduser().resolve(),
+        artifacts_root=resolved_artifacts_root,
         python_bin=Path(python_bin).expanduser(),
-        mac_windows_project_mount=Path(mac_windows_project_mount).expanduser().resolve()
-        if mac_windows_project_mount is not None
-        else None,
+        mac_windows_project_mount=resolved_mount,
         windows_project_root=str(windows_project_root),
     )
 
@@ -520,10 +536,10 @@ def serve(config: MacMpsApiConfig, host: str, port: int) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run native macOS MPS diagnostic separator API.")
-    parser.add_argument("--project-root", type=Path, required=True)
-    parser.add_argument("--artifacts-root", type=Path, required=True)
+    parser.add_argument("--project-root", type=Path, default=Path(CANONICAL_MAC_WINDOWS_PROJECT_MOUNT))
+    parser.add_argument("--artifacts-root", type=Path, default=Path(CANONICAL_MAC_ARTIFACT_ROOT))
     parser.add_argument("--python-bin", type=Path, required=True)
-    parser.add_argument("--mac-windows-project-mount", type=Path)
+    parser.add_argument("--mac-windows-project-mount", type=Path, default=Path(CANONICAL_MAC_WINDOWS_PROJECT_MOUNT))
     parser.add_argument("--windows-project-root", default=DEFAULT_WINDOWS_PROJECT_ROOT)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

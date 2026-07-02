@@ -10,6 +10,10 @@ from typing import Any, Iterable
 
 SCHEMA = "mac_windows_project_mount_preflight.v1"
 DEFAULT_WINDOWS_PROJECT_ROOT = r"D:\AIMusicProject"
+CANONICAL_MAC_WINDOWS_PROJECT_MOUNT = "/Users/andrejviluha/AIMusicProject_win"
+CANONICAL_MAC_ARTIFACT_ROOT = f"{CANONICAL_MAC_WINDOWS_PROJECT_MOUNT}/artifacts"
+CANONICAL_MAC_LAB_ARTIFACTS_ROOT = f"{CANONICAL_MAC_WINDOWS_PROJECT_MOUNT}/lab_artifacts"
+CANONICAL_MAC_ARTIFACT_RAG_ROOT = f"{CANONICAL_MAC_WINDOWS_PROJECT_MOUNT}/artifact_rag"
 ALLOWED_PROJECT_ARTIFACT_ROOTS = ("artifacts", "lab_artifacts", "artifact_rag")
 PROBE_DIR_NAME = ".aimusic_mount_probe"
 FORBIDDEN_MAC_LOCAL_ARTIFACT_ROOTS = (

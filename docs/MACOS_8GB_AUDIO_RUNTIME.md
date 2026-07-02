@@ -151,6 +151,10 @@ Windows project share, then rerun with output roots directly under:
 /Users/andrejviluha/AIMusicProject_win/artifact_rag
 ```
 
+Mac runners must use these mounted Windows roots as their primary output
+location. They must not write result artifacts under
+`/Users/andrejviluha/aimusic_local_artifacts` and then copy them back.
+
 The forbidden future result roots are
 `/Users/andrejviluha/aimusic_local_artifacts`,
 `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,

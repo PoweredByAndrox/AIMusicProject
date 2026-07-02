@@ -24,6 +24,8 @@ if str(TOOLS_PARENT) not in sys.path:
 
 from tools.mac_windows_mount_preflight import (  # noqa: E402
     ALLOWED_PROJECT_ARTIFACT_ROOTS,
+    CANONICAL_MAC_ARTIFACT_ROOT,
+    CANONICAL_MAC_WINDOWS_PROJECT_MOUNT,
     DEFAULT_WINDOWS_PROJECT_ROOT,
     FORBIDDEN_MAC_LOCAL_ARTIFACT_ROOTS,
     PROBE_DIR_NAME,
@@ -423,8 +425,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ssh-target", required=True)
     parser.add_argument("--ssh-key", required=True)
-    parser.add_argument("--mac-artifact-root", default="/Users/andrejviluha/AIMusicProject_win/artifacts")
-    parser.add_argument("--mac-windows-project-mount")
+    parser.add_argument("--mac-artifact-root", default=CANONICAL_MAC_ARTIFACT_ROOT)
+    parser.add_argument("--mac-windows-project-mount", default=CANONICAL_MAC_WINDOWS_PROJECT_MOUNT)
     parser.add_argument("--windows-project-root", default=DEFAULT_WINDOWS_PROJECT_ROOT)
     parser.add_argument("--artifact-subdir", required=True)
     command_group = parser.add_mutually_exclusive_group(required=True)

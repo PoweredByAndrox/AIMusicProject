@@ -159,17 +159,49 @@ def test_mac_api_job_manifest_is_diagnostic_only(tmp_path):
 
 def test_mac_api_config_preserves_venv_python_path(tmp_path):
     module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    project_root.mkdir()
     python_bin = tmp_path / "venv" / "bin" / "python"
 
     config = module.build_config(
-        project_root=tmp_path / "project",
-        artifacts_root=tmp_path / "artifacts",
+        project_root=project_root,
+        artifacts_root=project_root / "artifacts",
         python_bin=python_bin,
+        mac_windows_project_mount=project_root,
     )
 
-    assert config.project_root == (tmp_path / "project").resolve()
-    assert config.artifacts_root == (tmp_path / "artifacts").resolve()
+    assert config.project_root == project_root.resolve()
+    assert config.artifacts_root == (project_root / "artifacts").resolve()
     assert config.python_bin == python_bin
+    assert config.mac_windows_project_mount == project_root.resolve()
+
+
+def test_mac_api_config_blocks_forbidden_mac_local_artifact_root(tmp_path):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    project_root.mkdir()
+
+    with pytest.raises(ValueError, match="mac_output_path_uses_forbidden_local_artifact_root"):
+        module.build_config(
+            project_root=project_root,
+            artifacts_root=Path("/Users/andrejviluha/aimusic_local_artifacts/mac_api"),
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+
+
+def test_mac_api_config_requires_windows_project_artifacts_root(tmp_path):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    project_root.mkdir()
+
+    with pytest.raises(ValueError, match="mac_mps_api_artifacts_root_must_be_under_windows_artifacts"):
+        module.build_config(
+            project_root=project_root,
+            artifacts_root=project_root / "lab_artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
 
 
 def test_mac_api_get_job_finds_manifest_after_restart(tmp_path):

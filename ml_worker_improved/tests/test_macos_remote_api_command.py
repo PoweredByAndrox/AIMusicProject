@@ -5,6 +5,8 @@ import subprocess
 import pytest
 
 from tools.run_macos_remote_api_command import (
+    CANONICAL_MAC_ARTIFACT_ROOT,
+    CANONICAL_MAC_WINDOWS_PROJECT_MOUNT,
     PRESENTATION_STATUS,
     build_remote_script,
     parse_args,
@@ -214,3 +216,21 @@ def test_parse_args_accepts_command_file_instead_of_inline_command(tmp_path: Pat
     assert args.command is None
     assert args.command_file == str(command_file)
     assert args.mac_windows_project_mount == "/Users/andrejviluha/AIMusicProject_win"
+
+
+def test_parse_args_defaults_to_shared_windows_artifact_mount() -> None:
+    args = parse_args(
+        [
+            "--ssh-target",
+            "mac",
+            "--ssh-key",
+            "key",
+            "--artifact-subdir",
+            "mac_api/cmd02",
+            "--command",
+            "printf ok",
+        ]
+    )
+
+    assert args.mac_windows_project_mount == CANONICAL_MAC_WINDOWS_PROJECT_MOUNT
+    assert args.mac_artifact_root == CANONICAL_MAC_ARTIFACT_ROOT

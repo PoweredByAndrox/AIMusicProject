@@ -23,6 +23,10 @@ powershell -ExecutionPolicy Bypass -File scripts\macos-ssh.ps1
   - `scnet_xl_ihf_musdb18`
 - Outputs must stay under the configured shared artifacts root:
   `/Users/andrejviluha/AIMusicProject_win/artifacts`.
+- The API defaults to `/Users/andrejviluha/AIMusicProject_win` and
+  `/Users/andrejviluha/AIMusicProject_win/artifacts` when those root options are
+  omitted, and startup fails before accepting jobs if `--artifacts-root` points
+  anywhere else.
 - Forbidden future result roots are
   `/Users/andrejviluha/aimusic_local_artifacts`,
   `/Users/andrejviluha/aimusic_local_artifacts/host_artifacts`,

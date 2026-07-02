@@ -7,9 +7,11 @@ workspace.
 The route is fail-closed:
 
 - `--mac-windows-project-mount` must point at the Mac-visible Windows project
-  mount, normally `/Users/andrejviluha/AIMusicProject_win`;
+  mount, normally `/Users/andrejviluha/AIMusicProject_win`; when omitted, the
+  runner defaults to that canonical Windows project mount;
 - `--mac-artifact-root` must be inside that mount under `artifacts`,
-  `lab_artifacts`, or `artifact_rag`;
+  `lab_artifacts`, or `artifact_rag`; when omitted, the runner defaults to
+  `/Users/andrejviluha/AIMusicProject_win/artifacts`;
 - without a mount mapping, the client returns `status=blocked`,
   `returncode=78`, and does not open SSH;
 - when a mapping is present, the remote script performs a write/read/delete
