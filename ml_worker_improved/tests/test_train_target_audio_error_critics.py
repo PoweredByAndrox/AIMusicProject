@@ -218,6 +218,33 @@ def test_trainer_rejects_rows_without_acoustic_feature_values(tmp_path: Path) ->
     assert manifest["excluded_reason_counts"]["minus_critic"]["missing_acoustic_feature_values"] == 1
 
 
+def test_no_reference_preview_rows_are_score_only_not_training_rows(tmp_path: Path) -> None:
+    from tools.train_target_audio_error_critics import load_target_rows
+
+    preview_row = target_view_row(
+        tmp_path,
+        "minus_critic",
+        40,
+        label=1,
+        candidate_id="accepted-preview-minus",
+        route_id="no_reference_minus_self_judge_and_selector",
+        label_source="no_reference_minus_windowed_judge.jsonl",
+    )
+    views_dir = tmp_path / "views"
+    write_views(views_dir, trainable_rows(tmp_path, "minus_critic") + [preview_row], trainable_rows(tmp_path, "vocal_critic"))
+
+    training_rows = load_target_rows(views_dir, "minus")
+    scoring_rows = load_target_rows(views_dir, "minus", include_score_only_rows=True)
+
+    training_ids = {row["candidate_id"] for row in training_rows["usable_rows"]}
+    scoring_ids = {row["candidate_id"] for row in scoring_rows["usable_rows"]}
+
+    assert "accepted-preview-minus" not in training_ids
+    assert "accepted-preview-minus" in scoring_ids
+    assert training_rows["excluded_reason_counts"]["missing_exact_minus_window_judge_evidence"] == 1
+    assert "missing_exact_minus_window_judge_evidence" not in scoring_rows["excluded_reason_counts"]
+
+
 def test_trainer_skips_target_with_missing_negative_class(tmp_path: Path) -> None:
     from tools.train_target_audio_error_critics import train_target_audio_error_critics
 

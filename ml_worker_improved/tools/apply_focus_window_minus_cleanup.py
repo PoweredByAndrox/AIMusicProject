@@ -211,6 +211,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--focus-track-id", default="")
     parser.add_argument("--focus-candidate-id", default="")
     parser.add_argument("--max-focus-windows", type=int, default=16)
+    parser.add_argument("--focus-include-low-confidence-accepted", action="store_true")
+    parser.add_argument("--focus-max-accept-probability", type=float, default=0.0)
+    parser.add_argument("--focus-min-block-probability", type=float, default=0.0)
     parser.add_argument("--strength", type=float, default=0.025)
     parser.add_argument("--secondary-weight", type=float, default=0.82)
     parser.add_argument("--mask-power", type=float, default=1.35)
@@ -245,6 +248,9 @@ def main(argv: list[str] | None = None) -> int:
         track_id=str(args.focus_track_id or ""),
         candidate_id=str(args.focus_candidate_id or ""),
         max_windows=int(args.max_focus_windows),
+        include_low_confidence_accepts=bool(args.focus_include_low_confidence_accepted),
+        max_accept_probability=float(args.focus_max_accept_probability),
+        min_block_probability=float(args.focus_min_block_probability),
     )
     refined_minus, cleanup_report = apply_focus_window_cleanup(
         base_minus=base_minus,

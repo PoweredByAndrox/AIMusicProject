@@ -56,6 +56,9 @@ def default_candidate_recipes(
     focus_candidate_id: str = "",
     max_focus_windows: int = 16,
     focus_window_count: int = 0,
+    focus_include_low_confidence_accepted: bool = False,
+    focus_max_accept_probability: float = 0.0,
+    focus_min_block_probability: float = 0.0,
 ) -> tuple[MinusCandidateRecipe, ...]:
     recipes: list[MinusCandidateRecipe] = [
         MinusCandidateRecipe(
@@ -128,8 +131,44 @@ def default_candidate_recipes(
                 "0.04",
             ),
         ),
+        MinusCandidateRecipe(
+            name="hybrid_detail_safe",
+            tool_path=TOOLS_DIR / "apply_hybrid_minus_guided_cleanup.py",
+            output_artifact_key="minus_hybrid_flac",
+            listen_label="02_hybrid_detail_safe_minus.flac",
+            arguments=(
+                "--strength",
+                "0.28",
+                "--mask-power",
+                "1.25",
+                "--guide-power",
+                "1.15",
+                "--activity-threshold",
+                "0.04",
+            ),
+        ),
     ]
     if focus_windows_jsonl and focus_window_count > 0:
+        focus_args = [
+            "--focus-windows-jsonl",
+            str(focus_windows_jsonl),
+            "--focus-track-id",
+            str(focus_track_id or ""),
+            "--focus-candidate-id",
+            str(focus_candidate_id or ""),
+            "--max-focus-windows",
+            str(int(max_focus_windows)),
+        ]
+        if focus_include_low_confidence_accepted:
+            focus_args.extend(
+                [
+                    "--focus-include-low-confidence-accepted",
+                    "--focus-max-accept-probability",
+                    str(float(focus_max_accept_probability)),
+                    "--focus-min-block-probability",
+                    str(float(focus_min_block_probability)),
+                ]
+            )
         recipes.append(
             MinusCandidateRecipe(
                 name="focus_window_guarded",
@@ -137,14 +176,7 @@ def default_candidate_recipes(
                 output_artifact_key="minus_focus_window_cleanup_flac",
                 listen_label="02_focus_window_guarded_minus.flac",
                 arguments=(
-                    "--focus-windows-jsonl",
-                    str(focus_windows_jsonl),
-                    "--focus-track-id",
-                    str(focus_track_id or ""),
-                    "--focus-candidate-id",
-                    str(focus_candidate_id or ""),
-                    "--max-focus-windows",
-                    str(int(max_focus_windows)),
+                    *focus_args,
                     "--strength",
                     "0.025",
                     "--mask-power",
@@ -521,12 +553,32 @@ def _is_zero_label(value: Any) -> bool:
         return False
 
 
+def _is_low_confidence_accept(
+    row: dict[str, Any],
+    *,
+    max_accept_probability: float = 0.0,
+    min_block_probability: float = 0.0,
+) -> bool:
+    if row.get("critic_decision") != "accept_candidate":
+        return False
+    accept_probability = _as_float(row.get("predicted_accept_probability"), 1.0)
+    block_probability = _as_float(row.get("predicted_block_probability"), 0.0)
+    if max_accept_probability > 0.0 and accept_probability <= max_accept_probability:
+        return True
+    if min_block_probability > 0.0 and block_probability >= min_block_probability:
+        return True
+    return False
+
+
 def load_focus_windows(
     path: Path | None,
     *,
     track_id: str = "",
     candidate_id: str = "",
     max_windows: int = 0,
+    include_low_confidence_accepts: bool = False,
+    max_accept_probability: float = 0.0,
+    min_block_probability: float = 0.0,
 ) -> list[dict[str, Any]]:
     if path is None:
         return []
@@ -537,7 +589,12 @@ def load_focus_windows(
         if candidate_id and str(row.get("candidate_id") or "") != candidate_id:
             continue
         is_blocked = row.get("critic_decision") == "blocked_hard_case" or _is_zero_label(row.get("true_label"))
-        if not is_blocked:
+        is_soft_hardcase = include_low_confidence_accepts and _is_low_confidence_accept(
+            row,
+            max_accept_probability=max_accept_probability,
+            min_block_probability=min_block_probability,
+        )
+        if not (is_blocked or is_soft_hardcase):
             continue
         start = _as_float(row.get("window_start_sec"))
         end = _as_float(row.get("window_end_sec"))
@@ -551,6 +608,13 @@ def load_focus_windows(
                 "end_sec": round(end, 6),
                 "critic_decision": row.get("critic_decision"),
                 "predicted_blockers": row.get("predicted_blockers") or [],
+                "predicted_accept_probability": row.get("predicted_accept_probability"),
+                "predicted_block_probability": row.get("predicted_block_probability"),
+                "focus_reason": (
+                    "low_confidence_accept"
+                    if is_soft_hardcase and not is_blocked
+                    else "blocked_or_negative"
+                ),
                 "true_label": row.get("true_label"),
             }
         )
@@ -776,6 +840,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--focus-track-id", default="")
     parser.add_argument("--focus-candidate-id", default="")
     parser.add_argument("--max-focus-windows", type=int, default=16)
+    parser.add_argument("--focus-include-low-confidence-accepted", action="store_true")
+    parser.add_argument("--focus-max-accept-probability", type=float, default=0.0)
+    parser.add_argument("--focus-min-block-probability", type=float, default=0.0)
     return parser.parse_args(argv)
 
 
@@ -868,6 +935,9 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         track_id=str(args.focus_track_id or ""),
         candidate_id=str(args.focus_candidate_id or ""),
         max_windows=int(args.max_focus_windows),
+        include_low_confidence_accepts=bool(args.focus_include_low_confidence_accepted),
+        max_accept_probability=float(args.focus_max_accept_probability),
+        min_block_probability=float(args.focus_min_block_probability),
     )
     focus_base_summary = calculate_focus_window_summary(
         candidate_audio=base_audio,
@@ -885,6 +955,9 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         focus_candidate_id=str(args.focus_candidate_id or ""),
         max_focus_windows=int(args.max_focus_windows),
         focus_window_count=len(focus_windows),
+        focus_include_low_confidence_accepted=bool(args.focus_include_low_confidence_accepted),
+        focus_max_accept_probability=float(args.focus_max_accept_probability),
+        focus_min_block_probability=float(args.focus_min_block_probability),
     )
     for index, recipe in enumerate(recipes, start=1):
         emit_progress(
@@ -1013,6 +1086,9 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             "track_id": str(args.focus_track_id or ""),
             "candidate_id": str(args.focus_candidate_id or ""),
             "max_focus_windows": int(args.max_focus_windows),
+            "include_low_confidence_accepted": bool(args.focus_include_low_confidence_accepted),
+            "max_accept_probability": float(args.focus_max_accept_probability),
+            "min_block_probability": float(args.focus_min_block_probability),
         },
         "focus_windows": focus_windows,
         "focus_base_summary": focus_base_summary,

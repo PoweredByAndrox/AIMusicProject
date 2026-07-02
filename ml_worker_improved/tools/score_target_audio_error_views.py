@@ -121,7 +121,7 @@ def score_target_audio_error_views(
         model_path = model_dir / cfg["model_file"]
         if trained and model_path.exists():
             bundle, calibration_source = load_bundle(model_dir=model_dir, calibration_dir=calibration_dir, target=target, model_file=cfg["model_file"])
-            rows = load_target_rows(views_dir, target)["usable_rows"]
+            rows = load_target_rows(views_dir, target, include_score_only_rows=True)["usable_rows"]
             predictions = predict_bundle(bundle, rows)
             apply_threshold_decisions(
                 rows,

@@ -40,6 +40,12 @@ A row can train a target critic only when:
 
 Unsafe, unrepairable, pair, overall, and final-status-only rows are not labels.
 
+Accepted no-reference minus listen-preview rows with
+`label_source=no_reference_minus_windowed_judge.jsonl` are score-only evidence:
+they may be scored by an already trained shadow critic to localize current
+candidate windows, but they do not train the critic because they are not exact
+target windowed judge labels.
+
 ## Reliability Controls
 
 MODEL-2C makes false accept the primary safety metric.

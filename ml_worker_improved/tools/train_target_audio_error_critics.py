@@ -42,6 +42,7 @@ TARGETS = {
         "model_file": MINUS_MODEL_FILE,
         "metrics_file": MINUS_METRICS_FILE,
         "label_source": "minus_windowed_judge.jsonl",
+        "score_only_label_sources": ("no_reference_minus_windowed_judge.jsonl",),
         "stem_type": "minus",
         "model_id_prefix": "minus_accept_block_classifier",
     },
@@ -168,6 +169,15 @@ def row_path_exists(value: Any) -> bool:
     return Path(str(value)).exists()
 
 
+def target_score_only_label_sources(target: str) -> set[str]:
+    sources = TARGETS[target].get("score_only_label_sources") or ()
+    return {str(source) for source in sources if str(source)}
+
+
+def exact_window_evidence_reason(target: str) -> str:
+    return f"missing_exact_{TARGETS[target]['stem_type']}_window_judge_evidence"
+
+
 def target_row_exclusion_reasons(row: dict[str, Any], target: str) -> list[str]:
     cfg = TARGETS[target]
     reasons: list[str] = []
@@ -194,7 +204,7 @@ def target_row_exclusion_reasons(row: dict[str, Any], target: str) -> list[str]:
         reasons.append("missing_label")
     label_source = str(row.get("label_source") or "")
     if label_source != cfg["label_source"]:
-        reasons.append(f"missing_exact_{cfg['stem_type']}_window_judge_evidence")
+        reasons.append(exact_window_evidence_reason(target))
     if row.get("release_ready") is True:
         reasons.append("release_ready_true")
     if row.get("separator_training_started") is True:
@@ -211,6 +221,15 @@ def target_row_exclusion_reasons(row: dict[str, Any], target: str) -> list[str]:
         reasons.append("missing_feature_values")
     elif not has_acoustic_feature_values(features):
         reasons.append("missing_acoustic_feature_values")
+    return sorted(set(reasons))
+
+
+def target_row_scoring_exclusion_reasons(row: dict[str, Any], target: str) -> list[str]:
+    reasons = target_row_exclusion_reasons(row, target)
+    label_source = str(row.get("label_source") or "")
+    exact_reason = exact_window_evidence_reason(target)
+    if exact_reason in reasons and label_source in target_score_only_label_sources(target):
+        reasons = [reason for reason in reasons if reason != exact_reason]
     return sorted(set(reasons))
 
 
@@ -372,6 +391,7 @@ def load_target_rows(
     min_negative_test_rows: int = 0,
     min_negative_dev_rows: int = 0,
     min_negative_train_rows: int = 0,
+    include_score_only_rows: bool = False,
 ) -> dict[str, Any]:
     cfg = TARGETS[target]
     view_path = views_dir / cfg["view_file"]
@@ -381,7 +401,11 @@ def load_target_rows(
     usable: list[dict[str, Any]] = []
     excluded_reasons: Counter[str] = Counter()
     for index, row in enumerate(raw_rows):
-        reasons = target_row_exclusion_reasons(row, target)
+        reasons = (
+            target_row_scoring_exclusion_reasons(row, target)
+            if include_score_only_rows
+            else target_row_exclusion_reasons(row, target)
+        )
         if reasons:
             for reason in reasons:
                 excluded_reasons[reason] += 1

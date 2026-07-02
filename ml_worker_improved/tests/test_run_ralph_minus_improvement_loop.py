@@ -43,10 +43,12 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         recipes = {recipe.name: recipe for recipe in module.default_candidate_recipes()}
 
         self.assertIn("actual_masked_residue_guarded", recipes)
+        self.assertIn("hybrid_detail_safe", recipes)
         self.assertEqual(
             recipes["actual_masked_residue_guarded"].output_artifact_key,
             "minus_actual_masked_residue_flac",
         )
+        self.assertEqual(recipes["hybrid_detail_safe"].output_artifact_key, "minus_hybrid_flac")
         self.assertNotIn("focus_window_guarded", recipes)
 
     def test_focus_recipe_is_added_only_when_focus_windows_exist(self) -> None:
@@ -77,6 +79,29 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
             "minus_focus_window_cleanup_flac",
         )
         self.assertIn("--focus-windows-jsonl", with_focus["focus_window_guarded"].arguments)
+
+    def test_focus_recipe_propagates_low_confidence_accept_filters(self) -> None:
+        module = _load_module()
+        recipes = {
+            recipe.name: recipe
+            for recipe in module.default_candidate_recipes(
+                focus_windows_jsonl="focus.jsonl",
+                focus_track_id="track-a",
+                focus_candidate_id="cand-a",
+                max_focus_windows=4,
+                focus_window_count=1,
+                focus_include_low_confidence_accepted=True,
+                focus_max_accept_probability=0.85,
+                focus_min_block_probability=0.15,
+            )
+        }
+
+        args = recipes["focus_window_guarded"].arguments
+        self.assertIn("--focus-include-low-confidence-accepted", args)
+        self.assertIn("--focus-max-accept-probability", args)
+        self.assertIn("0.85", args)
+        self.assertIn("--focus-min-block-probability", args)
+        self.assertIn("0.15", args)
 
     def test_no_change_candidate_is_rejected_even_if_release_like(self) -> None:
         module = _load_module()
@@ -309,6 +334,47 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         self.assertEqual(focus_windows[1]["start_sec"], 6.0)
         self.assertEqual(focus_windows[1]["end_sec"], 12.0)
         self.assertEqual(focus_windows[1]["predicted_blockers"], ["numeric_zero_label"])
+
+    def test_focus_windows_can_include_low_confidence_accepts_when_requested(self) -> None:
+        module = _load_module()
+        focus_path = self.temp_path / "focus_soft.jsonl"
+        rows = [
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "window_start_sec": 0.0,
+                "window_end_sec": 6.0,
+                "critic_decision": "accept_candidate",
+                "true_label": 1,
+                "predicted_accept_probability": 0.81,
+                "predicted_block_probability": 0.19,
+            },
+            {
+                "track_id": "track-a",
+                "candidate_id": "cand-a",
+                "window_start_sec": 6.0,
+                "window_end_sec": 12.0,
+                "critic_decision": "accept_candidate",
+                "true_label": 1,
+                "predicted_accept_probability": 0.95,
+                "predicted_block_probability": 0.05,
+            },
+        ]
+        focus_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+        default_windows = module.load_focus_windows(focus_path, track_id="track-a", candidate_id="cand-a")
+        soft_windows = module.load_focus_windows(
+            focus_path,
+            track_id="track-a",
+            candidate_id="cand-a",
+            include_low_confidence_accepts=True,
+            max_accept_probability=0.85,
+        )
+
+        self.assertEqual(default_windows, [])
+        self.assertEqual(len(soft_windows), 1)
+        self.assertEqual(soft_windows[0]["start_sec"], 0.0)
+        self.assertEqual(soft_windows[0]["focus_reason"], "low_confidence_accept")
 
     def test_focus_summary_reports_local_improvement_without_delivery_claim(self) -> None:
         module = _load_module()
