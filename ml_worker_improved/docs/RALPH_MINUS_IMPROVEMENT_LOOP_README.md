@@ -34,4 +34,10 @@ attenuation remains diagnostic evidence and does not create a release artifact.
 
 The route keeps `produce_only_release_ready=true`: if every candidate is rejected, it writes `delivery_status=blocked`, `delivery_allowed=false`, `presentation_status=blocked_from_listen_pack`, and `release_status=blocked_for_listening`. Rejected candidates must not be promoted to a listen pack or release.
 
+Rejected RALPH candidates and bounded repair matrices should be converted into
+`minus_repair_outcome_training_view.v1` metadata via
+`tools/build_minus_repair_outcome_training_view.py`. That view preserves the
+repair tradeoff evidence for future repair-action routing or model training
+without changing delivery gates or publishing diagnostic audio.
+
 For tracks without a verified reference stem bundle, this route can only provide internal proxy release-gate evidence. It does not replace an exact/reference waveform audit when the delivery contract requires one.
