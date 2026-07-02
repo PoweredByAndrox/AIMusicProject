@@ -237,7 +237,7 @@ def blocked_manifest(
         "delivery_status": "blocked",
         "delivery_allowed": False,
         "presentation_status": "blocked_from_listen_pack",
-        "release_status": "listen_preview_only",
+        "release_status": "not_release_ready",
         "dominant_failure_reason": reason,
         "stem_type": "full_stem_pack",
         "track_id": str(master.get("track_id") or ""),
@@ -256,7 +256,7 @@ def blocked_manifest(
     }
 
 
-def accepted_manifest(
+def source_ready_manifest(
     *,
     master_manifest_json: Path,
     stem_score_matrix_json: Path,
@@ -285,11 +285,17 @@ def accepted_manifest(
     )
     return {
         "manifest_type": "no_reference_full_stem_pack",
-        "delivery_status": "accepted",
-        "delivery_allowed": True,
-        "presentation_status": "accepted_for_listen_pack",
-        "release_status": "listen_preview_only",
-        "dominant_failure_reason": "",
+        "delivery_status": "blocked",
+        "delivery_allowed": False,
+        "presentation_status": "aggregate_machine_gate_required_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "dominant_failure_reason": "requires_staged_aggregate_validation_and_machine_gate",
+        "source_pack_ready": True,
+        "source_pack_delivery_status": "accepted",
+        "source_pack_presentation_status": "accepted_for_listen_pack",
+        "source_pack_release_status": "listen_preview_only",
+        "requires_staged_aggregate_machine_gate": True,
+        "final_delivery_blockers": ["requires_staged_aggregate_validation_and_machine_gate"],
         "stem_type": "full_stem_pack",
         "track_id": str(master.get("track_id") or ""),
         "source_mix_path": str(master.get("source_mix_path") or ""),
@@ -380,7 +386,7 @@ def build_manifest(*, master_manifest_json: Path, stem_score_matrix_json: Path) 
             master=master,
             safety=safety,
         )
-    return accepted_manifest(
+    return source_ready_manifest(
         master_manifest_json=master_manifest_json,
         stem_score_matrix_json=stem_score_matrix_json,
         master=master,
@@ -397,6 +403,8 @@ def build_summary(manifest: dict[str, Any]) -> str:
         f"- delivery_allowed: {str(manifest.get('delivery_allowed') is True).lower()}",
         f"- presentation_status: {manifest.get('presentation_status')}",
         f"- release_status: {manifest.get('release_status')}",
+        f"- source_pack_ready: {str(manifest.get('source_pack_ready') is True).lower()}",
+        f"- requires_staged_aggregate_machine_gate: {str(manifest.get('requires_staged_aggregate_machine_gate') is True).lower()}",
         f"- stem_type: {manifest.get('stem_type')}",
         f"- track_id: {manifest.get('track_id')}",
         f"- accepted_stem_count: {manifest.get('accepted_stem_count')}",

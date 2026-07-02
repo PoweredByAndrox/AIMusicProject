@@ -56,6 +56,26 @@ def accepted_manifest(track_id: str, stem_type: str) -> dict:
     }
 
 
+def source_ready_full_stem_pack_manifest(track_id: str) -> dict:
+    return {
+        "track_id": track_id,
+        "stem_type": "full_stem_pack",
+        "delivery_status": "blocked",
+        "delivery_allowed": False,
+        "presentation_status": "aggregate_machine_gate_required_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "dominant_failure_reason": "requires_staged_aggregate_validation_and_machine_gate",
+        "source_pack_ready": True,
+        "source_pack_delivery_status": "accepted",
+        "source_pack_presentation_status": "accepted_for_listen_pack",
+        "source_pack_release_status": "listen_preview_only",
+        "requires_staged_aggregate_machine_gate": True,
+        "final_delivery_blockers": ["requires_staged_aggregate_validation_and_machine_gate"],
+        "release_ready": False,
+        "accepted_stem_count": 6,
+    }
+
+
 def test_dry_run_records_next_gate_without_executing_delivery_runner(tmp_path: Path) -> None:
     plan_path = plan_json(tmp_path, track_row("track_a", "run_vocal_delivery_pipeline"))
     calls: list[dict] = []
@@ -276,7 +296,7 @@ def test_full_stem_pack_step_builds_from_master_and_stem_score_matrix(tmp_path: 
         calls.append(kwargs)
         assert kwargs["master_manifest_json"] == master_manifest
         assert kwargs["stem_score_matrix_json"] == stem_matrix
-        return accepted_manifest("track_d", "full_stem_pack") | {"accepted_stem_count": 6}
+        return source_ready_full_stem_pack_manifest("track_d")
 
     summary = runner.run_plan(
         plan_json=plan_path,
@@ -288,13 +308,80 @@ def test_full_stem_pack_step_builds_from_master_and_stem_score_matrix(tmp_path: 
     )
 
     assert len(calls) == 1
-    assert summary["step_status_counts"] == {"completed": 1}
+    assert summary["step_status_counts"] == {"completed_source_ready_requires_aggregate_machine_gate": 1}
     step = summary["steps"][0]
     assert step["next_gate"] == "build_full_stem_pack_manifest"
     assert step["stem_score_matrix_json"] == str(stem_matrix)
     assert step["output_manifest_json"].endswith("no_reference_full_stem_pack_manifest.json")
+    assert step["delivery_status"] == "blocked"
+    assert step["source_pack_ready"] is True
+    assert step["requires_staged_aggregate_machine_gate"] is True
     assert summary["delivery_allowed"] is False
     assert summary["release_ready"] is False
+
+
+def test_fail_fast_continues_after_full_stem_source_ready_step(tmp_path: Path) -> None:
+    master_manifest = write_json(
+        tmp_path / "master" / "track_d" / "no_reference_vocal_minus_master_manifest.json",
+        accepted_manifest("track_d", "both"),
+    )
+    stem_matrix = write_json(
+        tmp_path / "stem_matrix" / "track_d" / "no_reference_stem_candidate_score_matrix.json",
+        {"rows": [{"track_id": "track_d", "stem_type": "melody"}]},
+    )
+    plan_path = plan_json(
+        tmp_path,
+        track_row(
+            "track_d",
+            "build_full_stem_pack_manifest",
+            master_manifest_path=str(master_manifest),
+        ),
+        track_row("track_h", "run_corpus_job_matrix_for_track"),
+    )
+    full_pack_calls: list[dict] = []
+    generation_calls: list[dict] = []
+
+    def fake_full_stem_pack_builder(**kwargs):
+        full_pack_calls.append(kwargs)
+        assert kwargs["stem_score_matrix_json"] == stem_matrix
+        return source_ready_full_stem_pack_manifest("track_d")
+
+    def fake_job_matrix_executor(**kwargs):
+        generation_calls.append(kwargs)
+        output_root = Path(kwargs["output_root"])
+        return {
+            "summary": {
+                "completed_jobs": 1,
+                "execution_started": True,
+                "release_ready": False,
+            },
+            "manifest": {
+                "output_files": {"manifest_json": str(output_root / EXECUTION_MANIFEST_NAME)},
+                "delivery_allowed": False,
+                "release_ready": False,
+            },
+            "rows": [],
+        }
+
+    summary = runner.run_plan(
+        plan_json=plan_path,
+        output_root=tmp_path / "out",
+        max_steps=2,
+        execute=True,
+        fail_fast=True,
+        stem_score_matrix_roots=[tmp_path / "stem_matrix"],
+        job_matrix_jsonl=tmp_path / "jobs.jsonl",
+        full_stem_pack_builder=fake_full_stem_pack_builder,
+        job_matrix_executor=fake_job_matrix_executor,
+    )
+
+    assert len(full_pack_calls) == 1
+    assert len(generation_calls) == 1
+    assert summary["step_status_counts"] == {
+        "completed": 1,
+        "completed_source_ready_requires_aggregate_machine_gate": 1,
+    }
+    assert summary["executed_step_count"] == 2
 
 
 def test_nonvocal_score_matrix_step_runs_semantic_batch_for_track(tmp_path: Path) -> None:

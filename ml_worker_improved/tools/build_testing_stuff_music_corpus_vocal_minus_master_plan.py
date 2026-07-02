@@ -56,6 +56,28 @@ def accepted_listen_contract(manifest: dict[str, Any]) -> bool:
     )
 
 
+def full_stem_source_ready_contract(manifest: dict[str, Any]) -> bool:
+    return (
+        str(manifest.get("stem_type") or "") == "full_stem_pack"
+        and str(manifest.get("delivery_status") or "") == "blocked"
+        and manifest.get("delivery_allowed") is False
+        and str(manifest.get("presentation_status") or "")
+        == "aggregate_machine_gate_required_not_for_listen_pack"
+        and str(manifest.get("release_status") or "") == "not_release_ready"
+        and str(manifest.get("dominant_failure_reason") or "")
+        == "requires_staged_aggregate_validation_and_machine_gate"
+        and manifest.get("source_pack_ready") is True
+        and str(manifest.get("source_pack_delivery_status") or "") == "accepted"
+        and str(manifest.get("source_pack_presentation_status") or "") == "accepted_for_listen_pack"
+        and str(manifest.get("source_pack_release_status") or "") == "listen_preview_only"
+        and manifest.get("requires_staged_aggregate_machine_gate") is True
+        and manifest.get("final_delivery_blockers") == ["requires_staged_aggregate_validation_and_machine_gate"]
+        and manifest.get("release_ready") is not True
+        and manifest.get("can_mark_release_ready") is not True
+        and manifest.get("can_publish_as_release") is not True
+    )
+
+
 def iter_manifest_files(roots: Sequence[Path], names: Sequence[str]) -> Iterable[Path]:
     wanted = set(names)
     for root in roots:
@@ -105,7 +127,12 @@ def accepted_manifest_indexes(
         manifest_stem = str(manifest.get("stem_type") or "")
         if not track_id or (manifest_stem and manifest_stem != stem_type):
             continue
-        if not accepted_listen_contract(manifest):
+        contract_ok = (
+            full_stem_source_ready_contract(manifest)
+            if stem_type == "full_stem_pack"
+            else accepted_listen_contract(manifest)
+        )
+        if not contract_ok:
             continue
         enriched = dict(manifest)
         enriched["_manifest_path"] = str(path)
@@ -200,7 +227,7 @@ def track_plan_row(
     if not executed_stems and not has_full_pack:
         next_gate = "run_corpus_job_matrix_for_track"
     elif has_full_pack:
-        next_gate = "full_stem_pack_listen_preview_ready_not_release"
+        next_gate = "full_stem_pack_source_ready_requires_aggregate_machine_gate"
     elif not has_vocal:
         next_gate = "run_vocal_delivery_pipeline"
     elif not has_minus:

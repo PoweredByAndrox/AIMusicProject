@@ -18,8 +18,8 @@ inference, does not change thresholds, and never marks a corpus result
   `no_reference_minus_listen_preview_manifest.json` files.
 - `--master-manifest-root`: optional roots containing accepted
   `no_reference_vocal_minus_master_manifest.json` files.
-- `--full-stem-pack-root`: optional roots containing accepted
-  `no_reference_full_stem_pack_manifest.json` files.
+- `--full-stem-pack-root`: optional roots containing source-ready,
+  fail-closed `no_reference_full_stem_pack_manifest.json` files.
 
 ## Next Gates
 
@@ -35,8 +35,9 @@ inference, does not change thresholds, and never marks a corpus result
   required non-vocal stems are not accepted through a stem score matrix.
 - `build_full_stem_pack_manifest`: master and required non-vocal stems are
   ready for the per-track full-stem pack builder.
-- `full_stem_pack_listen_preview_ready_not_release`: accepted full-stem listen
-  pack already exists. This is still not `release_ready`.
+- `full_stem_pack_source_ready_requires_aggregate_machine_gate`: a full-stem
+  source pack exists, but final listen delivery is still blocked until staged
+  aggregate validation plus machine stem gate acceptance.
 
 ## Example
 

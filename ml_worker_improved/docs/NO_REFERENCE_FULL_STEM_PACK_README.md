@@ -1,7 +1,7 @@
 # No-Reference Full Stem Pack
 
 `tools/build_no_reference_full_stem_pack_manifest.py` builds a contract-only
-manifest for a full listen-preview stem pack:
+source-ready manifest for a full stem pack:
 
 - `vocal`
 - `minus`
@@ -20,8 +20,8 @@ The builder accepts only source-of-truth evidence:
 2. a `no_reference_stem_candidate_score_matrix.json` with accepted and semantic
    verified non-vocal rows for `bass`, `drums`, `melody`, and `other`.
 
-The output is accepted only when all required stems are present and fail-closed
-otherwise:
+The output becomes source-ready only when all required stems are present and
+fails closed otherwise:
 
 - missing stem: `missing_required_stem:<stem>`;
 - track identity mismatch: `track_id_mismatch:<stem>`;
@@ -31,18 +31,26 @@ otherwise:
 - source safety violation: `source_stem_safety_violation:<stem>`.
 
 Track identity is exact by default. If a non-vocal row was produced with a
-different track-id slug, the builder may still accept it only when the row's
+different track-id slug, the builder may still use it only when the row's
 `source_listen_manifest` can be read and its `source_audio_path` exactly matches
-the accepted master manifest `source_mix_path`. The accepted manifest records
+the accepted master manifest `source_mix_path`. The source-ready manifest records
 `track_identity_match_method` and per-stem `track_identity_match_method` so this
 reconciliation is auditable.
 
-Accepted output remains listen-preview only:
+Source-ready output is not a user-facing listen-pack artifact. Even when all
+required stems are selected, the final manifest stays blocked until staged
+aggregate validation and an accepted machine stem gate are present:
 
-- `delivery_status=accepted`
-- `delivery_allowed=true`
-- `presentation_status=accepted_for_listen_pack`
-- `release_status=listen_preview_only`
+- `delivery_status=blocked`
+- `delivery_allowed=false`
+- `presentation_status=aggregate_machine_gate_required_not_for_listen_pack`
+- `release_status=not_release_ready`
+- `source_pack_ready=true`
+- `source_pack_delivery_status=accepted`
+- `source_pack_presentation_status=accepted_for_listen_pack`
+- `source_pack_release_status=listen_preview_only`
+- `requires_staged_aggregate_machine_gate=true`
+- `final_delivery_blockers=["requires_staged_aggregate_validation_and_machine_gate"]`
 - `stem_type=full_stem_pack`
 - `accepted_stem_count=6`
 - `release_ready=false`
@@ -57,6 +65,10 @@ docker compose run --rm --no-deps ml-worker python /app/tools/build_no_reference
   --output-manifest-json /app/lab_artifacts/testing_stuff_music_track2_full_stem_pack_20260612/no_reference_full_stem_pack_manifest.json \
   --summary-md /app/lab_artifacts/testing_stuff_music_track2_full_stem_pack_20260612/no_reference_full_stem_pack_summary.md
 ```
+
+Because the written manifest is fail-closed (`delivery_allowed=false`), the CLI
+returns non-zero after successfully writing source-ready evidence. Treat that as
+expected unless the manifest is missing or `source_pack_ready` is not true.
 
 Validation:
 

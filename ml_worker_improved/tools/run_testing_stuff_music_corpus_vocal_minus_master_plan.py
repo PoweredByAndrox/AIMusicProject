@@ -433,9 +433,17 @@ def run_full_stem_pack_step(
     write_json(manifest_path, manifest)
     summary_md.parent.mkdir(parents=True, exist_ok=True)
     summary_md.write_text(build_full_stem_pack_summary(manifest), encoding="utf-8")
+    source_pack_ready = (
+        manifest.get("source_pack_ready") is True
+        and manifest.get("requires_staged_aggregate_machine_gate") is True
+    )
     step.update(
         {
-            "step_status": "completed" if manifest.get("delivery_allowed") is True else "blocked_full_stem_pack_not_accepted",
+            "step_status": (
+                "completed_source_ready_requires_aggregate_machine_gate"
+                if source_pack_ready
+                else "blocked_full_stem_pack_not_source_ready"
+            ),
             "execution_started": True,
             "master_manifest_json": str(master_manifest),
             "stem_score_matrix_json": str(matrix_json),
@@ -444,6 +452,10 @@ def run_full_stem_pack_step(
             "delivery_status": manifest.get("delivery_status"),
             "presentation_status": manifest.get("presentation_status"),
             "release_status": manifest.get("release_status"),
+            "source_pack_ready": source_pack_ready,
+            "requires_staged_aggregate_machine_gate": (
+                manifest.get("requires_staged_aggregate_machine_gate") is True
+            ),
             "accepted_stem_count": int(manifest.get("accepted_stem_count") or 0),
             "delivery_allowed": False,
             "release_ready": False,
@@ -759,7 +771,7 @@ def run_plan(
                 "output_manifest_json": step.get("output_manifest_json", ""),
             },
         )
-        if fail_fast and execute and step["step_status"] != "completed":
+        if fail_fast and execute and not str(step["step_status"]).startswith("completed"):
             break
     summary = build_summary(
         plan_json=plan_json,

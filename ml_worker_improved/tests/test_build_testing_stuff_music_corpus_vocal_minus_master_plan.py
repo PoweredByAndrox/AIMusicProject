@@ -26,6 +26,32 @@ def accepted_manifest(track_id: str, stem_type: str, *, path_key: str, path: str
     }
 
 
+def source_ready_full_stem_pack(track_id: str, *, source_mix_path: str = "") -> dict:
+    manifest = {
+        "manifest_type": "no_reference_full_stem_pack",
+        "track_id": track_id,
+        "stem_type": "full_stem_pack",
+        "delivery_status": "blocked",
+        "delivery_allowed": False,
+        "presentation_status": "aggregate_machine_gate_required_not_for_listen_pack",
+        "release_status": "not_release_ready",
+        "dominant_failure_reason": "requires_staged_aggregate_validation_and_machine_gate",
+        "source_pack_ready": True,
+        "source_pack_delivery_status": "accepted",
+        "source_pack_presentation_status": "accepted_for_listen_pack",
+        "source_pack_release_status": "listen_preview_only",
+        "requires_staged_aggregate_machine_gate": True,
+        "final_delivery_blockers": ["requires_staged_aggregate_validation_and_machine_gate"],
+        "release_ready": False,
+        "can_mark_release_ready": False,
+        "can_publish_as_release": False,
+        "accepted_stem_count": 6,
+    }
+    if source_mix_path:
+        manifest["source_mix_path"] = source_mix_path
+    return manifest
+
+
 def corpus_gate_report(*rows: dict, planned_tracks: list[str] | None = None) -> dict:
     planned = planned_tracks or sorted({str(row["track_id"]) for row in rows})
     return {
@@ -86,7 +112,7 @@ def test_master_plan_advances_to_master_when_vocal_and_minus_are_accepted(tmp_pa
     assert plan["tracks"][0]["ready_for_master"] is True
 
 
-def test_master_plan_marks_existing_full_pack_listen_preview_without_release(tmp_path: Path) -> None:
+def test_master_plan_marks_existing_full_pack_source_ready_without_final_delivery(tmp_path: Path) -> None:
     gate_report = write_json(
         tmp_path / "gate_report.json",
         corpus_gate_report(planned_tracks=["track_a"]),
@@ -94,25 +120,15 @@ def test_master_plan_marks_existing_full_pack_listen_preview_without_release(tmp
     full_root = tmp_path / "full"
     write_json(
         full_root / "no_reference_full_stem_pack_manifest.json",
-        {
-            "manifest_type": "no_reference_full_stem_pack",
-            "track_id": "track_a",
-            "stem_type": "full_stem_pack",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
-            "release_status": "listen_preview_only",
-            "release_ready": False,
-            "accepted_stem_count": 6,
-        },
+        source_ready_full_stem_pack("track_a"),
     )
 
     plan = build_plan(corpus_gate_report_json=gate_report, full_stem_pack_roots=[full_root])
 
     assert plan["delivery_allowed"] is False
     assert plan["release_ready"] is False
-    assert plan["summary"]["full_stem_pack_listen_preview_ready_not_release"] == 1
-    assert plan["tracks"][0]["next_gate"] == "full_stem_pack_listen_preview_ready_not_release"
+    assert plan["summary"]["full_stem_pack_source_ready_requires_aggregate_machine_gate"] == 1
+    assert plan["tracks"][0]["next_gate"] == "full_stem_pack_source_ready_requires_aggregate_machine_gate"
     assert plan["tracks"][0]["missing_gates"] == []
 
 
@@ -130,24 +146,13 @@ def test_master_plan_matches_existing_full_pack_by_source_audio_when_track_ids_d
     full_root = tmp_path / "full"
     write_json(
         full_root / "no_reference_full_stem_pack_manifest.json",
-        {
-            "manifest_type": "no_reference_full_stem_pack",
-            "track_id": "filename-derived-track",
-            "source_mix_path": "/host/same-track.mp3",
-            "stem_type": "full_stem_pack",
-            "delivery_status": "accepted",
-            "delivery_allowed": True,
-            "presentation_status": "accepted_for_listen_pack",
-            "release_status": "listen_preview_only",
-            "release_ready": False,
-            "accepted_stem_count": 6,
-        },
+        source_ready_full_stem_pack("filename-derived-track", source_mix_path="/host/same-track.mp3"),
     )
 
     plan = build_plan(corpus_gate_report_json=gate_report, full_stem_pack_roots=[full_root])
 
     assert plan["tracks"][0]["track_identity_match_method"] == "source_audio_path"
-    assert plan["tracks"][0]["next_gate"] == "full_stem_pack_listen_preview_ready_not_release"
+    assert plan["tracks"][0]["next_gate"] == "full_stem_pack_source_ready_requires_aggregate_machine_gate"
 
 
 def test_master_plan_cli_writes_manifest_and_summary(tmp_path: Path) -> None:

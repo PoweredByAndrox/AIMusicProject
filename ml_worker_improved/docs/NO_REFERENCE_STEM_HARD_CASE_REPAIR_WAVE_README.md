@@ -55,9 +55,10 @@ Evidence run on
 - the updated registered `pitch_salience_melody_v2` route accepted under the
   same semantic judge with score `0.990813`, empty blockers, GPU provenance
   passed, and `release_ready=false`.
-- the resulting full stem pack manifest is accepted for listen preview only
-  with `accepted_stem_count=6`, `delivery_allowed=true`, and
-  `release_status=listen_preview_only`.
+- the resulting full stem pack manifest is source-ready but fail-closed with
+  `accepted_stem_count=6`, `delivery_allowed=false`,
+  `presentation_status=aggregate_machine_gate_required_not_for_listen_pack`,
+  and `requires_staged_aggregate_machine_gate=true`.
 
 ## Dry Run
 

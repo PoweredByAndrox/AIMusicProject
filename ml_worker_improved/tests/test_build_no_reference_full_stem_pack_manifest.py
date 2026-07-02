@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.artifact_status_contract import can_promote_to_listen_result, status_view_from_manifest
+from tools.artifact_status_contract import status_view_from_manifest
 from tools.build_no_reference_full_stem_pack_manifest import build_manifest, main
 
 
@@ -11,6 +11,20 @@ def write_json(path: Path, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def assert_source_pack_requires_aggregate_gate(manifest: dict) -> None:
+    assert manifest["delivery_status"] == "blocked"
+    assert manifest["delivery_allowed"] is False
+    assert manifest["presentation_status"] == "aggregate_machine_gate_required_not_for_listen_pack"
+    assert manifest["release_status"] == "not_release_ready"
+    assert manifest["dominant_failure_reason"] == "requires_staged_aggregate_validation_and_machine_gate"
+    assert manifest["source_pack_ready"] is True
+    assert manifest["source_pack_delivery_status"] == "accepted"
+    assert manifest["source_pack_presentation_status"] == "accepted_for_listen_pack"
+    assert manifest["source_pack_release_status"] == "listen_preview_only"
+    assert manifest["requires_staged_aggregate_machine_gate"] is True
+    assert manifest["final_delivery_blockers"] == ["requires_staged_aggregate_validation_and_machine_gate"]
 
 
 def accepted_master_manifest(track_id: str = "track-a") -> dict:
@@ -117,10 +131,7 @@ def test_full_stem_pack_accepts_master_and_matrix_selected_stems(tmp_path: Path)
 
     manifest = build_manifest(master_manifest_json=master_path, stem_score_matrix_json=matrix_path)
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
-    assert manifest["presentation_status"] == "accepted_for_listen_pack"
-    assert manifest["release_status"] == "listen_preview_only"
+    assert_source_pack_requires_aggregate_gate(manifest)
     assert manifest["stem_type"] == "full_stem_pack"
     assert manifest["accepted_stem_count"] == 6
     assert manifest["selected_stems"]["vocal"]["path"] == "/tmp/vocal.wav"
@@ -178,8 +189,7 @@ def test_full_stem_pack_accepts_source_manifest_track_identity_when_track_ids_dr
         stem_score_matrix_json=write_json(tmp_path / "stem_matrix.json", stem_matrix(*rows)),
     )
 
-    assert manifest["delivery_status"] == "accepted"
-    assert manifest["delivery_allowed"] is True
+    assert_source_pack_requires_aggregate_gate(manifest)
     assert manifest["track_identity_match_method"] == "source_listen_manifest_source_audio_path"
     assert manifest["selected_stems"]["melody"]["track_identity_match_method"] == "source_listen_manifest_source_audio_path"
 
@@ -207,7 +217,7 @@ def test_full_stem_pack_blocks_track_id_drift_without_matching_source_manifest(t
     assert manifest["dominant_failure_reason"] == "track_id_mismatch:bass"
 
 
-def test_full_stem_pack_cli_writes_promotable_manifest(tmp_path: Path) -> None:
+def test_full_stem_pack_cli_writes_source_ready_fail_closed_manifest(tmp_path: Path) -> None:
     output_manifest = tmp_path / "full_stem_pack.json"
     summary_md = tmp_path / "summary.md"
 
@@ -224,8 +234,12 @@ def test_full_stem_pack_cli_writes_promotable_manifest(tmp_path: Path) -> None:
                 str(summary_md),
             ]
         )
-        == 0
+        == 1
     )
-    assert can_promote_to_listen_result(output_manifest) is True
+    payload = json.loads(output_manifest.read_text(encoding="utf-8"))
+    assert_source_pack_requires_aggregate_gate(payload)
     assert status_view_from_manifest(output_manifest).stem_type == "full_stem_pack"
-    assert "delivery_status: accepted" in summary_md.read_text(encoding="utf-8")
+    summary = summary_md.read_text(encoding="utf-8")
+    assert "delivery_status: blocked" in summary
+    assert "source_pack_ready: true" in summary
+    assert "requires_staged_aggregate_machine_gate: true" in summary

@@ -33,9 +33,9 @@ single per-track gate succeeds.
   `external_only_cpu_dsp_scoring`; it does not run hidden model inference.
 - `build_full_stem_pack_manifest` requires an accepted master manifest path from
   the plan and a matching `no_reference_stem_candidate_score_matrix.json`.
-  It calls the existing full-stem pack contract builder and writes only
-  listen-preview manifest evidence; it does not copy/export audio or mark
-  release-ready.
+  It calls the existing full-stem pack contract builder and writes a source-ready
+  fail-closed manifest; it does not copy/export audio, mark release-ready, or
+  create final listen delivery.
 
 ## Outputs
 
@@ -95,5 +95,7 @@ If the selected row is `build_full_stem_pack_manifest`, the executor writes:
 - `no_reference_full_stem_pack_summary.md`
 
 The executor summary still keeps `delivery_allowed=false` and
-`release_ready=false`; only the per-track full-stem pack manifest can be
-`accepted_for_listen_pack`.
+`release_ready=false`; the per-track full-stem pack manifest also remains
+`delivery_status=blocked` with
+`presentation_status=aggregate_machine_gate_required_not_for_listen_pack` until
+staged aggregate validation plus machine stem gate acceptance.
