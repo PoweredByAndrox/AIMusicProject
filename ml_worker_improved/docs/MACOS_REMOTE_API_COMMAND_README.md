@@ -40,6 +40,10 @@ Current local-network contract:
   `/Users/andrejviluha/aimusic_local_artifacts/mac_api`,
   `/Users/andrejviluha/win_artifacts`, `/Users/andrejviluha/artifacts`, and
   `/tmp/artifacts`; the client blocks these before opening SSH;
+- `scripts\macos-ssh.ps1` must also block those roots when they are supplied as
+  `-MacProjectRoot` or appear in derived exported roots such as
+  `AIMUSIC_MAC_ARTIFACT_ROOT`, not only when they appear literally in
+  `-RemoteCommand`;
 - if SMB authentication or the write/read/delete probe fails, the route is
   blocked instead of creating Mac-local listen/result artifacts.
 

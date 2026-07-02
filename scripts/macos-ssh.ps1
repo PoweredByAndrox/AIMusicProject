@@ -70,6 +70,22 @@ $sshArgs = @(
     $target
 )
 
+$forbiddenProjectRoot = Get-ForbiddenMacLocalArtifactRoot -Command $MacProjectRoot
+if (-not [string]::IsNullOrWhiteSpace($forbiddenProjectRoot)) {
+    throw "Forbidden Mac-local project root: $forbiddenProjectRoot. Use the mounted Windows project root, normally /Users/andrejviluha/AIMusicProject_win."
+}
+
+$MacArtifactRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "artifacts"
+$MacLabArtifactsRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "lab_artifacts"
+$MacArtifactRagRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "artifact_rag"
+
+foreach ($derivedRoot in @($MacArtifactRoot, $MacLabArtifactsRoot, $MacArtifactRagRoot)) {
+    $forbiddenDerivedRoot = Get-ForbiddenMacLocalArtifactRoot -Command $derivedRoot
+    if (-not [string]::IsNullOrWhiteSpace($forbiddenDerivedRoot)) {
+        throw "Forbidden Mac-local derived artifact root: $forbiddenDerivedRoot. Write result artifacts directly under $MacProjectRoot/artifacts, $MacProjectRoot/lab_artifacts, or $MacProjectRoot/artifact_rag."
+    }
+}
+
 if (-not $NoMountCheck) {
     $mount = ConvertTo-RemoteSingleQuoted -Value $MacProjectRoot
     $probeCommand = "MP=$mount; mount | grep -F -- `"`$MP`" >/dev/null 2>&1 && test -d `"`$MP/ml_worker_improved`" && mkdir -p `"`$MP/.aimusic_mount_probe`" && test -w `"`$MP/.aimusic_mount_probe`""
@@ -84,10 +100,6 @@ if ([string]::IsNullOrWhiteSpace($RemoteCommand)) {
     & ssh @sshArgs
     exit $LASTEXITCODE
 }
-
-$MacArtifactRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "artifacts"
-$MacLabArtifactsRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "lab_artifacts"
-$MacArtifactRagRoot = Join-RemotePosixPath -Root $MacProjectRoot -Child "artifact_rag"
 
 $forbiddenRoot = Get-ForbiddenMacLocalArtifactRoot -Command $RemoteCommand
 if (-not [string]::IsNullOrWhiteSpace($forbiddenRoot)) {

@@ -154,6 +154,10 @@ Windows project share, then rerun with output roots directly under:
 Mac runners must use these mounted Windows roots as their primary output
 location. They must not write result artifacts under
 `/Users/andrejviluha/aimusic_local_artifacts` and then copy them back.
+The Windows wrapper must also reject a forbidden `-MacProjectRoot`, because
+otherwise the exported `AIMUSIC_MAC_ARTIFACT_ROOT` could point back into a
+Mac-local artifact tree without the literal forbidden path appearing in the
+remote command text.
 
 The forbidden future result roots are
 `/Users/andrejviluha/aimusic_local_artifacts`,

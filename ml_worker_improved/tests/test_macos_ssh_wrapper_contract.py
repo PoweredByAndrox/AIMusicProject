@@ -22,3 +22,13 @@ def test_macos_ssh_blocks_home_relative_local_artifact_roots() -> None:
     assert "'${HOME}/aimusic_local_artifacts'" in script
     assert "'~/aimusic_local_artifacts'" in script
     assert "Forbidden Mac-local result artifact root in RemoteCommand" in script
+
+
+def test_macos_ssh_blocks_forbidden_project_root_before_exporting_artifact_env() -> None:
+    script = MACOS_SSH_SCRIPT.read_text(encoding="utf-8-sig")
+
+    assert "Get-ForbiddenMacLocalArtifactRoot -Command $MacProjectRoot" in script
+    assert "Forbidden Mac-local project root" in script
+    assert "foreach ($derivedRoot in @($MacArtifactRoot, $MacLabArtifactsRoot, $MacArtifactRagRoot))" in script
+    assert "Get-ForbiddenMacLocalArtifactRoot -Command $derivedRoot" in script
+    assert "Forbidden Mac-local derived artifact root" in script
