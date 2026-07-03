@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,10 +158,18 @@ def registered_model_command_template() -> tuple[str, ...]:
         "--model-id",
         "{source_model_id}",
         "--device",
-        "cuda",
+        "{device}",
         "--target-stem",
         "{target_stem}",
     )
+
+
+def registered_model_device() -> str:
+    for key in ("AIMUSIC_REGISTERED_MODEL_DEVICE", "AIMUSIC_SEPARATOR_DEVICE"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return "cuda"
 
 
 def registered_model_supported_parameters() -> tuple[str, ...]:

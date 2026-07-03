@@ -18,6 +18,7 @@ from tools.no_reference_candidate_job_registry import (  # noqa: E402
     CandidateJobConfig,
     build_candidate_job_registry,
     get_candidate_job_config,
+    registered_model_device,
 )
 from tools.normalize_no_reference_candidate_audio import normalize_candidate_audio_to_input_shape  # noqa: E402
 
@@ -333,6 +334,7 @@ def run_local_separator_candidate_job(
         "registered_output_dir": str(registered_output_dir),
         "candidate_config_id": config.candidate_config_id,
         "source_model_id": config.source_model_id,
+        "device": registered_model_device(),
         "target_stem": config.target_stem or config.target_mode,
         "job_manifest_json": str(job_manifest_json),
         "job_progress_jsonl": str(job_progress_jsonl),

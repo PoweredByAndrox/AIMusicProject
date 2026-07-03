@@ -80,6 +80,7 @@ def test_job_registry_references_supported_configs_or_marks_unavailable() -> Non
             "balanced_pair_default",
             "vocal_focused_default",
             "minus_focused_default",
+            "minus_focused_existing_model",
             "artifact_safe_default",
             "chunk_overlap_variant",
             "high_overlap_variant",
@@ -184,6 +185,47 @@ def test_local_separator_job_writes_manifest_and_progress(tmp_path: Path) -> Non
         "validate_outputs",
         "complete",
     ]
+
+
+def test_local_separator_job_resolves_device_at_runtime_without_config_hash_change(tmp_path: Path, monkeypatch) -> None:
+    input_audio = Path(write_wav(tmp_path / "input.wav", sine(220, 1.0)))
+    output_dir = tmp_path / "candidate"
+    config = CandidateJobConfig(
+        candidate_config_id="unit-device",
+        candidate_family="vocal_focused",
+        target_mode="vocal",
+        source_model_id="unit-existing-model",
+        source_tool="unit-existing-separator",
+        entrypoint_type="python_script",
+        command_template=("unit-runner", "--device", "{device}", "{input_audio}", "{output_dir}"),
+        expected_outputs={"vocal_path": "{output_dir}/vocals.wav", "minus_path": ""},
+        gpu_required=False,
+        timeout_sec=5,
+        max_retries=0,
+        profile_allowed=("safe",),
+        safety_notes=("unit test config",),
+    )
+    source_config_hash = config.source_config_hash
+    captured: list[list[str]] = []
+    monkeypatch.setenv("AIMUSIC_REGISTERED_MODEL_DEVICE", "mps")
+
+    def fake_runner(command: list[str], timeout_sec: int) -> None:
+        captured.append(command)
+        write_wav(output_dir / "vocals.wav", sine(440, 1.0))
+
+    manifest = run_local_separator_candidate_job(
+        input_audio=input_audio,
+        candidate_config_id="unit-device",
+        output_dir=output_dir,
+        job_manifest_json=output_dir / "job_manifest.json",
+        job_progress_jsonl=output_dir / "job_progress.jsonl",
+        registry_configs=[config],
+        command_runner=fake_runner,
+    )
+
+    assert captured[0][captured[0].index("--device") + 1] == "mps"
+    assert manifest["command"][manifest["command"].index("--device") + 1] == "mps"
+    assert config.source_config_hash == source_config_hash
 
 
 def test_local_separator_job_normalizes_recoverable_audio_shape(tmp_path: Path) -> None:

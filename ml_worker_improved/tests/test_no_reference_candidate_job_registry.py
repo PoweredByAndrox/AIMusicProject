@@ -3,6 +3,8 @@ from pathlib import Path
 from tools.no_reference_candidate_job_registry import (
     STEM_SUM_MINUS_FORBIDDEN_REASON,
     build_candidate_job_registry,
+    registered_model_command_template,
+    registered_model_device,
 )
 from tools.no_reference_candidate_job_scheduler import build_candidate_job_plan
 from worker.model_registry import ModelRegistry, ModelRegistryEntry
@@ -115,3 +117,60 @@ def test_safe_minus_registry_uses_dedicated_instrumental_route_not_multistem_sum
         balanced_unavailable[balanced_htdemucs_6s_minus.candidate_config_id]["forbidden_reason"]
         == STEM_SUM_MINUS_FORBIDDEN_REASON
     )
+
+
+def test_registered_model_command_template_keeps_stable_device_placeholder(monkeypatch) -> None:
+    monkeypatch.setenv("AIMUSIC_REGISTERED_MODEL_DEVICE", "mps")
+    monkeypatch.setenv("AIMUSIC_SEPARATOR_DEVICE", "cpu")
+
+    template = registered_model_command_template()
+
+    assert template[template.index("--device") + 1] == "{device}"
+
+
+def test_registered_model_device_defaults_to_cuda(monkeypatch) -> None:
+    monkeypatch.delenv("AIMUSIC_REGISTERED_MODEL_DEVICE", raising=False)
+    monkeypatch.delenv("AIMUSIC_SEPARATOR_DEVICE", raising=False)
+
+    assert registered_model_device() == "cuda"
+
+
+def test_registered_model_device_can_be_overridden_for_mac(monkeypatch) -> None:
+    monkeypatch.setenv("AIMUSIC_REGISTERED_MODEL_DEVICE", "mps")
+    monkeypatch.setenv("AIMUSIC_SEPARATOR_DEVICE", "cuda")
+
+    assert registered_model_device() == "mps"
+
+
+def test_registered_model_device_falls_back_to_separator_device(monkeypatch) -> None:
+    monkeypatch.delenv("AIMUSIC_REGISTERED_MODEL_DEVICE", raising=False)
+    monkeypatch.setenv("AIMUSIC_SEPARATOR_DEVICE", "mps")
+
+    assert registered_model_device() == "mps"
+
+
+def test_registered_model_source_hash_is_stable_across_device_env(monkeypatch) -> None:
+    registry = ModelRegistry(
+        entries=(
+            registry_entry(
+                "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals",
+                output_stems=("vocals", "instrumental"),
+            ),
+        )
+    )
+
+    monkeypatch.delenv("AIMUSIC_REGISTERED_MODEL_DEVICE", raising=False)
+    monkeypatch.delenv("AIMUSIC_SEPARATOR_DEVICE", raising=False)
+    default_config = {
+        config.candidate_config_id: config
+        for config in build_candidate_job_registry(profile="safe", registry=registry)
+    }["local_registered__audio_separator_bs_roformer_viperx_1297_vendor_config_vocals__both__minus_direct"]
+
+    monkeypatch.setenv("AIMUSIC_REGISTERED_MODEL_DEVICE", "mps")
+    overridden_config = {
+        config.candidate_config_id: config
+        for config in build_candidate_job_registry(profile="safe", registry=registry)
+    }["local_registered__audio_separator_bs_roformer_viperx_1297_vendor_config_vocals__both__minus_direct"]
+
+    assert default_config.command_template == overridden_config.command_template
+    assert default_config.source_config_hash == overridden_config.source_config_hash
