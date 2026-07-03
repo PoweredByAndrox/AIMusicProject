@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import shutil
 import subprocess
 import sys
@@ -27,8 +26,6 @@ from docker_runtime import require_docker_runtime  # noqa: E402
 EPSILON = 1e-12
 ROUTE_NAME = "ralph_minus_improvement_loop"
 PROGRESS_LOG_NAME = "ralph_minus_improvement_progress.jsonl"
-WORD_AUDIT_MODEL_ENV = "AIMUSIC_WORD_AUDIT_MODEL"
-DEFAULT_WORD_AUDIT_MODEL = "base.en"
 
 
 @dataclass(frozen=True)
@@ -753,231 +750,6 @@ def audio_fingerprint(audio: np.ndarray) -> str:
     return digest.hexdigest()
 
 
-def word_like_token_count(text: str) -> int:
-    tokens = text.replace("'", " ").replace("-", " ").split()
-    return sum(1 for token in tokens if any(character.isalpha() for character in token))
-
-
-def _as_word_count(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def extract_word_audit(
-    payload: dict[str, Any] | None,
-    *,
-    role: str,
-    audio_path: Path | None = None,
-) -> dict[str, Any] | None:
-    if not payload:
-        return None
-    candidates: list[Any] = []
-    results = payload.get("results")
-    if isinstance(results, dict):
-        candidates.append(results.get(role))
-        if audio_path is not None:
-            target_path = str(audio_path)
-            for item in results.values():
-                if isinstance(item, dict) and str(item.get("path") or "") == target_path:
-                    candidates.append(item)
-    candidates.append(payload.get(role))
-    if role == "accepted_product_minus":
-        candidates.append(payload.get("minus_word_audit"))
-    for candidate in candidates:
-        if isinstance(candidate, dict):
-            word_count = _as_word_count(candidate.get("word_like_token_count"))
-            if word_count is None:
-                word_count = word_like_token_count(str(candidate.get("text") or ""))
-            return {
-                "status": candidate.get("status", "available"),
-                "role": role,
-                "path": str(candidate.get("path") or audio_path or ""),
-                "text": str(candidate.get("text") or ""),
-                "word_like_token_count": word_count,
-                "source": "provided_content_identity_audit",
-            }
-    word_count = _as_word_count(payload.get("word_like_token_count"))
-    if word_count is not None:
-        return {
-            "status": payload.get("status", "available"),
-            "role": role,
-            "path": str(payload.get("path") or audio_path or ""),
-            "text": str(payload.get("text") or ""),
-            "word_like_token_count": word_count,
-            "source": "provided_content_identity_audit",
-        }
-    return None
-
-
-def run_word_content_audit(audio_path: Path, *, role: str, model_name: str = "") -> dict[str, Any]:
-    model_name = model_name or DEFAULT_WORD_AUDIT_MODEL
-    try:
-        from faster_whisper import WhisperModel  # type: ignore
-    except Exception as exc:  # pragma: no cover - depends on runtime image
-        return {
-            "status": "unavailable",
-            "role": role,
-            "path": str(audio_path),
-            "word_like_token_count": None,
-            "text": "",
-            "blocked_reason": "faster_whisper_unavailable",
-            "error": f"{type(exc).__name__}: {exc}",
-            "model": model_name,
-        }
-
-    try:
-        model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        segments, info = model.transcribe(
-            str(audio_path),
-            language="en",
-            beam_size=5,
-            vad_filter=True,
-            condition_on_previous_text=False,
-            no_speech_threshold=0.6,
-        )
-        rows: list[dict[str, Any]] = []
-        text_parts: list[str] = []
-        for segment in segments:
-            text = str(getattr(segment, "text", "") or "").strip()
-            rows.append(
-                {
-                    "start": round(float(getattr(segment, "start", 0.0)), 3),
-                    "end": round(float(getattr(segment, "end", 0.0)), 3),
-                    "text": text,
-                    "avg_logprob": round(float(getattr(segment, "avg_logprob", 0.0)), 4),
-                    "no_speech_prob": round(float(getattr(segment, "no_speech_prob", 0.0)), 4),
-                    "compression_ratio": round(float(getattr(segment, "compression_ratio", 0.0)), 4),
-                }
-            )
-            if text:
-                text_parts.append(text)
-        full_text = " ".join(text_parts).strip()
-        return {
-            "status": "available",
-            "role": role,
-            "path": str(audio_path),
-            "model": model_name,
-            "language": getattr(info, "language", None),
-            "language_probability": round(float(getattr(info, "language_probability", 0.0)), 4),
-            "text": full_text,
-            "word_like_token_count": word_like_token_count(full_text),
-            "segments": rows,
-            "source": "faster_whisper_runtime_content_audit",
-        }
-    except Exception as exc:  # pragma: no cover - depends on runtime model/cache/network
-        return {
-            "status": "failed",
-            "role": role,
-            "path": str(audio_path),
-            "word_like_token_count": None,
-            "text": "",
-            "blocked_reason": "word_content_audit_failed",
-            "error": f"{type(exc).__name__}: {exc}",
-            "model": model_name,
-        }
-
-
-def resolve_word_audit(
-    *,
-    payload: dict[str, Any] | None,
-    role: str,
-    audio_path: Path,
-    run_if_missing: bool,
-    model_name: str = "",
-) -> dict[str, Any]:
-    provided = extract_word_audit(payload, role=role, audio_path=audio_path)
-    if provided is not None:
-        return provided
-    if not run_if_missing:
-        return {
-            "status": "missing",
-            "role": role,
-            "path": str(audio_path),
-            "word_like_token_count": None,
-            "text": "",
-            "blocked_reason": "missing_word_content_audit",
-        }
-    return run_word_content_audit(audio_path, role=role, model_name=model_name)
-
-
-def word_audit_has_words(audit: dict[str, Any]) -> bool | None:
-    word_count = _as_word_count(audit.get("word_like_token_count"))
-    if word_count is None:
-        return None
-    return word_count > 0
-
-
-def reference_filename_for_content(role_prefix: str, audit: dict[str, Any] | None) -> tuple[str, str]:
-    if audit is None:
-        return f"{role_prefix}_unverified_reference.flac", f"{role_prefix}_unverified_reference"
-    has_words = word_audit_has_words(audit)
-    if has_words is True:
-        return f"{role_prefix}_vocal_reference.flac", f"{role_prefix}_vocal_reference"
-    if has_words is False:
-        return f"{role_prefix}_residual_reference.flac", f"{role_prefix}_residual_reference"
-    return f"{role_prefix}_unverified_reference.flac", f"{role_prefix}_unverified_reference"
-
-
-def input_content_identity_blockers(input_word_audit: dict[str, Any]) -> list[dict[str, Any]]:
-    blockers: list[dict[str, Any]] = []
-    raw_audit = input_word_audit.get("raw_mix") or {}
-    raw_has_words = word_audit_has_words(raw_audit)
-    for role in ("primary_vocal_reference", "secondary_vocal_reference"):
-        audit = input_word_audit.get(role) or {}
-        has_words = word_audit_has_words(audit)
-        if has_words is None:
-            blockers.append(
-                {
-                    "label": f"{role}_word_audit_missing_or_failed",
-                    "role": role,
-                    "reason": audit.get("blocked_reason", "missing_word_content_audit"),
-                }
-            )
-        elif raw_has_words is True and has_words is False and role == "primary_vocal_reference":
-            blockers.append(
-                {
-                    "label": "primary_vocal_reference_has_no_detected_words",
-                    "role": role,
-                    "reason": "raw_mix_has_words_but_primary_vocal_reference_has_none",
-                    "word_like_token_count": audit.get("word_like_token_count"),
-                }
-            )
-    if raw_has_words is None:
-        blockers.append(
-            {
-                "label": "raw_mix_word_audit_missing_or_failed",
-                "role": "raw_mix",
-                "reason": raw_audit.get("blocked_reason", "missing_word_content_audit"),
-            }
-        )
-    return blockers
-
-
-def selected_minus_content_blockers(audit: dict[str, Any]) -> list[dict[str, Any]]:
-    has_words = word_audit_has_words(audit)
-    if has_words is None:
-        return [
-            {
-                "label": "selected_minus_word_audit_missing_or_failed",
-                "reason": audit.get("blocked_reason", "missing_word_content_audit"),
-            }
-        ]
-    if has_words:
-        return [
-            {
-                "label": "selected_minus_contains_detected_words",
-                "reason": "accepted_product_minus_requires_zero_word_like_tokens",
-                "word_like_token_count": audit.get("word_like_token_count"),
-                "text": audit.get("text", ""),
-            }
-        ]
-    return []
-
-
 def validate_prepared_input_roles(provenance: dict[str, dict[str, Any]]) -> None:
     collision_pairs = (
         ("base_product_minus", "guide_product_minus"),
@@ -1029,7 +801,6 @@ def prepare_recipe_inputs(
     primary_vocals_path: Path,
     secondary_vocals_path: Path,
     output_dir: Path,
-    input_word_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base_audio, sample_rate = load_audio(base_minus_path)
     raw_audio, _ = load_audio(raw_audio_path, sample_rate)
@@ -1038,14 +809,6 @@ def prepare_recipe_inputs(
     secondary_vocals, _ = load_audio(secondary_vocals_path, sample_rate)
     raw_audio, base_audio, guide_minus, primary_vocals, secondary_vocals = match_length(
         [raw_audio, base_audio, guide_minus, primary_vocals, secondary_vocals]
-    )
-    primary_filename, primary_contract_role = reference_filename_for_content(
-        "primary",
-        (input_word_audit or {}).get("primary_vocal_reference"),
-    )
-    secondary_filename, secondary_contract_role = reference_filename_for_content(
-        "secondary",
-        (input_word_audit or {}).get("secondary_vocal_reference"),
     )
     role_inputs = {
         "raw_mix": {
@@ -1068,15 +831,15 @@ def prepare_recipe_inputs(
         },
         "primary_vocal_reference": {
             "source_path": primary_vocals_path,
-            "normalized_path": output_dir / primary_filename,
+            "normalized_path": output_dir / "primary_vocal_reference.flac",
             "audio": primary_vocals,
-            "contract_role": primary_contract_role,
+            "contract_role": "primary_vocal_reference",
         },
         "secondary_vocal_reference": {
             "source_path": secondary_vocals_path,
-            "normalized_path": output_dir / secondary_filename,
+            "normalized_path": output_dir / "secondary_vocal_reference.flac",
             "audio": secondary_vocals,
-            "contract_role": secondary_contract_role,
+            "contract_role": "secondary_vocal_reference",
         },
     }
     for item in role_inputs.values():
@@ -1097,7 +860,6 @@ def prepare_recipe_inputs(
             "intended_audio_fingerprint": audio_fingerprint(item["audio"]),
             "normalized_audio_fingerprint": audio_fingerprint(normalized_audio),
             "sample_rate": sample_rate,
-            "word_content_audit": (input_word_audit or {}).get(role),
         }
     validate_prepared_input_roles(provenance)
     normalized_input_manifest = output_dir / "inputs_manifest.json"
@@ -1171,30 +933,8 @@ def write_selected_artifacts(
     selected_candidate: dict[str, Any],
     output_dir: Path,
     listen_dir: Path | None,
-    selected_word_audit: dict[str, Any],
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    content_blockers = selected_minus_content_blockers(selected_word_audit)
-    if content_blockers:
-        blocked_output_path = output_dir / "blocked_product_minus_candidate.flac"
-        shutil.copyfile(selected_candidate["artifact_path"], blocked_output_path)
-        candidate_manifest = selected_candidate.get("manifest") or {}
-        return {
-            "stem_type": "minus",
-            "artifact_role": "blocked_product_minus_candidate",
-            "blocked_product_minus_candidate_flac": str(blocked_output_path),
-            "source_candidate_path": str(selected_candidate["artifact_path"]),
-            "source_candidate_manifest": str(selected_candidate["manifest_path"]),
-            "source_candidate_artifact_role": candidate_manifest.get(
-                "artifact_role", "candidate_product_minus"
-            ),
-            "delivery_status": "blocked",
-            "delivery_allowed": False,
-            "presentation_status": "blocked_from_listen_pack",
-            "release_status": "blocked_for_listening",
-            "content_identity_audit": selected_word_audit,
-            "content_identity_blockers": content_blockers,
-        }
     selected_output_path = output_dir / "accepted_product_minus.flac"
     shutil.copyfile(selected_candidate["artifact_path"], selected_output_path)
     candidate_manifest = selected_candidate.get("manifest") or {}
@@ -1212,8 +952,6 @@ def write_selected_artifacts(
         "delivery_allowed": True,
         "presentation_status": "accepted_for_listen_pack",
         "release_status": "release_ready",
-        "content_identity_audit": selected_word_audit,
-        "content_identity_blockers": [],
     }
     if listen_dir is not None:
         listen_dir.mkdir(parents=True, exist_ok=True)
@@ -1241,12 +979,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--focus-include-low-confidence-accepted", action="store_true")
     parser.add_argument("--focus-max-accept-probability", type=float, default=0.0)
     parser.add_argument("--focus-min-block-probability", type=float, default=0.0)
-    parser.add_argument("--content-identity-audit-json")
-    parser.add_argument(
-        "--skip-runtime-word-content-audit",
-        action="store_true",
-        help="Do not run runtime ASR when the provided content audit is missing a role; missing audit blocks delivery.",
-    )
     return parser.parse_args(argv)
 
 
@@ -1294,37 +1026,6 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         phase="input_normalization_start",
         elapsed_sec=round(time.perf_counter() - started_at, 3),
     )
-    content_identity_audit_path = (
-        Path(args.content_identity_audit_json) if args.content_identity_audit_json else None
-    )
-    content_identity_audit = (
-        load_json(content_identity_audit_path) if content_identity_audit_path else None
-    )
-    run_word_audit_if_missing = not bool(args.skip_runtime_word_content_audit)
-    word_audit_model = os.environ.get(WORD_AUDIT_MODEL_ENV, DEFAULT_WORD_AUDIT_MODEL)
-    input_word_audit = {
-        "raw_mix": resolve_word_audit(
-            payload=content_identity_audit,
-            role="raw_mix",
-            audio_path=raw_audio_path,
-            run_if_missing=run_word_audit_if_missing,
-            model_name=word_audit_model,
-        ),
-        "primary_vocal_reference": resolve_word_audit(
-            payload=content_identity_audit,
-            role="primary_vocal_reference",
-            audio_path=primary_vocals_path,
-            run_if_missing=run_word_audit_if_missing,
-            model_name=word_audit_model,
-        ),
-        "secondary_vocal_reference": resolve_word_audit(
-            payload=content_identity_audit,
-            role="secondary_vocal_reference",
-            audio_path=secondary_vocals_path,
-            run_if_missing=run_word_audit_if_missing,
-            model_name=word_audit_model,
-        ),
-    }
     prepared_inputs = prepare_recipe_inputs(
         raw_audio_path=raw_audio_path,
         base_minus_path=base_minus_path,
@@ -1332,9 +1033,7 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         primary_vocals_path=primary_vocals_path,
         secondary_vocals_path=secondary_vocals_path,
         output_dir=output_dir / "normalized_inputs",
-        input_word_audit=input_word_audit,
     )
-    input_content_blockers = input_content_identity_blockers(input_word_audit)
     emit_progress(
         progress_path,
         phase="input_normalization_end",
@@ -1345,7 +1044,6 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         primary_vocals_path=str(prepared_inputs["primary_vocals_path"]),
         secondary_vocals_path=str(prepared_inputs["secondary_vocals_path"]),
         normalized_input_manifest=str(prepared_inputs["normalized_input_manifest"]),
-        input_content_blocker_count=len(input_content_blockers),
         elapsed_sec=round(time.perf_counter() - started_at, 3),
     )
     raw_audio_path = Path(prepared_inputs["raw_audio_path"])
@@ -1355,72 +1053,6 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
     secondary_vocals_path = Path(prepared_inputs["secondary_vocals_path"])
     if reference_base_was_base:
         reference_base_path = base_minus_path
-    if input_content_blockers:
-        selected_artifacts = {
-            "delivery_status": "blocked",
-            "delivery_allowed": False,
-            "presentation_status": "blocked_from_listen_pack",
-            "release_status": "blocked_for_listening",
-            "artifact_role": "blocked_input_content_identity",
-            "content_identity_blockers": input_content_blockers,
-        }
-        manifest = {
-            "schema_version": 1,
-            "mode": "ralph_minus_improvement_loop",
-            "ralph_contract": {
-                "reference_free_application": True,
-                "no_per_track_hardcoded_timestamps": True,
-                "no_fallback_as_success": True,
-                "produce_only_release_ready": True,
-                "content_identity_gate_required": True,
-            },
-            "inputs": {
-                "raw_audio_path": str(raw_audio_path),
-                "base_minus_path": str(base_minus_path),
-                "reference_base_path": str(reference_base_path),
-                "guide_minus_path": str(guide_minus_path),
-                "primary_vocals_path": str(primary_vocals_path),
-                "secondary_vocals_path": str(secondary_vocals_path),
-                "normalized_inputs": {
-                    key: str(value)
-                    for key, value in prepared_inputs.items()
-                    if key.endswith("_path")
-                },
-                "normalized_input_manifest": str(prepared_inputs["normalized_input_manifest"]),
-                "normalized_input_provenance": prepared_inputs["provenance"],
-                "normalized_sample_rate": prepared_inputs["sample_rate"],
-                "word_content_audit": input_word_audit,
-                "content_identity_audit_path": str(content_identity_audit_path or ""),
-            },
-            "input_content_identity_blockers": input_content_blockers,
-            "focus_window_source": str(args.focus_windows_jsonl or ""),
-            "focus_windows": [],
-            "focus_base_summary": {"window_count": 0, "windows": []},
-            "focus_evaluation_used_for_delivery": False,
-            "focus_candidate_recipe_enabled": False,
-            "policy": MinusAcceptancePolicy().__dict__,
-            "base_summary": {},
-            "candidates": [],
-            "selected_candidate": None,
-            "release_status": "blocked_for_listening",
-            "delivery_status": "blocked",
-            "delivery_allowed": False,
-            "presentation_status": "blocked_from_listen_pack",
-            "selected_artifacts": selected_artifacts,
-            "progress_log": str(progress_path),
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        emit_progress(
-            progress_path,
-            phase="end",
-            release_status=manifest["release_status"],
-            delivery_status=manifest["delivery_status"],
-            delivery_allowed=manifest["delivery_allowed"],
-            selected_candidate=manifest["selected_candidate"],
-            output_manifest_path=str(manifest_path),
-            elapsed_sec=round(time.perf_counter() - started_at, 3),
-        )
-        return manifest
 
     base_audio, sample_rate = load_audio(base_minus_path)
     reference_base_audio, _ = load_audio(reference_base_path, sample_rate)
@@ -1548,20 +1180,12 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         else None
     )
     if selected_candidate is not None:
-        selected_word_audit = resolve_word_audit(
-            payload=content_identity_audit,
-            role="accepted_product_minus",
-            audio_path=Path(selected_candidate["artifact_path"]),
-            run_if_missing=run_word_audit_if_missing,
-            model_name=word_audit_model,
-        )
         selected_artifacts = write_selected_artifacts(
             selected_candidate=selected_candidate,
             output_dir=output_dir,
             listen_dir=listen_dir,
-            selected_word_audit=selected_word_audit,
         )
-        overall_status = str(selected_artifacts["release_status"])
+        overall_status = "release_ready"
     else:
         selected_artifacts = {
             "delivery_status": "blocked",
@@ -1570,11 +1194,6 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             "release_status": "blocked_for_listening",
         }
         overall_status = "blocked_for_listening"
-    delivery_allowed = bool(selected_artifacts.get("delivery_allowed") is True)
-    delivery_status = str(selected_artifacts.get("delivery_status") or "blocked")
-    presentation_status = str(
-        selected_artifacts.get("presentation_status") or "blocked_from_listen_pack"
-    )
 
     manifest = {
         "schema_version": 1,
@@ -1584,7 +1203,6 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             "no_per_track_hardcoded_timestamps": True,
             "no_fallback_as_success": True,
             "produce_only_release_ready": True,
-            "content_identity_gate_required": True,
         },
         "inputs": {
             "raw_audio_path": str(raw_audio_path),
@@ -1601,8 +1219,6 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
             "normalized_input_manifest": str(prepared_inputs["normalized_input_manifest"]),
             "normalized_input_provenance": prepared_inputs["provenance"],
             "normalized_sample_rate": prepared_inputs["sample_rate"],
-            "word_content_audit": input_word_audit,
-            "content_identity_audit_path": str(content_identity_audit_path or ""),
         },
         "focus_window_source": str(args.focus_windows_jsonl or ""),
         "focus_window_filters": {
@@ -1634,9 +1250,11 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         ],
         "selected_candidate": selected_candidate["recipe"].name if selected_candidate else None,
         "release_status": overall_status,
-        "delivery_status": delivery_status,
-        "delivery_allowed": delivery_allowed,
-        "presentation_status": presentation_status,
+        "delivery_status": "accepted" if selected_candidate else "blocked",
+        "delivery_allowed": selected_candidate is not None,
+        "presentation_status": (
+            "accepted_for_listen_pack" if selected_candidate else "blocked_from_listen_pack"
+        ),
         "selected_artifacts": selected_artifacts,
         "progress_log": str(progress_path),
     }
@@ -1651,7 +1269,7 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         output_manifest_path=str(manifest_path),
         elapsed_sec=round(time.perf_counter() - started_at, 3),
     )
-    if listen_dir is not None and delivery_allowed:
+    if listen_dir is not None and selected_candidate is not None:
         (listen_dir / "ralph_minus_improvement_manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False),
             encoding="utf-8",

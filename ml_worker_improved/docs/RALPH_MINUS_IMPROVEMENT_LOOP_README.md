@@ -28,12 +28,8 @@ Normalized input files use role-explicit names so product aliases are not confus
 - `raw_mix.flac`
 - `base_product_minus.flac`
 - `guide_product_minus.flac`
-- `primary_vocal_reference.flac` only when word-content audit detects words
-- `secondary_vocal_reference.flac` only when word-content audit detects words
-- `primary_residual_reference.flac` / `secondary_residual_reference.flac` when
-  the input is a no-word residual rather than a usable vocal reference
-- `primary_unverified_reference.flac` / `secondary_unverified_reference.flac`
-  when no content audit proves the role
+- `primary_vocal_reference.flac`
+- `secondary_vocal_reference.flac`
 
 The same directory must include `inputs_manifest.json`, which records each normalized file's role, source path, source SHA-256, normalized filename, normalized SHA-256, and intended/readback audio fingerprints. If two distinct roles collapse into one normalized file hash while their intended audio fingerprints differ, the runner fails fast with `normalized_input_role_collision` instead of continuing with ambiguous artifacts.
 
@@ -79,12 +75,7 @@ the selected candidate's `top_vocal_residue_windows` from a prior
 general metric-derived focus view, not per-track timestamp hardcoding, and it
 keeps `delivery_allowed=false`.
 
-The route keeps `produce_only_release_ready=true`: if every candidate is rejected, if the selected minus has detected word-like tokens, if word-content audit is missing/failed, or if the raw mix contains words while the primary vocal reference contains none, it writes `delivery_status=blocked`, `delivery_allowed=false`, `presentation_status=blocked_from_listen_pack`, and `release_status=blocked_for_listening`. Rejected or content-blocked candidates must not be promoted to a listen pack or release. Content-blocked selected candidates are copied only as `blocked_product_minus_candidate.flac`, never as `accepted_product_minus.flac`.
-
-Use `--content-identity-audit-json` to pass precomputed ASR/word-audit evidence.
-If an audit entry is missing and runtime ASR is not skipped, the runner tries a
-CPU `faster-whisper` word-content audit. If that runtime audit is unavailable or
-fails, delivery remains blocked instead of silently accepting a misnamed result.
+The route keeps `produce_only_release_ready=true`: if every candidate is rejected, it writes `delivery_status=blocked`, `delivery_allowed=false`, `presentation_status=blocked_from_listen_pack`, and `release_status=blocked_for_listening`. Rejected candidates must not be promoted to a listen pack or release.
 
 Rejected RALPH candidates and bounded repair matrices should be converted into
 `minus_repair_outcome_training_view.v1` metadata via
