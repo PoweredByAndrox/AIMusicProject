@@ -24,10 +24,22 @@ manifest, then resolves:
 
 ```text
 candidate.raw_ref_path
-candidate.instrumental_path
-candidate.vocals_path
+stem_paths.minus or stem_paths.instrumental
+stem_paths.vocals or stem_paths.vocal
 guard.score_path -> guard/score/regions.jsonl
 ```
+
+For source manifests that do not have `stem_paths`, the materializer keeps the
+legacy compatibility fallback:
+
+```text
+candidate.minus_path / candidate.instrumental_path
+candidate.vocals_path / candidate.vocal_path
+```
+
+When `stem_paths` is present, it is the role source of truth. This prevents a
+route-specific `candidate.instrumental_path` or `candidate.vocals_path` field
+from overriding the packaged product roles used by downstream repair commands.
 
 ## Route Handling
 

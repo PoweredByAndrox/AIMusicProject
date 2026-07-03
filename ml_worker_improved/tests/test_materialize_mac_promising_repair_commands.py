@@ -160,6 +160,52 @@ def test_materializer_builds_leakage_command_and_blocks_missing_detail_judge(tmp
     assert all(len(path.name) <= 32 for path in output_dir.rglob("*") if path.is_file())
 
 
+def test_materializer_prefers_manifest_stem_paths_over_generic_candidate_fields(tmp_path: Path) -> None:
+    plan, artifact_root = fixture_plan(tmp_path)
+    correct_minus = artifact_root / "stems" / "minus.flac"
+    correct_vocals = artifact_root / "stems" / "vocals.flac"
+    correct_minus.parent.mkdir(parents=True, exist_ok=True)
+    correct_minus.write_bytes(b"")
+    correct_vocals.write_bytes(b"")
+    source_manifest = artifact_root / "manifest.json"
+    payload = json.loads(source_manifest.read_text(encoding="utf-8"))
+    payload["stem_paths"] = {
+        "minus": "stems/minus.flac",
+        "vocals": "stems/vocals.flac",
+    }
+    payload["candidate"]["instrumental_path"] = "bci/vocals.flac"
+    payload["candidate"]["vocals_path"] = "bci/instrumental.flac"
+    source_manifest.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    output_dir = tmp_path / "out"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/materialize_mac_promising_repair_commands.py",
+            "--plan-json",
+            str(plan),
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    command_rows = rows(output_dir / "rows.jsonl")
+    leakage = {row["route"]: row for row in command_rows}["judge_guided_minus_vocal_leakage_repair"]
+    assert leakage["command_status"] == "ready"
+    assert leakage["base_minus_path"] == str(correct_minus)
+    assert leakage["primary_vocals_path"] == str(correct_vocals)
+    assert leakage["docker_command"][3] == str(correct_minus)
+    assert leakage["docker_command"][4] == str(correct_vocals)
+    generated = rows(output_dir / "leak" / "rows.jsonl")[0]
+    assert generated["minus_path"] == str(correct_minus)
+    assert generated["instrumental_path"] == str(correct_minus)
+
+
 def test_materializer_builds_air_detail_command_from_self_judge_manifest(tmp_path: Path) -> None:
     plan, artifact_root = fixture_plan(tmp_path)
     repaired_minus = tmp_path / "loop" / "it016" / "lkg" / "m001.flac"

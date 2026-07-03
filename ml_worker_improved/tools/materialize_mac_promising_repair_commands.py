@@ -137,12 +137,35 @@ def guard_regions_path(source_manifest: dict[str, Any], source_manifest_json: Pa
     return source_manifest_json.parent / "guard" / "score" / "regions.jsonl"
 
 
+def first_manifest_path(mapping: dict[str, Any], keys: Sequence[str], base_dir: Path) -> Path:
+    for key in keys:
+        path = canonical_path(mapping.get(key), base_dir)
+        if path_is_set(path):
+            return path
+    return MISSING_PATH
+
+
 def candidate_paths(source_manifest: dict[str, Any], source_manifest_json: Path) -> dict[str, Path]:
     candidate = source_manifest.get("candidate") if isinstance(source_manifest.get("candidate"), dict) else {}
+    stem_paths = source_manifest.get("stem_paths") if isinstance(source_manifest.get("stem_paths"), dict) else {}
+    stem_minus = first_manifest_path(stem_paths, ("minus", "instrumental"), source_manifest_json.parent)
+    stem_vocals = first_manifest_path(stem_paths, ("vocals", "vocal"), source_manifest_json.parent)
     return {
         "raw_ref": canonical_path(candidate.get("raw_ref_path"), source_manifest_json.parent),
-        "minus": canonical_path(candidate.get("instrumental_path"), source_manifest_json.parent),
-        "vocals": canonical_path(candidate.get("vocals_path"), source_manifest_json.parent),
+        "minus": stem_minus
+        if path_is_set(stem_minus)
+        else first_manifest_path(
+            candidate,
+            ("minus_path", "instrumental_path", "selected_minus_path", "normalized_minus_path"),
+            source_manifest_json.parent,
+        ),
+        "vocals": stem_vocals
+        if path_is_set(stem_vocals)
+        else first_manifest_path(
+            candidate,
+            ("vocals_path", "vocal_path", "selected_vocals_path", "normalized_vocal_path"),
+            source_manifest_json.parent,
+        ),
     }
 
 
