@@ -43,6 +43,13 @@ entrypoint cannot run, the config is kept with
 Chunk/overlap variants are listed only when they are supported by the existing
 entrypoint. Unsupported requested parameters are recorded as
 `unsupported_parameter:<name>` safety notes and the config stays unavailable.
+Production minus configs must expose an explicit `minus` or `instrumental`
+artifact in the registered stem manifest. Multi-stem Demucs exports that only
+write `drums`/`bass`/`other`/`vocals` stay unavailable for the minus lane with
+`forbidden_reason=multistem_output_without_explicit_minus_or_instrumental_manifest`;
+they are not converted into a minus by summing non-vocal stems. The safe minus
+candidate lane starts from dedicated vocal/instrumental routes such as
+`audio_separator_bs_roformer_viperx_1297_vendor_config_vocals`.
 
 Configs that can share one separator execution use the same
 `shared_execution_group_id`. The scheduler runs one preferred config for that

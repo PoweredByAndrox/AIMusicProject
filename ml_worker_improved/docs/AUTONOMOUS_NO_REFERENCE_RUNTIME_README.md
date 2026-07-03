@@ -135,14 +135,15 @@ hard_case_route_policy.json
 hard_case_route_policy_summary.md
 ```
 
-The policy can select `local_registered__htdemucs_6s__both__shared` only when a
-minus hard-case trigger is present, the route is locally available, and the
-route is known from STEM-2 quality-improved evidence or explicitly safe for
-measurement. The selected route is run as an extra bounded hard-case candidate
-only, then the controller re-runs the minus/vocal judges, optimizer, learned
-critic selector, and pair compatibility. It does not change the default
-profile, baseline route ordering, thresholds, separator models, or release
-status.
+The policy can select a minus hard-case route only when a minus trigger is
+present, the route is locally available, and the route exposes an explicit
+`minus` or `instrumental` artifact. Multi-stem HTDemucs exports without an
+explicit instrumental manifest entry remain stem-lane evidence and are not
+summed into a production minus. The selected route is run as an extra bounded
+hard-case candidate only, then the controller re-runs the minus/vocal judges,
+optimizer, learned critic selector, and pair compatibility. It does not change
+the default profile, baseline route ordering, thresholds, separator models, or
+release status.
 
 ```bash
 docker compose run --rm ml-worker python tools/run_autonomous_no_reference_pipeline.py \

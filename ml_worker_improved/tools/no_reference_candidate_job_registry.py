@@ -35,6 +35,7 @@ ALLOWED_FAMILIES = (
     "low_overlap_variant",
 )
 ALLOWED_ENTRYPOINT_TYPES = ("python_module", "python_script", "existing_cli", "unavailable")
+STEM_SUM_MINUS_FORBIDDEN_REASON = "multistem_output_without_explicit_minus_or_instrumental_manifest"
 
 
 def route_family_for_model(model_id: str) -> str:
@@ -194,6 +195,21 @@ def model_can_run(registry: ModelRegistry, model_id: str) -> tuple[bool, tuple[s
 def config_specs() -> tuple[dict[str, Any], ...]:
     return (
         {
+            "model_id": "audio_separator_bs_roformer_viperx_1297_vendor_config_vocals",
+            "target_mode": "both",
+            "target_stem": "minus",
+            "family": "minus_focused_existing_model",
+            "profiles": ("safe", "balanced", "exploration"),
+            "timeout_sec": 1200,
+            "variant_suffix": "minus_direct",
+            "shared_execution_group_id": "local_registered__audio_separator_bs_roformer_viperx_1297__minus_direct",
+            "produces_vocal": True,
+            "produces_minus": True,
+            "materialized_candidate_modes": ("vocal", "minus", "both"),
+            "reuse_outputs_across_modes": True,
+            "hard_case_routes": ("generate_minus_focused_variants",),
+        },
+        {
             "model_id": "htdemucs_ft",
             "target_mode": "both",
             "target_stem": "minus",
@@ -206,6 +222,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "produces_minus": True,
             "materialized_candidate_modes": ("vocal", "minus", "both"),
             "reuse_outputs_across_modes": True,
+            "forbidden_reason": STEM_SUM_MINUS_FORBIDDEN_REASON,
         },
         {
             "model_id": "htdemucs_ft",
@@ -233,6 +250,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "materialized_candidate_modes": ("minus",),
             "reuse_outputs_across_modes": True,
             "hard_case_routes": ("generate_minus_focused_variants",),
+            "forbidden_reason": STEM_SUM_MINUS_FORBIDDEN_REASON,
         },
         {
             "model_id": "htdemucs_6s",
@@ -247,6 +265,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "produces_minus": True,
             "materialized_candidate_modes": ("vocal", "minus", "both"),
             "reuse_outputs_across_modes": True,
+            "forbidden_reason": STEM_SUM_MINUS_FORBIDDEN_REASON,
         },
         {
             "model_id": "htdemucs_6s",
@@ -274,6 +293,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "materialized_candidate_modes": ("minus",),
             "reuse_outputs_across_modes": True,
             "hard_case_routes": ("generate_phase_safe_variants", "generate_artifact_safe_variants"),
+            "forbidden_reason": STEM_SUM_MINUS_FORBIDDEN_REASON,
         },
         {
             "model_id": "scnet_xl_ihf_musdb18",
@@ -336,6 +356,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "variant_suffix": "chunk_overlap",
             "shared_execution_group_id": "local_registered__htdemucs_ft__chunk_overlap",
             "unsupported_parameters": ("chunk_size", "overlap"),
+            "forbidden_reason": STEM_SUM_MINUS_FORBIDDEN_REASON,
         },
         {
             "model_id": "htdemucs_ft",
@@ -360,6 +381,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "shared_execution_group_id": "local_registered__htdemucs_ft__high_overlap",
             "unsupported_parameters": ("overlap",),
             "hard_case_routes": ("generate_artifact_safe_variants",),
+            "forbidden_reason": STEM_SUM_MINUS_FORBIDDEN_REASON,
         },
         {
             "model_id": "htdemucs_ft",
@@ -382,6 +404,7 @@ def config_specs() -> tuple[dict[str, Any], ...]:
             "variant_suffix": "low_overlap",
             "shared_execution_group_id": "local_registered__htdemucs_ft__low_overlap",
             "unsupported_parameters": ("overlap",),
+            "forbidden_reason": STEM_SUM_MINUS_FORBIDDEN_REASON,
         },
     )
 
@@ -407,9 +430,14 @@ def build_candidate_job_registry(
             unavailable_notes.append(f"missing_entrypoint:{REGISTERED_MODEL_ENTRYPOINT}")
         unavailable_notes.extend(model_notes)
         unsupported_parameters = tuple(str(value) for value in spec.get("unsupported_parameters", ()))
+        configured_forbidden_reason = str(spec.get("forbidden_reason") or "")
         unavailable_notes.extend(f"unsupported_parameter:{value}" for value in unsupported_parameters)
+        if configured_forbidden_reason:
+            unavailable_notes.append(f"forbidden:{configured_forbidden_reason}")
         forbidden_reason = (
-            "unsupported_cli_parameter:" + ",".join(unsupported_parameters)
+            configured_forbidden_reason
+            if configured_forbidden_reason
+            else "unsupported_cli_parameter:" + ",".join(unsupported_parameters)
             if unsupported_parameters
             else ""
         )
@@ -422,7 +450,7 @@ def build_candidate_job_registry(
         produces_vocal = bool(spec.get("produces_vocal", target_mode in {"vocal", "both"}))
         produces_minus = bool(spec.get("produces_minus", target_mode in {"minus", "both"}))
         materialized_modes = tuple(str(value) for value in spec.get("materialized_candidate_modes", (target_mode,)))
-        can_run = can_run and not unsupported_parameters
+        can_run = can_run and not unsupported_parameters and not configured_forbidden_reason
         unavailable_reason = ";".join(unavailable_notes)
         configs.append(
             CandidateJobConfig(
