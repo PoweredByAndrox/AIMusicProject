@@ -206,7 +206,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("secondary_vocals_path")
     parser.add_argument("output_dir")
     parser.add_argument("--listen-dir")
-    parser.add_argument("--listen-label", default="02_focus_window_minus.flac")
+    parser.add_argument("--listen-label", default="02_candidate_product_minus.flac")
     parser.add_argument("--focus-windows-jsonl", required=True)
     parser.add_argument("--focus-track-id", default="")
     parser.add_argument("--focus-candidate-id", default="")
@@ -266,17 +266,20 @@ def main(argv: list[str] | None = None) -> int:
     metrics = calculate_basic_metrics(base_minus, refined_minus)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_ref_path = output_dir / "raw_ref.flac"
-    minus_base_path = output_dir / "minus_base.flac"
-    minus_guide_path = output_dir / "minus_guide.flac"
-    refined_path = output_dir / "minus_focus_window.flac"
-    sf.write(str(raw_ref_path), raw_audio, sample_rate, subtype="PCM_24")
-    sf.write(str(minus_base_path), base_minus, sample_rate, subtype="PCM_24")
-    sf.write(str(minus_guide_path), guide_minus, sample_rate, subtype="PCM_24")
+    raw_mix_path = output_dir / "raw_mix.flac"
+    base_product_minus_path = output_dir / "base_product_minus.flac"
+    guide_product_minus_path = output_dir / "guide_product_minus.flac"
+    refined_path = output_dir / "focus_product_minus.flac"
+    sf.write(str(raw_mix_path), raw_audio, sample_rate, subtype="PCM_24")
+    sf.write(str(base_product_minus_path), base_minus, sample_rate, subtype="PCM_24")
+    sf.write(str(guide_product_minus_path), guide_minus, sample_rate, subtype="PCM_24")
     sf.write(str(refined_path), refined_minus, sample_rate, subtype="PCM_24")
 
     manifest = {
         "schema_version": 1,
+        "stem_type": "minus",
+        "artifact_role": "candidate_product_minus",
+        "candidate_product_artifact_key": "focus_product_minus_flac",
         "raw_audio_path": str(raw_audio_path),
         "base_minus_path": str(base_minus_path),
         "guide_minus_path": str(guide_minus_path),
@@ -286,9 +289,13 @@ def main(argv: list[str] | None = None) -> int:
         "focus_track_id": str(args.focus_track_id or ""),
         "focus_candidate_id": str(args.focus_candidate_id or ""),
         "artifacts": {
-            "raw_ref_flac": str(raw_ref_path),
-            "minus_base_flac": str(minus_base_path),
-            "minus_guide_flac": str(minus_guide_path),
+            "raw_mix_flac": str(raw_mix_path),
+            "base_product_minus_flac": str(base_product_minus_path),
+            "guide_product_minus_flac": str(guide_product_minus_path),
+            "focus_product_minus_flac": str(refined_path),
+            "raw_ref_flac": str(raw_mix_path),
+            "minus_base_flac": str(base_product_minus_path),
+            "minus_guide_flac": str(guide_product_minus_path),
             "minus_focus_window_cleanup_flac": str(refined_path),
         },
         "cleanup": {
@@ -314,18 +321,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if listen_dir is not None:
         listen_dir.mkdir(parents=True, exist_ok=True)
-        sf.write(str(listen_dir / "00_raw_ref.flac"), raw_audio, sample_rate, subtype="PCM_24")
-        sf.write(str(listen_dir / "01_minus_base.flac"), base_minus, sample_rate, subtype="PCM_24")
+        sf.write(str(listen_dir / "00_raw_mix.flac"), raw_audio, sample_rate, subtype="PCM_24")
+        sf.write(str(listen_dir / "01_base_product_minus.flac"), base_minus, sample_rate, subtype="PCM_24")
         sf.write(str(listen_dir / args.listen_label), refined_minus, sample_rate, subtype="PCM_24")
         (listen_dir / "00_README.txt").write_text(
-            "Diagnostic focus-window candidate. RALPH manifest decides whether it is deliverable.\n",
+            "Diagnostic focus-window candidate. 00 = raw mix, 01 = base product minus, 02 = candidate product minus. RALPH manifest decides whether it is deliverable.\n",
             encoding="utf-8",
         )
         (listen_dir / "candidate_map.json").write_text(
             json.dumps(
                 {
-                    "00_raw_ref.flac": str(raw_ref_path),
-                    "01_minus_base.flac": str(minus_base_path),
+                    "00_raw_mix.flac": str(raw_mix_path),
+                    "01_base_product_minus.flac": str(base_product_minus_path),
                     args.listen_label: str(refined_path),
                 },
                 indent=2,

@@ -48,8 +48,51 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
             recipes["actual_masked_residue_guarded"].output_artifact_key,
             "minus_actual_masked_residue_flac",
         )
+        self.assertEqual(
+            recipes["actual_masked_residue_guarded"].listen_label,
+            "02_candidate_product_minus.flac",
+        )
         self.assertEqual(recipes["hybrid_detail_safe"].output_artifact_key, "minus_hybrid_flac")
+        self.assertEqual(recipes["hybrid_detail_safe"].listen_label, "02_candidate_product_minus.flac")
         self.assertNotIn("focus_window_guarded", recipes)
+
+    def test_selected_artifact_uses_role_explicit_product_minus_name(self) -> None:
+        module = _load_module()
+        source_path = self.temp_path / "candidate" / "residue_product_minus.flac"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(b"candidate-audio")
+        manifest_path = source_path.parent / "stem_manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        output_dir = self.temp_path / "run"
+        listen_dir = self.temp_path / "listen"
+
+        selected = module.write_selected_artifacts(
+            selected_candidate={
+                "artifact_path": source_path,
+                "manifest_path": manifest_path,
+                "manifest": {
+                    "stem_type": "minus",
+                    "artifact_role": "candidate_product_minus",
+                },
+            },
+            output_dir=output_dir,
+            listen_dir=listen_dir,
+        )
+
+        self.assertTrue((output_dir / "accepted_product_minus.flac").is_file())
+        self.assertTrue((listen_dir / "accepted_product_minus.flac").is_file())
+        self.assertFalse((output_dir / "02_adaptive_selected_minus.flac").exists())
+        self.assertEqual(
+            selected["selected_minus_flac"],
+            str(output_dir / "accepted_product_minus.flac"),
+        )
+        self.assertEqual(
+            selected["accepted_product_minus_flac"],
+            str(output_dir / "accepted_product_minus.flac"),
+        )
+        self.assertEqual(selected["stem_type"], "minus")
+        self.assertEqual(selected["artifact_role"], "accepted_product_minus")
+        self.assertEqual(selected["source_candidate_artifact_role"], "candidate_product_minus")
 
     def test_focus_recipe_is_added_only_when_focus_windows_exist(self) -> None:
         module = _load_module()

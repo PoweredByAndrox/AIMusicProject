@@ -82,7 +82,7 @@ def main() -> None:
     parser.add_argument("secondary_vocals_path")
     parser.add_argument("output_dir")
     parser.add_argument("--listen-dir")
-    parser.add_argument("--listen-label", default="02_minus_hybrid_guided.flac")
+    parser.add_argument("--listen-label", default="02_candidate_product_minus.flac")
     parser.add_argument("--strength", type=float, default=0.76)
     parser.add_argument("--secondary-weight", type=float, default=0.82)
     parser.add_argument("--mask-power", type=float, default=1.45)
@@ -192,25 +192,33 @@ def main() -> None:
             }
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    refined_path = output_dir / "minus_hybrid.flac"
-    raw_ref_path = output_dir / "raw_ref.flac"
-    minus_base_path = output_dir / "minus_base.flac"
-    minus_guide_path = output_dir / "minus_guide.flac"
+    refined_path = output_dir / "hybrid_product_minus.flac"
+    raw_mix_path = output_dir / "raw_mix.flac"
+    base_product_minus_path = output_dir / "base_product_minus.flac"
+    guide_product_minus_path = output_dir / "guide_product_minus.flac"
     sf.write(str(refined_path), refined, sample_rate, subtype="PCM_24")
-    sf.write(str(raw_ref_path), raw, sample_rate, subtype="PCM_24")
-    sf.write(str(minus_base_path), base_minus, sample_rate, subtype="PCM_24")
-    sf.write(str(minus_guide_path), guide_minus, sample_rate, subtype="PCM_24")
+    sf.write(str(raw_mix_path), raw, sample_rate, subtype="PCM_24")
+    sf.write(str(base_product_minus_path), base_minus, sample_rate, subtype="PCM_24")
+    sf.write(str(guide_product_minus_path), guide_minus, sample_rate, subtype="PCM_24")
 
     manifest = {
+        "schema_version": 1,
+        "stem_type": "minus",
+        "artifact_role": "candidate_product_minus",
+        "candidate_product_artifact_key": "hybrid_product_minus_flac",
         "raw_audio_path": str(raw_audio_path),
         "base_minus_path": str(base_minus_path),
         "guide_minus_path": str(guide_minus_path),
         "primary_vocals_path": str(primary_vocals_path),
         "secondary_vocals_path": str(secondary_vocals_path),
         "artifacts": {
-            "raw_ref_flac": str(raw_ref_path),
-            "minus_base_flac": str(minus_base_path),
-            "minus_guide_flac": str(minus_guide_path),
+            "raw_mix_flac": str(raw_mix_path),
+            "base_product_minus_flac": str(base_product_minus_path),
+            "guide_product_minus_flac": str(guide_product_minus_path),
+            "hybrid_product_minus_flac": str(refined_path),
+            "raw_ref_flac": str(raw_mix_path),
+            "minus_base_flac": str(base_product_minus_path),
+            "minus_guide_flac": str(guide_product_minus_path),
             "minus_hybrid_flac": str(refined_path),
         },
         "cleanup": {
@@ -233,18 +241,18 @@ def main() -> None:
 
     if listen_dir is not None:
         listen_dir.mkdir(parents=True, exist_ok=True)
-        sf.write(str(listen_dir / "00_raw_ref.flac"), raw, sample_rate, subtype="PCM_24")
-        sf.write(str(listen_dir / "01_bs_minus_refined.flac"), base_minus, sample_rate, subtype="PCM_24")
+        sf.write(str(listen_dir / "00_raw_mix.flac"), raw, sample_rate, subtype="PCM_24")
+        sf.write(str(listen_dir / "01_base_product_minus.flac"), base_minus, sample_rate, subtype="PCM_24")
         sf.write(str(listen_dir / args.listen_label), refined, sample_rate, subtype="PCM_24")
         (listen_dir / "00_README.txt").write_text(
-            "Listen only here.\n00 = raw reference\n01 = BS Mamba2 refined minus\n02 = hybrid BS detail + Demucs guided cleanup\n",
+            "Listen only here.\n00 = raw mix\n01 = base product minus\n02 = candidate product minus\n",
             encoding="utf-8",
         )
         (listen_dir / "candidate_map.json").write_text(
             json.dumps(
                 {
-                    "00_raw_ref.flac": str(raw_ref_path),
-                    "01_bs_minus_refined.flac": str(minus_base_path),
+                    "00_raw_mix.flac": str(raw_mix_path),
+                    "01_base_product_minus.flac": str(base_product_minus_path),
                     args.listen_label: str(refined_path),
                 },
                 indent=2,

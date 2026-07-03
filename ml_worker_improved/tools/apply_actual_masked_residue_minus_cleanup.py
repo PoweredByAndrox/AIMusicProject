@@ -247,7 +247,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("secondary_vocals_path")
     parser.add_argument("output_dir")
     parser.add_argument("--listen-dir")
-    parser.add_argument("--listen-label", default="02_actual_masked_residue_minus.flac")
+    parser.add_argument("--listen-label", default="02_candidate_product_minus.flac")
     parser.add_argument("--strength", type=float, default=0.10)
     parser.add_argument("--mask-power", type=float, default=1.35)
     parser.add_argument("--base-overlap-power", type=float, default=0.0)
@@ -291,23 +291,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     metrics = calculate_basic_metrics(base_minus, refined_minus)
 
-    raw_ref_path = output_dir / "raw_ref.flac"
-    minus_base_path = output_dir / "minus_base.flac"
-    refined_path = output_dir / "minus_actual_masked_residue.flac"
-    sf.write(str(raw_ref_path), raw_audio, raw_sample_rate, subtype="PCM_24")
-    sf.write(str(minus_base_path), base_minus, raw_sample_rate, subtype="PCM_24")
+    raw_mix_path = output_dir / "raw_mix.flac"
+    base_product_minus_path = output_dir / "base_product_minus.flac"
+    refined_path = output_dir / "residue_product_minus.flac"
+    sf.write(str(raw_mix_path), raw_audio, raw_sample_rate, subtype="PCM_24")
+    sf.write(str(base_product_minus_path), base_minus, raw_sample_rate, subtype="PCM_24")
     sf.write(str(refined_path), refined_minus, raw_sample_rate, subtype="PCM_24")
 
     manifest = {
         "schema_version": 1,
+        "stem_type": "minus",
+        "artifact_role": "candidate_product_minus",
+        "candidate_product_artifact_key": "residue_product_minus_flac",
         "raw_audio_path": str(raw_audio_path),
         "base_minus_path": str(base_minus_path),
         "guide_minus_path": str(guide_minus_path),
         "primary_vocals_path": str(primary_vocals_path),
         "secondary_vocals_path": str(secondary_vocals_path),
         "artifacts": {
-            "raw_ref_flac": str(raw_ref_path),
-            "minus_base_flac": str(minus_base_path),
+            "raw_mix_flac": str(raw_mix_path),
+            "base_product_minus_flac": str(base_product_minus_path),
+            "residue_product_minus_flac": str(refined_path),
+            "raw_ref_flac": str(raw_mix_path),
+            "minus_base_flac": str(base_product_minus_path),
             "minus_actual_masked_residue_flac": str(refined_path),
         },
         "cleanup": {
@@ -334,18 +340,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if listen_dir is not None:
         listen_dir.mkdir(parents=True, exist_ok=True)
-        sf.write(str(listen_dir / "00_raw_ref.flac"), raw_audio, raw_sample_rate, subtype="PCM_24")
-        sf.write(str(listen_dir / "01_minus_base.flac"), base_minus, raw_sample_rate, subtype="PCM_24")
+        sf.write(str(listen_dir / "00_raw_mix.flac"), raw_audio, raw_sample_rate, subtype="PCM_24")
+        sf.write(str(listen_dir / "01_base_product_minus.flac"), base_minus, raw_sample_rate, subtype="PCM_24")
         sf.write(str(listen_dir / args.listen_label), refined_minus, raw_sample_rate, subtype="PCM_24")
         (listen_dir / "00_README.txt").write_text(
-            "Diagnostic candidate output. Projection-only melody contamination windows are excluded from cleanup.\n",
+            "Diagnostic candidate output. 00 = raw mix, 01 = base product minus, 02 = candidate product minus. Projection-only melody contamination windows are excluded from cleanup.\n",
             encoding="utf-8",
         )
         (listen_dir / "candidate_map.json").write_text(
             json.dumps(
                 {
-                    "00_raw_ref.flac": str(raw_ref_path),
-                    "01_minus_base.flac": str(minus_base_path),
+                    "00_raw_mix.flac": str(raw_mix_path),
+                    "01_base_product_minus.flac": str(base_product_minus_path),
                     args.listen_label: str(refined_path),
                 },
                 indent=2,

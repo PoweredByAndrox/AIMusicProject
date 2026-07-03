@@ -14,8 +14,18 @@ delivered when it creates audible dips.
   metrics.
 - Reject candidates that are too close to the base to be an audible fix.
 - Reject candidates that reduce vocal residue by damaging RMS, presence, or air bands.
-- Write `02_adaptive_selected_minus.flac` only when a candidate is accepted by the
+- Write `accepted_product_minus.flac` only when a candidate is accepted by the
   RALPH policy.
+- Candidate directories use role-explicit names such as `raw_mix.flac`,
+  `base_product_minus.flac`, `guide_product_minus.flac`, and
+  `<recipe>_product_minus.flac`. Historical `raw_ref.flac`, `minus_base.flac`,
+  `minus_guide.flac`, `minus_hybrid.flac`, `minus_windowed_hybrid.flac`,
+  `minus_actual_masked_residue.flac`, and `02_adaptive_selected_minus.flac`
+  artifacts are forensic evidence only and are not the current output contract.
+- Candidate and selected manifests must expose `stem_type=minus` plus
+  `artifact_role=candidate_product_minus` or `artifact_role=accepted_product_minus`
+  so the audio role is machine-readable even when legacy compatibility keys are
+  present.
 - Mark blocked runs as `blocked_from_listen_pack`; do not present them as production
   listen results.
 

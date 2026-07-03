@@ -66,7 +66,7 @@ def default_candidate_recipes(
             name="actual_masked_residue_guarded",
             tool_path=TOOLS_DIR / "apply_actual_masked_residue_minus_cleanup.py",
             output_artifact_key="minus_actual_masked_residue_flac",
-            listen_label="02_actual_masked_residue_guarded_minus.flac",
+            listen_label="02_candidate_product_minus.flac",
             arguments=(
                 "--strength",
                 "0.18",
@@ -85,7 +85,7 @@ def default_candidate_recipes(
             name="windowed_guarded",
             tool_path=TOOLS_DIR / "apply_windowed_hybrid_minus_cleanup.py",
             output_artifact_key="minus_windowed_hybrid_flac",
-            listen_label="02_windowed_guarded_minus.flac",
+            listen_label="02_candidate_product_minus.flac",
             arguments=(
                 "--strength",
                 "0.90",
@@ -107,7 +107,7 @@ def default_candidate_recipes(
             name="windowed_stronger",
             tool_path=TOOLS_DIR / "apply_windowed_hybrid_minus_cleanup.py",
             output_artifact_key="minus_windowed_hybrid_flac",
-            listen_label="02_windowed_stronger_minus.flac",
+            listen_label="02_candidate_product_minus.flac",
             arguments=(
                 "--strength",
                 "0.96",
@@ -129,7 +129,7 @@ def default_candidate_recipes(
             name="hybrid_balanced",
             tool_path=TOOLS_DIR / "apply_hybrid_minus_guided_cleanup.py",
             output_artifact_key="minus_hybrid_flac",
-            listen_label="02_hybrid_balanced_minus.flac",
+            listen_label="02_candidate_product_minus.flac",
             arguments=(
                 "--strength",
                 "0.88",
@@ -145,7 +145,7 @@ def default_candidate_recipes(
             name="hybrid_detail_safe",
             tool_path=TOOLS_DIR / "apply_hybrid_minus_guided_cleanup.py",
             output_artifact_key="minus_hybrid_flac",
-            listen_label="02_hybrid_detail_safe_minus.flac",
+            listen_label="02_candidate_product_minus.flac",
             arguments=(
                 "--strength",
                 "0.28",
@@ -184,7 +184,7 @@ def default_candidate_recipes(
                 name="focus_window_guarded",
                 tool_path=TOOLS_DIR / "apply_focus_window_minus_cleanup.py",
                 output_artifact_key="minus_focus_window_cleanup_flac",
-                listen_label="02_focus_window_guarded_minus.flac",
+                listen_label="02_candidate_product_minus.flac",
                 arguments=(
                     *focus_args,
                     "--strength",
@@ -934,12 +934,20 @@ def write_selected_artifacts(
     output_dir: Path,
     listen_dir: Path | None,
 ) -> dict[str, Any]:
-    selected_output_path = output_dir / "02_adaptive_selected_minus.flac"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected_output_path = output_dir / "accepted_product_minus.flac"
     shutil.copyfile(selected_candidate["artifact_path"], selected_output_path)
+    candidate_manifest = selected_candidate.get("manifest") or {}
     selected_artifacts: dict[str, Any] = {
+        "stem_type": "minus",
+        "artifact_role": "accepted_product_minus",
         "selected_minus_flac": str(selected_output_path),
+        "accepted_product_minus_flac": str(selected_output_path),
         "source_candidate_path": str(selected_candidate["artifact_path"]),
         "source_candidate_manifest": str(selected_candidate["manifest_path"]),
+        "source_candidate_artifact_role": candidate_manifest.get(
+            "artifact_role", "candidate_product_minus"
+        ),
         "delivery_status": "accepted",
         "delivery_allowed": True,
         "presentation_status": "accepted_for_listen_pack",
@@ -947,7 +955,7 @@ def write_selected_artifacts(
     }
     if listen_dir is not None:
         listen_dir.mkdir(parents=True, exist_ok=True)
-        listen_output_path = listen_dir / "02_adaptive_selected_minus.flac"
+        listen_output_path = listen_dir / "accepted_product_minus.flac"
         shutil.copyfile(selected_output_path, listen_output_path)
         selected_artifacts["listen_output_path"] = str(listen_output_path)
     return selected_artifacts
@@ -1230,6 +1238,10 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         "candidates": [
             {
                 "candidate_name": candidate["recipe"].name,
+                "stem_type": candidate["manifest"].get("stem_type", "minus"),
+                "artifact_role": candidate["manifest"].get(
+                    "artifact_role", "candidate_product_minus"
+                ),
                 "manifest_path": str(candidate["manifest_path"]),
                 "artifact_path": str(candidate["artifact_path"]),
                 "evaluation": candidate["evaluation"],

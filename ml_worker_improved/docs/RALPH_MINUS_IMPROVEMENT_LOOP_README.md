@@ -33,6 +33,25 @@ Normalized input files use role-explicit names so product aliases are not confus
 
 The same directory must include `inputs_manifest.json`, which records each normalized file's role, source path, source SHA-256, normalized filename, normalized SHA-256, and intended/readback audio fingerprints. If two distinct roles collapse into one normalized file hash while their intended audio fingerprints differ, the runner fails fast with `normalized_input_role_collision` instead of continuing with ambiguous artifacts.
 
+Candidate artifact directories also use role-explicit product names. New RALPH
+runs must not write active candidate files named `raw_ref.flac`,
+`minus_base.flac`, `minus_guide.flac`, `minus_hybrid.flac`,
+`minus_windowed_hybrid.flac`, `minus_actual_masked_residue.flac`, or
+`minus_focus_window.flac`. Candidate tools write:
+
+- `raw_mix.flac`
+- `base_product_minus.flac`
+- `guide_product_minus.flac` when a guide minus is used
+- one candidate product, for example `hybrid_product_minus.flac`,
+  `windowed_product_minus.flac`, `residue_product_minus.flac`, or
+  `focus_product_minus.flac`
+
+JSON manifests may keep legacy artifact keys as compatibility aliases, but
+those keys must point at the role-explicit product filenames above. The selected
+release copy is `accepted_product_minus.flac`; historical runs that still
+contain `02_adaptive_selected_minus.flac` or `minus_*` candidate filenames are
+forensic evidence only and are not renamed in place.
+
 When `--focus-windows-jsonl` is provided, the runner first filters rows by
 track/candidate and blocked-or-low-confidence criteria, then ranks eligible
 focus windows by hardcase risk before applying `--max-focus-windows`. The
