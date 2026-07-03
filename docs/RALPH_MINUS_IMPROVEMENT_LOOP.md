@@ -15,7 +15,10 @@ delivered when it creates audible dips.
 - Reject candidates that are too close to the base to be an audible fix.
 - Reject candidates that reduce vocal residue by damaging RMS, presence, or air bands.
 - Write `accepted_product_minus.flac` only when a candidate is accepted by the
-  RALPH policy.
+  RALPH policy **and** a word-content audit reports zero detected word-like
+  tokens in the selected minus. If the audit is missing, fails, or finds words,
+  the route stays `blocked_for_listening` and writes only a diagnostic
+  `blocked_product_minus_candidate.flac`.
 - Candidate directories use role-explicit names such as `raw_mix.flac`,
   `base_product_minus.flac`, `guide_product_minus.flac`, and
   `<recipe>_product_minus.flac`. Historical `raw_ref.flac`, `minus_base.flac`,
@@ -26,6 +29,9 @@ delivered when it creates audible dips.
   `artifact_role=candidate_product_minus` or `artifact_role=accepted_product_minus`
   so the audio role is machine-readable even when legacy compatibility keys are
   present.
+- Normalized vocal-guide inputs must not be named `*_vocal_reference.flac`
+  unless the word-content audit detects words. No-word references use
+  `*_residual_reference.flac`; missing audits use `*_unverified_reference.flac`.
 - Mark blocked runs as `blocked_from_listen_pack`; do not present them as production
   listen results.
 
@@ -42,6 +48,9 @@ The default policy requires:
 - `max_rms_boost_db <= 6.0`
 - `max_presence_boost_db <= 8.0`
 - `max_air_boost_db <= 8.0`
+- selected-minus word-like token count must be exactly `0`
+- when the raw mix contains words, the primary vocal reference must also contain
+  detected words; otherwise the route blocks before candidate generation
 
 These values are not track timestamps and are not per-track hardcodes. They are
 production safety thresholds for the minus route.

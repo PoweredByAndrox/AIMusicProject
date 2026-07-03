@@ -77,6 +77,12 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
             },
             output_dir=output_dir,
             listen_dir=listen_dir,
+            selected_word_audit={
+                "status": "available",
+                "role": "accepted_product_minus",
+                "word_like_token_count": 0,
+                "text": "",
+            },
         )
 
         self.assertTrue((output_dir / "accepted_product_minus.flac").is_file())
@@ -93,6 +99,47 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         self.assertEqual(selected["stem_type"], "minus")
         self.assertEqual(selected["artifact_role"], "accepted_product_minus")
         self.assertEqual(selected["source_candidate_artifact_role"], "candidate_product_minus")
+        self.assertEqual(selected["content_identity_blockers"], [])
+
+    def test_selected_artifact_blocks_product_minus_name_when_words_are_detected(self) -> None:
+        module = _load_module()
+        source_path = self.temp_path / "candidate" / "residue_product_minus.flac"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(b"candidate-audio")
+        manifest_path = source_path.parent / "stem_manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        output_dir = self.temp_path / "run"
+        listen_dir = self.temp_path / "listen"
+
+        selected = module.write_selected_artifacts(
+            selected_candidate={
+                "artifact_path": source_path,
+                "manifest_path": manifest_path,
+                "manifest": {
+                    "stem_type": "minus",
+                    "artifact_role": "candidate_product_minus",
+                },
+            },
+            output_dir=output_dir,
+            listen_dir=listen_dir,
+            selected_word_audit={
+                "status": "available",
+                "role": "accepted_product_minus",
+                "word_like_token_count": 7,
+                "text": "we should be together",
+            },
+        )
+
+        self.assertFalse((output_dir / "accepted_product_minus.flac").exists())
+        self.assertFalse((listen_dir / "accepted_product_minus.flac").exists())
+        self.assertTrue((output_dir / "blocked_product_minus_candidate.flac").is_file())
+        self.assertEqual(selected["artifact_role"], "blocked_product_minus_candidate")
+        self.assertFalse(selected["delivery_allowed"])
+        self.assertEqual(selected["delivery_status"], "blocked")
+        self.assertIn(
+            "selected_minus_contains_detected_words",
+            {blocker["label"] for blocker in selected["content_identity_blockers"]},
+        )
 
     def test_focus_recipe_is_added_only_when_focus_windows_exist(self) -> None:
         module = _load_module()
@@ -531,8 +578,8 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         self.assertTrue(str(prepared["raw_audio_path"]).endswith("raw_mix.flac"))
         self.assertTrue(str(prepared["base_minus_path"]).endswith("base_product_minus.flac"))
         self.assertTrue(str(prepared["guide_minus_path"]).endswith("guide_product_minus.flac"))
-        self.assertTrue(str(prepared["primary_vocals_path"]).endswith("primary_vocal_reference.flac"))
-        self.assertTrue(str(prepared["secondary_vocals_path"]).endswith("secondary_vocal_reference.flac"))
+        self.assertTrue(str(prepared["primary_vocals_path"]).endswith("primary_unverified_reference.flac"))
+        self.assertTrue(str(prepared["secondary_vocals_path"]).endswith("secondary_unverified_reference.flac"))
         self.assertTrue(Path(prepared["normalized_input_manifest"]).is_file())
         self.assertEqual(
             prepared["provenance"]["base_product_minus"]["source_path"],
@@ -541,6 +588,48 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         self.assertEqual(
             prepared["provenance"]["guide_product_minus"]["source_path"],
             str(guide_minus_path),
+        )
+
+    def test_recipe_input_reference_names_follow_word_audit_content(self) -> None:
+        module = _load_module()
+        inputs_dir = self.temp_path / "inputs"
+        raw_path = self._write_audio(inputs_dir / "raw.flac", sample_rate=8000)
+        base_minus_path = self._write_audio(inputs_dir / "base.flac", sample_rate=8000)
+        guide_minus_path = self._write_audio(inputs_dir / "guide.flac", sample_rate=8000)
+        primary_vocals_path = self._write_audio(inputs_dir / "primary.flac", sample_rate=8000)
+        secondary_vocals_path = self._write_audio(inputs_dir / "secondary.flac", sample_rate=8000)
+
+        prepared = module.prepare_recipe_inputs(
+            raw_audio_path=raw_path,
+            base_minus_path=base_minus_path,
+            guide_minus_path=guide_minus_path,
+            primary_vocals_path=primary_vocals_path,
+            secondary_vocals_path=secondary_vocals_path,
+            output_dir=self.temp_path / "normalized_word_audit",
+            input_word_audit={
+                "raw_mix": {"status": "available", "word_like_token_count": 8, "text": "words"},
+                "primary_vocal_reference": {
+                    "status": "available",
+                    "word_like_token_count": 0,
+                    "text": "",
+                },
+                "secondary_vocal_reference": {
+                    "status": "available",
+                    "word_like_token_count": 3,
+                    "text": "real vocal words",
+                },
+            },
+        )
+
+        self.assertTrue(str(prepared["primary_vocals_path"]).endswith("primary_residual_reference.flac"))
+        self.assertTrue(str(prepared["secondary_vocals_path"]).endswith("secondary_vocal_reference.flac"))
+        self.assertEqual(
+            prepared["provenance"]["primary_vocal_reference"]["contract_role"],
+            "primary_residual_reference",
+        )
+        self.assertEqual(
+            prepared["provenance"]["secondary_vocal_reference"]["contract_role"],
+            "secondary_vocal_reference",
         )
 
     def test_prepared_input_role_collision_is_rejected(self) -> None:
