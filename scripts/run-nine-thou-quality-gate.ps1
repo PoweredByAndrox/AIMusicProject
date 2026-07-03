@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = "",
-    [string]$FullMix = "/host_project/Nine Thou (Grant Mohrman Superstars Remix) (320).mp3",
-    [string]$ReferenceMinus = "/host_project/ytmp3free.cc_styles-of-beyond-nine-thou-need-for-speed-most-wanted-2005-youtubemp3free.org.mp3",
+    [string]$FullMix = "/host_project/testing_stuff_music/Nine Thou (Grant Mohrman Superstars Remix) (320).mp3",
+    [string]$ReferenceMinus = "/host_project/testing_stuff_music/ytmp3free.cc_styles-of-beyond-nine-thou-need-for-speed-most-wanted-2005-youtubemp3free.org.mp3",
     [string]$OutputDir = "/app/lab_artifacts/golden_audio/quality_gate_repeatable",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$GateArgs

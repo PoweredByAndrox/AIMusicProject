@@ -886,7 +886,7 @@ def test_manifest_marks_instrumental_model_output_as_target_stem(tmp_path: Path)
     assert manifest["stems"]["vocals"]["role"] == "companion"
 
 
-def test_instrumental_target_manifest_exposes_minus_product_alias(tmp_path: Path) -> None:
+def test_instrumental_target_manifest_keeps_minus_as_metadata_only_product_alias(tmp_path: Path) -> None:
     module = _load_melband_full_module()
     source_audio_path = tmp_path / "source.flac"
     output_dir = tmp_path / "candidate"
@@ -923,6 +923,9 @@ def test_instrumental_target_manifest_exposes_minus_product_alias(tmp_path: Path
 
     assert manifest["target_stem"] == "instrumental"
     assert manifest["target_product_stem"] == "minus"
+    assert manifest["target_product_audio_path"] == str(instrumental_path)
+    assert manifest["target_product_audio_materialized_in_run"] is False
+    assert manifest["target_product_materialized_audio_path"] == ""
     assert manifest["role_safe_stem_contract"] == {
         "source_manifest_target_stem": "instrumental",
         "canonical_stem_type": "instrumental",
@@ -936,12 +939,23 @@ def test_instrumental_target_manifest_exposes_minus_product_alias(tmp_path: Path
     assert manifest["target_stem_artifact"]["target_stem"] == "instrumental"
     assert manifest["target_stem_artifact"]["product_stem_type"] == "minus"
     assert manifest["target_stem_artifact"]["model_output_stem_type"] == "instrumental"
+    assert manifest["target_stem_artifact"]["product_audio_path"] == str(instrumental_path)
+    assert manifest["product_aliases"]["minus"] == {
+        "source_stem": "instrumental",
+        "source_audio_path": str(instrumental_path),
+        "product_stem_type": "minus",
+        "model_output_stem_type": "instrumental",
+        "product_audio_path": str(instrumental_path),
+        "model_output_audio_path": str(instrumental_path),
+        "materialized_audio_path": "",
+        "materialized_in_run": False,
+        "alias_of": "instrumental",
+        "role": "product_role_alias",
+        "naming_contract": "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role",
+    }
     assert manifest["stems"]["instrumental"]["path"] == str(instrumental_path)
     assert manifest["stems"]["instrumental"]["role"] == "target"
-    assert manifest["stems"]["minus"]["path"] == str(instrumental_path)
-    assert manifest["stems"]["minus"]["role"] == "product_alias"
-    assert manifest["stems"]["minus"]["alias_of"] == "instrumental"
-    assert manifest["stems"]["minus"]["product_stem_type"] == "minus"
+    assert "minus" not in manifest["stems"]
 
 
 def test_main_listen_copy_uses_instrumental_for_single_stem_instrumental_contract(
@@ -1018,21 +1032,20 @@ def test_main_listen_copy_uses_instrumental_for_single_stem_instrumental_contrac
     manifest = json.loads((output_dir / "stem_manifest.json").read_text(encoding="utf-8"))
     minus_alias_path = output_dir / "minus.flac"
     instrumental_path = output_dir / "instrumental.flac"
-    assert minus_alias_path.exists()
-    assert minus_alias_path.read_bytes() == instrumental_path.read_bytes()
-    assert manifest["target_product_audio_path"] == str(minus_alias_path)
+    assert not minus_alias_path.exists()
+    assert manifest["target_product_audio_path"] == str(instrumental_path)
     assert manifest["target_model_output_audio_path"] == str(instrumental_path)
-    assert manifest["target_stem_artifact"]["product_audio_path"] == str(minus_alias_path)
+    assert manifest["target_stem_artifact"]["product_audio_path"] == str(instrumental_path)
     assert manifest["target_stem_artifact"]["model_output_audio_path"] == str(instrumental_path)
-    assert manifest["stems"]["minus"]["path"] == str(minus_alias_path)
-    assert manifest["stems"]["minus"]["product_audio_path"] == str(minus_alias_path)
-    assert manifest["stems"]["minus"]["model_output_audio_path"] == str(instrumental_path)
-    assert manifest["stems"]["minus"]["alias_of"] == "instrumental"
+    assert manifest["target_product_audio_materialized_in_run"] is False
+    assert manifest["target_product_materialized_audio_path"] == ""
+    assert "minus" not in manifest["stems"]
+    assert manifest["product_aliases"]["minus"]["source_audio_path"] == str(instrumental_path)
 
     listen_audio, _ = sf.read(str(listen_dir / "candidate.flac"), always_2d=True)
     assert float(np.max(np.abs(listen_audio - instrumental_audio))) < 1e-6
     candidate_map = json.loads((listen_dir / "candidate_map.json").read_text(encoding="utf-8"))
-    assert candidate_map["candidate.flac"].endswith("minus.flac")
+    assert candidate_map["candidate.flac"].endswith("instrumental.flac")
 
 
 def test_resolves_melband_outputs_case_insensitively(tmp_path: Path) -> None:

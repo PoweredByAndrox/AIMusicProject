@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -329,8 +329,71 @@ def _summarize_stems(run_dir: Path) -> dict[str, Any]:
             "source": info.get("source"),
             "model_output": info.get("model_output"),
             "residual_companion": info.get("residual_companion"),
+            "alias_of": info.get("alias_of"),
+            "source_stem": info.get("source_stem"),
+            "product_stem_type": info.get("product_stem_type"),
+            "model_output_stem_type": info.get("model_output_stem_type"),
+            "product_audio_path": info.get("product_audio_path"),
+            "model_output_audio_path": info.get("model_output_audio_path"),
+            "materialized_in_run": info.get("materialized_in_run"),
         }
-    return {"stem_manifest_exists": True, "stems": stems}
+    return {
+        "stem_manifest_exists": True,
+        "target_stem": manifest.get("target_stem"),
+        "target_product_stem": manifest.get("target_product_stem"),
+        "target_audio_path": manifest.get("target_audio_path"),
+        "target_product_audio_path": manifest.get("target_product_audio_path"),
+        "target_model_output_audio_path": manifest.get("target_model_output_audio_path"),
+        "product_aliases": manifest.get("product_aliases") if isinstance(manifest.get("product_aliases"), dict) else {},
+        "target_product_alias": (
+            manifest.get("target_product_alias") if isinstance(manifest.get("target_product_alias"), dict) else {}
+        ),
+        "stems": stems,
+    }
+
+
+def _source_info_for_requested_stem(summary: Mapping[str, Any], stem: str) -> dict[str, Any] | None:
+    available = summary.get("stems") if isinstance(summary.get("stems"), dict) else {}
+    if stem != "minus":
+        info = available.get(stem) if isinstance(available, dict) else None
+        return info if isinstance(info, dict) else None
+
+    minus_info = available.get("minus") if isinstance(available, dict) else None
+    if isinstance(minus_info, dict):
+        if str(minus_info.get("role") or "") != "product_alias":
+            return minus_info
+        if str(minus_info.get("alias_of") or "") != "instrumental":
+            return None
+        model_output_path = str(minus_info.get("model_output_audio_path") or "").strip()
+        if model_output_path:
+            return {**minus_info, "path": model_output_path}
+        instrumental_info = available.get("instrumental") if isinstance(available, dict) else None
+        return instrumental_info if isinstance(instrumental_info, dict) else None
+
+    aliases = summary.get("product_aliases") if isinstance(summary.get("product_aliases"), dict) else {}
+    minus_alias = aliases.get("minus") if isinstance(aliases, dict) else None
+    if isinstance(minus_alias, dict):
+        source_stem = str(minus_alias.get("source_stem") or minus_alias.get("alias_of") or "").strip()
+        if source_stem != "instrumental":
+            return None
+        source_path = str(
+            minus_alias.get("source_audio_path")
+            or minus_alias.get("model_output_audio_path")
+            or minus_alias.get("product_audio_path")
+            or ""
+        ).strip()
+        if source_path:
+            return {**minus_alias, "path": source_path}
+        instrumental_info = available.get("instrumental") if isinstance(available, dict) else None
+        return instrumental_info if isinstance(instrumental_info, dict) else None
+
+    if (
+        str(summary.get("target_stem") or "").strip() == "instrumental"
+        and str(summary.get("target_product_stem") or "").strip() == "minus"
+    ):
+        instrumental_info = available.get("instrumental") if isinstance(available, dict) else None
+        return instrumental_info if isinstance(instrumental_info, dict) else None
+    return None
 
 
 def _persistent_separator_response(
@@ -381,13 +444,15 @@ def _persistent_separator_response(
 
 def _copy_stems_for_persistent_response(run_dir: Path, output_dir: Path, stems: list[str]) -> tuple[dict[str, str], list[str]]:
     summary = _summarize_stems(run_dir)
-    available = summary.get("stems") if isinstance(summary.get("stems"), dict) else {}
     stems_dir = output_dir / "stems"
     stems_dir.mkdir(parents=True, exist_ok=True)
     copied: dict[str, str] = {}
     missing: list[str] = []
     for stem in stems:
-        info = available.get(stem) if isinstance(available, dict) else None
+        info = _source_info_for_requested_stem(summary, stem)
+        if info is None and summary.get("stem_manifest_exists"):
+            missing.append(stem)
+            continue
         source_path = Path(str(info.get("path") or "")) if isinstance(info, dict) else run_dir / "audio" / f"{stem}.flac"
         if not source_path.is_file():
             missing.append(stem)

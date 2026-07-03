@@ -152,7 +152,7 @@ def test_stem_manifest_audio_pack_maps_mac_local_paths_to_artifact_mirror(tmp_pa
     assert stems["minus"]["source_audio_path_resolution"]["resolved_path"] == str(minus_path)
 
 
-def test_stem_manifest_audio_pack_preserves_minus_product_alias_contract(tmp_path: Path) -> None:
+def test_stem_manifest_audio_pack_uses_instrumental_for_legacy_minus_product_alias(tmp_path: Path) -> None:
     source_dir = tmp_path / "src"
     vocal_path = _write_audio(source_dir / "vocals.flac")
     instrumental_path = _write_audio(source_dir / "instrumental.flac", amplitude=0.08)
@@ -236,7 +236,7 @@ def test_stem_manifest_audio_pack_preserves_minus_product_alias_contract(tmp_pat
 
     row = manifest["stems"][0]
     assert row["stem_type"] == "minus"
-    assert row["source_stem_key"] == "minus"
+    assert row["source_stem_key"] == "instrumental"
     assert row["source_manifest_target_stem"] == "instrumental"
     assert row["canonical_stem_type"] == "instrumental"
     assert row["user_facing_stem_role"] == "minus"
@@ -245,10 +245,10 @@ def test_stem_manifest_audio_pack_preserves_minus_product_alias_contract(tmp_pat
     assert row["model_output_stem_type"] == "instrumental"
     assert row["source_manifest_stem_type"] == "instrumental"
     assert row["naming_contract"] == "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role"
-    assert row["product_audio_path"] == str(minus_path)
+    assert row["product_audio_path"] == str(instrumental_path)
     assert row["model_output_audio_path"] == str(instrumental_path)
-    assert row["source_manifest_audio_path"] == str(minus_path)
-    assert row["source_audio_path"] == str(minus_path)
+    assert row["source_manifest_audio_path"] == str(instrumental_path)
+    assert row["source_audio_path"] == str(instrumental_path)
     assert Path(row["listen_audio_path"]).name == "minus.flac"
 
 

@@ -307,19 +307,6 @@ def _audio_file_summary(path: Path) -> dict[str, Any]:
     }
 
 
-def materialize_product_alias_file(source_path: Path, alias_path: Path) -> Path:
-    if source_path == alias_path:
-        return source_path
-    alias_path.parent.mkdir(parents=True, exist_ok=True)
-    if alias_path.exists():
-        alias_path.unlink()
-    try:
-        os.link(source_path, alias_path)
-    except OSError:
-        shutil.copy2(source_path, alias_path)
-    return alias_path
-
-
 def choose_primary_stem(
     *,
     primary_stem: str | None = None,
@@ -401,31 +388,54 @@ def stem_manifest_stems(
     target_stem: str,
     vocals_summary: dict[str, Any],
     instrumental_summary: dict[str, Any],
-    minus_product_flac_path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
-    stems = {
+    return {
         "vocals": vocals_summary,
         "instrumental": instrumental_summary,
     }
+
+
+def product_alias_contracts(*, target_stem: str, target_audio_path: Path) -> dict[str, dict[str, Any]]:
     if target_stem == "instrumental":
-        model_output_audio_path = str(instrumental_summary.get("path") or "")
-        product_audio_path = str(minus_product_flac_path or model_output_audio_path)
-        stems["minus"] = {
-            **instrumental_summary,
-            "path": product_audio_path,
-            "role": "product_alias",
-            "alias_of": "instrumental",
+        return {
+            "minus": {
+                "source_stem": "instrumental",
+                "source_audio_path": str(target_audio_path),
+                "product_stem_type": "minus",
+                "model_output_stem_type": "instrumental",
+                "product_audio_path": str(target_audio_path),
+                "model_output_audio_path": str(target_audio_path),
+                "materialized_audio_path": "",
+                "materialized_in_run": False,
+                "alias_of": "instrumental",
+                "role": "product_role_alias",
+                "naming_contract": INSTRUMENTAL_MINUS_NAMING_CONTRACT,
+            }
+        }
+    return {}
+
+
+def product_alias_manifest_fields(*, target_stem: str, target_audio_path: Path) -> dict[str, Any]:
+    aliases = product_alias_contracts(target_stem=target_stem, target_audio_path=target_audio_path)
+    if target_stem == "instrumental":
+        return {
+            "product_aliases": aliases,
+            "target_product_alias": aliases.get("minus", {}),
+            "target_product_audio_materialized_in_run": False,
+            "target_product_materialized_audio_path": "",
             "source_manifest_target_stem": "instrumental",
             "canonical_stem_type": "instrumental",
             "user_facing_stem_role": "minus",
             "manifest_stem_name": "instrumental",
             "product_stem_type": "minus",
             "model_output_stem_type": "instrumental",
-            "product_audio_path": product_audio_path,
-            "model_output_audio_path": model_output_audio_path,
             "naming_contract": INSTRUMENTAL_MINUS_NAMING_CONTRACT,
         }
-    return stems
+    return {
+        "product_aliases": aliases,
+        "target_product_audio_materialized_in_run": True,
+        "target_product_materialized_audio_path": str(target_audio_path),
+    }
 
 
 def build_full_track_stem_manifest(
@@ -451,7 +461,6 @@ def build_full_track_stem_manifest(
     cuda_preflight: dict[str, Any] | None = None,
     inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
-    minus_product_flac_path: Path | None = None,
     runtime_patches: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stem_provenance = stem_provenance or {}
@@ -485,11 +494,7 @@ def build_full_track_stem_manifest(
     instrumental_summary.update(stem_provenance.get("instrumental", {}))
     target_summary = instrumental_summary if target_stem == "instrumental" else vocals_summary
     target_product_stem = product_stem_type_for_target(target_stem)
-    target_product_audio_path = (
-        minus_product_flac_path
-        if target_product_stem == "minus" and minus_product_flac_path is not None
-        else target_audio_path
-    )
+    target_product_audio_path = target_audio_path
     return {
         "schema_version": 1,
         "source_audio_path": str(source_audio_path),
@@ -539,7 +544,6 @@ def build_full_track_stem_manifest(
             target_stem=target_stem,
             vocals_summary=vocals_summary,
             instrumental_summary=instrumental_summary,
-            minus_product_flac_path=minus_product_flac_path,
         ),
         "role_safe_stem_contract": role_safe_stem_contract(target_stem),
         "target_stem_artifact": target_stem_artifact(
@@ -548,6 +552,7 @@ def build_full_track_stem_manifest(
             target_summary=target_summary,
             product_audio_path=target_product_audio_path,
         ),
+        **product_alias_manifest_fields(target_stem=target_stem, target_audio_path=target_audio_path),
         "artifacts": {
             "raw_ref_flac": str(raw_ref_flac_path),
             "vocals_flac": str(vocals_flac_path),
@@ -593,7 +598,6 @@ def write_full_track_stem_manifest(
     cuda_preflight: dict[str, Any] | None = None,
     inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
-    minus_product_flac_path: Path | None = None,
     runtime_patches: list[dict[str, Any]] | None = None,
 ) -> Path:
     manifest = build_full_track_stem_manifest(
@@ -618,7 +622,6 @@ def write_full_track_stem_manifest(
         cuda_preflight=cuda_preflight,
         inference_runtime=inference_runtime,
         primary_stem=primary_stem,
-        minus_product_flac_path=minus_product_flac_path,
         runtime_patches=runtime_patches,
     )
     manifest_path = output_dir / "stem_manifest.json"
@@ -1098,11 +1101,6 @@ def main() -> None:
         sf.write(str(vocals_flac_path), tuned_vocals_audio, vocals_sr, subtype="PCM_24")
         sf.write(str(instrumental_flac_path), instrumental_audio, instrumental_sr, subtype="PCM_24")
         sf.write(str(raw_ref_flac_path), raw_audio, raw_sr, subtype="PCM_24")
-        minus_product_flac_path = (
-            materialize_product_alias_file(instrumental_flac_path, output_dir / "minus.flac")
-            if target_stem == "instrumental"
-            else None
-        )
         persisted_runtime_config_path = output_dir / "config_runtime.yaml"
         shutil.copy2(runtime_config_path, persisted_runtime_config_path)
 
@@ -1129,13 +1127,12 @@ def main() -> None:
             cuda_preflight=cuda_preflight,
             inference_runtime=inference_runtime,
             primary_stem=target_stem,
-            minus_product_flac_path=minus_product_flac_path,
             runtime_patches=runtime_patches,
         )
 
         if listen_dir is not None:
             listen_dir.mkdir(parents=True, exist_ok=True)
-            target_flac_path = minus_product_flac_path or vocals_flac_path
+            target_flac_path = instrumental_flac_path if target_stem == "instrumental" else vocals_flac_path
             copy_listen_file(raw_ref_flac_path, listen_dir / "00_raw_ref.flac")
             copy_listen_file(target_flac_path, listen_dir / args.listen_label)
             (listen_dir / "00_README.txt").write_text(

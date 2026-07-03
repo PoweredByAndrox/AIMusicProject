@@ -44,9 +44,9 @@ from compare_instrumental_to_reference_pair import (  # noqa: E402
 from probe_golden_reference_pair import analyze_pair, probe_audio  # noqa: E402
 
 
-DEFAULT_FULL_MIX_PATH = Path("/host_project/Nine Thou (Grant Mohrman Superstars Remix) (320).mp3")
+DEFAULT_FULL_MIX_PATH = Path("/host_project/testing_stuff_music/Nine Thou (Grant Mohrman Superstars Remix) (320).mp3")
 DEFAULT_REFERENCE_MINUS_PATH = Path(
-    "/host_project/ytmp3free.cc_styles-of-beyond-nine-thou-need-for-speed-most-wanted-2005-youtubemp3free.org.mp3"
+    "/host_project/testing_stuff_music/ytmp3free.cc_styles-of-beyond-nine-thou-need-for-speed-most-wanted-2005-youtubemp3free.org.mp3"
 )
 DEFAULT_GOLDEN_ROOT = Path("/app/lab_artifacts/golden_audio")
 DEFAULT_OUTPUT_DIR = DEFAULT_GOLDEN_ROOT / "quality_gate_repeatable"

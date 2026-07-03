@@ -20,22 +20,29 @@ the manifest records role-safe metadata:
 - `target_stem_artifact.product_audio_path`
 - `target_stem_artifact.model_output_audio_path`
 - `stems.instrumental.role=target` for the canonical model output
-- `stems.minus.role=product_alias` and `stems.minus.alias_of=instrumental`
-  when the underlying separator emits an instrumental stem for the
-  listener-facing minus product
-- `stems.minus.product_audio_path`
-- `stems.minus.model_output_audio_path`
+- `product_aliases.minus.source_stem=instrumental` when the underlying
+  separator emits an instrumental stem for the listener-facing minus product
+- `product_aliases.minus.product_audio_path`
+- `product_aliases.minus.model_output_audio_path`
+- `target_product_audio_materialized_in_run=false` for metadata-only product
+  aliases
 
-For instrumental checkpoints, new generated run directories materialize both:
+For instrumental checkpoints, new generated low-level model `run/` directories
+materialize only the native model stem:
 
-- `instrumental.flac` - canonical model output file;
-- `minus.flac` - product-role alias used by downstream listen/pack/judge paths.
+- `instrumental.flac` - canonical model output file.
 
-The two files are expected to have identical audio bytes unless a later
-explicit product-stage repair creates a separate minus candidate with its own
-manifest provenance.
+They must not also materialize `run/minus.flac` as a hardlink/copy of
+`instrumental.flac`. The product role `minus` is represented as metadata in
+`product_aliases.minus` and may be materialized only at a product boundary such
+as a candidate `stems/minus.flac`, listen pack, or explicit product-stage repair
+with its own manifest provenance. If a legacy source manifest contains
+`stems.minus.role=product_alias`, consumers must verify
+`alias_of=instrumental` and prefer the canonical `instrumental` model-output
+path; aliases that point to `vocals` or any other source are invalid.
 
-This is naming/provenance-only. It does not rename old artifact files, and the
-product alias file does not change audio bytes or turn a diagnostic candidate
-into a listen result. Quality gates, vocal-leak checks, detail/damage audits,
-and delivery flags still decide whether a minus can be published.
+This is naming/provenance-only. It does not rename old artifact files, and a
+metadata or product-boundary alias does not change audio bytes or turn a
+diagnostic candidate into a listen result. Quality gates, vocal-leak checks,
+detail/damage audits, and delivery flags still decide whether a minus can be
+published.

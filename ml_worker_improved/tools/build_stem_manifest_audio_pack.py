@@ -166,6 +166,16 @@ def selected_stems(requested_stems: Iterable[str]) -> tuple[str, ...]:
 
 def source_stem_payload(source_manifest: dict[str, Any], stem_type: str) -> tuple[str, dict[str, Any]]:
     stems = nested_dict(source_manifest, "stems")
+    if stem_type == "minus":
+        minus_payload = stems.get("minus")
+        instrumental_payload = stems.get("instrumental")
+        if (
+            isinstance(minus_payload, dict)
+            and str(minus_payload.get("role") or "") == "product_alias"
+            and str(minus_payload.get("alias_of") or "") == "instrumental"
+            and isinstance(instrumental_payload, dict)
+        ):
+            return "instrumental", instrumental_payload
     for key in STEM_SOURCE_KEYS.get(stem_type, (stem_type,)):
         value = stems.get(key)
         if isinstance(value, dict):

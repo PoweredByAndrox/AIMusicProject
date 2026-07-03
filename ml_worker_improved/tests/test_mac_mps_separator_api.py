@@ -346,6 +346,15 @@ def test_mac_api_separate_adapts_persistent_contract_to_mps_export(tmp_path, mon
         (run_dir / "stem_manifest.json").write_text(
             """
 {
+  "target_stem": "instrumental",
+  "target_product_stem": "minus",
+  "product_aliases": {
+    "minus": {
+      "source_stem": "instrumental",
+      "source_audio_path": "INSTRUMENTAL_PATH",
+      "alias_of": "instrumental"
+    }
+  },
   "stems": {
     "vocals": {"path": "VOCALS_PATH", "role": "companion"},
     "instrumental": {"path": "INSTRUMENTAL_PATH", "role": "target"}
@@ -382,6 +391,143 @@ def test_mac_api_separate_adapts_persistent_contract_to_mps_export(tmp_path, mon
     assert (output_dir / "stems" / "instrumental.flac").read_bytes() == b"instrumental"
     assert (output_dir / "stems" / "vocals.flac").read_bytes() == b"vocals"
     assert response["mount_preflight"]["preflight_status"] == "passed"
+
+
+def test_mac_api_separate_maps_requested_minus_from_native_instrumental(tmp_path, monkeypatch):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    artifacts_root = project_root / "artifacts"
+    output_dir = artifacts_root / "rank" / "r001" / "c001"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=artifacts_root,
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+
+    def fake_run(command, **_kwargs):
+        run_dir = output_dir / "run"
+        run_dir.mkdir(parents=True)
+        vocals_path = run_dir / "vocals.flac"
+        instrumental_path = run_dir / "instrumental.flac"
+        vocals_path.write_bytes(b"vocals")
+        instrumental_path.write_bytes(b"instrumental")
+        (run_dir / "stem_manifest.json").write_text(
+            """
+{
+  "target_stem": "instrumental",
+  "target_product_stem": "minus",
+  "product_aliases": {
+    "minus": {
+      "source_stem": "instrumental",
+      "source_audio_path": "INSTRUMENTAL_PATH",
+      "alias_of": "instrumental"
+    }
+  },
+  "stems": {
+    "vocals": {"path": "VOCALS_PATH", "role": "companion"},
+    "instrumental": {"path": "INSTRUMENTAL_PATH", "role": "target"}
+  }
+}
+""".replace("VOCALS_PATH", str(vocals_path).replace("\\", "\\\\")).replace(
+                "INSTRUMENTAL_PATH", str(instrumental_path).replace("\\", "\\\\")
+            ),
+            encoding="utf-8",
+        )
+        return module.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    status_code, response = runner.separate(
+        {
+            "route_id": "becruily_instrumental_vocals",
+            "source_audio_path": str(source_audio),
+            "output_dir": str(output_dir),
+            "device": "cuda",
+            "require_gpu": True,
+            "stems": ["minus", "vocals"],
+            "timeout_sec": 30,
+        }
+    )
+
+    assert status_code == 200
+    assert response["status"] == "ok"
+    assert response["missing_stems"] == []
+    assert not (output_dir / "run" / "minus.flac").exists()
+    assert (output_dir / "stems" / "minus.flac").read_bytes() == b"instrumental"
+    assert (output_dir / "stems" / "vocals.flac").read_bytes() == b"vocals"
+    assert response["copied_stems"]["minus"].endswith("stems/minus.flac")
+
+
+def test_mac_api_separate_rejects_poisoned_minus_alias_to_vocals(tmp_path, monkeypatch):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    artifacts_root = project_root / "artifacts"
+    output_dir = artifacts_root / "rank" / "r001" / "c001"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=artifacts_root,
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+
+    def fake_run(command, **_kwargs):
+        run_dir = output_dir / "run"
+        run_dir.mkdir(parents=True)
+        vocals_path = run_dir / "vocals.flac"
+        instrumental_path = run_dir / "instrumental.flac"
+        vocals_path.write_bytes(b"vocals")
+        instrumental_path.write_bytes(b"instrumental")
+        (run_dir / "stem_manifest.json").write_text(
+            """
+{
+  "stems": {
+    "vocals": {"path": "VOCALS_PATH", "role": "companion"},
+    "instrumental": {"path": "INSTRUMENTAL_PATH", "role": "target"},
+    "minus": {
+      "path": "VOCALS_PATH",
+      "role": "product_alias",
+      "alias_of": "vocals",
+      "model_output_audio_path": "VOCALS_PATH"
+    }
+  }
+}
+""".replace("VOCALS_PATH", str(vocals_path).replace("\\", "\\\\")).replace(
+                "INSTRUMENTAL_PATH", str(instrumental_path).replace("\\", "\\\\")
+            ),
+            encoding="utf-8",
+        )
+        return module.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    status_code, response = runner.separate(
+        {
+            "route_id": "becruily_instrumental_vocals",
+            "source_audio_path": str(source_audio),
+            "output_dir": str(output_dir),
+            "device": "cuda",
+            "require_gpu": True,
+            "stems": ["minus"],
+            "timeout_sec": 30,
+        }
+    )
+
+    assert status_code == 500
+    assert response["status"] == "blocked"
+    assert response["reason"] == "missing_required_stems"
+    assert response["missing_stems"] == ["minus"]
+    assert not (output_dir / "stems" / "minus.flac").exists()
 
 
 def test_mac_api_separate_blocks_unsupported_route_without_delivery(tmp_path):
