@@ -226,6 +226,9 @@ def test_stop_after_windowed_judges_skips_missing_learned_critic_bundle(tmp_path
 
     manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
     learned_rows = (output_dir / "learned_critic_scores.jsonl").read_text(encoding="utf-8")
+    selected_rows = (output_dir / "selected_candidates.jsonl").read_text(encoding="utf-8")
+    pair_rows = (output_dir / "pair_compatibility.jsonl").read_text(encoding="utf-8")
+    preview = json.loads((output_dir / "preview_manifest.json").read_text(encoding="utf-8"))
     minus_rows = (output_dir / "minus_windowed_judge.jsonl").read_text(encoding="utf-8")
 
     assert exit_code == 0
@@ -236,6 +239,11 @@ def test_stop_after_windowed_judges_skips_missing_learned_critic_bundle(tmp_path
     assert manifest["selected_vocal_candidate"] == ""
     assert manifest["selected_minus_candidate"] == ""
     assert learned_rows == ""
+    assert selected_rows == ""
+    assert pair_rows == ""
+    assert preview["can_publish_as_result"] is False
+    assert preview["can_mark_release_ready"] is False
+    assert preview["audio_preview_ready"] is False
     assert "candidate-a" in minus_rows
     assert any(
         stage["stage"] == "run_learned_critic_shadow_hybrid_scoring"

@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -68,6 +69,49 @@ def test_negative_harvest_batch_writes_no_release_ready_when_input_empty(tmp_pat
     assert manifest["release_ready"] is False
     assert (tmp_path / "harvest" / "negative_harvest_manifest.json").exists()
     assert (tmp_path / "harvest" / "negative_harvest_summary.md").exists()
+
+
+def test_negative_harvest_batch_execute_uses_harvest_only_runtime_with_missing_model_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tools import run_strict_negative_harvest_batch as batch
+
+    input_dir = tmp_path / "testing_stuff_music"
+    input_dir.mkdir()
+    (input_dir / "Song A.wav").write_bytes(b"audio-a")
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        assert "--stop-after-windowed-judges" in command
+        assert command[command.index("--stop-after-windowed-judges") + 1] == "true"
+        assert "--model-dir" in command
+        assert not Path(command[command.index("--model-dir") + 1]).exists()
+        return subprocess.CompletedProcess(command, 0, stdout='{"output_status":"needs_pair_reconciliation"}\n', stderr="")
+
+    monkeypatch.setattr(batch.subprocess, "run", fake_run)
+
+    manifest = batch.run_strict_negative_harvest_batch(
+        input_audio_dir=input_dir,
+        output_dir=tmp_path / "harvest",
+        model_dir=tmp_path / "missing_models",
+        max_tracks=1,
+        profile="safe",
+        candidate_diversity_profile="safe",
+        enable_conditional_hard_case_routes=True,
+        enable_audio_preview_render=False,
+        require_preview_audio_for_preview_ready=False,
+        continue_on_failure=False,
+        execute=True,
+    )
+
+    rows = read_jsonl(tmp_path / "harvest" / "negative_harvest_runs.jsonl")
+    assert manifest["tracks_succeeded"] == 1
+    assert manifest["tracks_failed"] == 0
+    assert manifest["release_ready"] is False
+    assert rows[0]["execution_status"] == "completed"
+    assert rows[0]["return_code"] == 0
+    assert captured["command"] == rows[0]["command"]
 
 
 def test_harvest_counts_strict_positive_and_negative_windows(tmp_path: Path) -> None:

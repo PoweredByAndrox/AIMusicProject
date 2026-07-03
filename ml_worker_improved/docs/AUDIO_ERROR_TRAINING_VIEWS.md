@@ -188,7 +188,8 @@ to be `testing_stuff_music` / `/host_testing_stuff_music`.
 The strict harvest wrapper runs the autonomous runtime with
 `--stop-after-windowed-judges true`. That mode writes candidate-pool,
 vocal/minus windowed judge, optimizer, preview contract, learning outcome, and
-run manifest surfaces, but intentionally skips learned-critic selection. Its
-manifest is diagnostic/non-release (`release_ready=false`) and exists only to
-feed strict positive/negative windows into training views without requiring a
-complete no-reference critic bundle.
+run manifest surfaces, but intentionally skips learned-critic selection,
+selected-candidate emission, pair-compatibility claiming, and listen-result
+rendering. Its manifest is diagnostic/non-release (`release_ready=false`) and
+exists only to feed strict positive/negative windows into training views without
+requiring a complete no-reference critic bundle.
