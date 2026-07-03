@@ -44,6 +44,12 @@ blocked/rejected candidates remain blocked.
 one blocked window. It is a guarded candidate, not a fallback: failed focus-window
 attenuation remains diagnostic evidence and does not create a release artifact.
 
+`actual_masked_residue_guarded` may include low-priority residue windows only
+through an explicit suspicion-score gate. The residue mask is additionally
+gated by vocal/base overlap so quiet background vocal cleanup does not broadly
+attenuate instrumental detail. This candidate is still release-gated: if RMS,
+presence, air, or vocal-residue metrics fail, it remains diagnostic-only.
+
 For iterative passes, `tools/build_ralph_residual_focus_windows.py` can convert
 the selected candidate's `top_vocal_residue_windows` from a prior
 `ralph_minus_improvement_manifest.json` into a ranked `focus.jsonl`. This is a

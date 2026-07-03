@@ -52,3 +52,29 @@ def test_frame_score_gate_stays_zero_without_positive_scores() -> None:
 
     assert metrics["gate_mode"] == "empty_score"
     assert float(gate.max()) == 0.0
+
+
+def test_guide_floor_is_mask_and_activity_gated() -> None:
+    module = _load_module()
+    guide = np.zeros((2, 4), dtype=np.float32)
+    cleanup_mask = np.array(
+        [
+            [1.0, 0.5, 0.0, 1.0],
+            [0.25, 0.0, 1.0, 0.5],
+        ],
+        dtype=np.float32,
+    )
+    time_activity = np.array([1.0, 0.5, 1.0, 0.0], dtype=np.float32)
+
+    floored = module._apply_guide_floor(
+        guide,
+        cleanup_mask,
+        time_activity,
+        guide_floor=0.2,
+    )
+
+    assert np.isclose(floored[0, 0], 0.2)
+    assert np.isclose(floored[0, 1], 0.05)
+    assert np.isclose(floored[0, 2], 0.0)
+    assert np.isclose(floored[1, 2], 0.2)
+    assert np.isclose(floored[:, 3].max(), 0.0)

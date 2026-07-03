@@ -32,10 +32,18 @@ def build_review_window_gate(
     frame_count: int,
     sample_rate: int,
     smoothing_sec: float,
+    include_low_priority_windows: bool = False,
+    min_low_priority_score: float = 0.0,
 ) -> np.ndarray:
     gate = np.zeros(frame_count, dtype=np.float32)
     for window in windows:
-        if window.get("vocal_evidence_status") != "needs_human_review":
+        evidence_status = window.get("vocal_evidence_status")
+        low_priority_allowed = (
+            include_low_priority_windows
+            and evidence_status == "low_priority"
+            and float(window.get("suspicion_score") or 0.0) >= float(min_low_priority_score)
+        )
+        if evidence_status != "needs_human_review" and not low_priority_allowed:
             continue
         start = max(int(float(window["start_sec"]) * sample_rate), 0)
         end = min(int(float(window["end_sec"]) * sample_rate), frame_count)
@@ -57,6 +65,7 @@ def build_actual_residue_gain_mask(
     sample_rate: int,
     strength: float,
     mask_power: float,
+    base_overlap_power: float = 0.0,
 ) -> tuple[np.ndarray, dict[str, float]]:
     n_fft = 4096
     hop_length = 1024
@@ -77,6 +86,7 @@ def build_actual_residue_gain_mask(
         boundary="zeros",
     )
     vocal_magnitude = np.abs(vocal_stft)
+    base_magnitude = np.abs(base_stft)
     voice_band = (frequencies >= 160.0) & (frequencies <= 5200.0)
     presence_band = (frequencies >= 1800.0) & (frequencies <= 4500.0)
     low_band = frequencies < 140.0
@@ -92,6 +102,13 @@ def build_actual_residue_gain_mask(
         raise ValueError("Voice band is empty for the selected sample rate.")
     mask_floor = float(np.percentile(voice_magnitude, 72.0)) + EPSILON
     residue_mask = np.clip((vocal_magnitude / mask_floor) ** mask_power, 0.0, 1.0)
+    if float(base_overlap_power) > 0.0:
+        base_overlap = np.clip(
+            vocal_magnitude / np.maximum(vocal_magnitude + base_magnitude, EPSILON),
+            0.0,
+            1.0,
+        )
+        residue_mask *= np.power(base_overlap, float(base_overlap_power))
     band_weight = np.zeros((frequencies.shape[0], 1), dtype=np.float32)
     band_weight[voice_band, 0] = 0.58
     band_weight[presence_band, 0] = 0.30
@@ -106,6 +123,9 @@ def build_actual_residue_gain_mask(
         "mean_review_gate": float(time_gate.mean()),
         "max_review_gate": float(time_gate.max()),
         "active_frame_ratio": float(np.mean(time_gate > 0.05)),
+        "base_overlap_power": float(base_overlap_power),
+        "mean_residue_mask": float(residue_mask[voice_band, :].mean()),
+        "max_residue_mask": float(residue_mask[voice_band, :].max()),
     }
 
 
@@ -118,6 +138,9 @@ def apply_actual_masked_residue_cleanup(
     mask_power: float,
     smoothing_sec: float,
     window_sec: float,
+    include_low_priority_windows: bool,
+    min_low_priority_score: float,
+    base_overlap_power: float,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     base_minus, primary_vocals = match_length([base_minus, primary_vocals])
     base_mono = base_minus.mean(axis=1)
@@ -139,6 +162,8 @@ def apply_actual_masked_residue_cleanup(
         frame_count=base_minus.shape[0],
         sample_rate=sample_rate,
         smoothing_sec=smoothing_sec,
+        include_low_priority_windows=include_low_priority_windows,
+        min_low_priority_score=min_low_priority_score,
     )
     if not np.any(review_gate > 0.0):
         return base_minus.copy(), {
@@ -157,6 +182,7 @@ def apply_actual_masked_residue_cleanup(
             sample_rate=sample_rate,
             strength=strength,
             mask_power=mask_power,
+            base_overlap_power=base_overlap_power,
         )
         n_fft = 4096
         hop_length = 1024
@@ -184,6 +210,14 @@ def apply_actual_masked_residue_cleanup(
         "review_window_count": sum(
             1 for window in windows if window.get("vocal_evidence_status") == "needs_human_review"
         ),
+        "low_priority_window_count": sum(
+            1
+            for window in windows
+            if window.get("vocal_evidence_status") == "low_priority"
+            and float(window.get("suspicion_score") or 0.0) >= float(min_low_priority_score)
+        ),
+        "include_low_priority_windows": bool(include_low_priority_windows),
+        "min_low_priority_score": float(min_low_priority_score),
         "projection_only_rejected_count": sum(
             1
             for window in windows
@@ -216,8 +250,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--listen-label", default="02_actual_masked_residue_minus.flac")
     parser.add_argument("--strength", type=float, default=0.10)
     parser.add_argument("--mask-power", type=float, default=1.35)
+    parser.add_argument("--base-overlap-power", type=float, default=0.0)
     parser.add_argument("--smoothing-sec", type=float, default=0.10)
     parser.add_argument("--window-sec", type=float, default=5.0)
+    parser.add_argument("--include-low-priority-windows", action="store_true")
+    parser.add_argument("--min-low-priority-score", type=float, default=0.0)
     return parser.parse_args(argv)
 
 
@@ -246,8 +283,11 @@ def main(argv: list[str] | None = None) -> int:
         sample_rate=raw_sample_rate,
         strength=float(args.strength),
         mask_power=float(args.mask_power),
+        base_overlap_power=float(args.base_overlap_power),
         smoothing_sec=float(args.smoothing_sec),
         window_sec=float(args.window_sec),
+        include_low_priority_windows=bool(args.include_low_priority_windows),
+        min_low_priority_score=float(args.min_low_priority_score),
     )
     metrics = calculate_basic_metrics(base_minus, refined_minus)
 
@@ -274,8 +314,11 @@ def main(argv: list[str] | None = None) -> int:
             "name": "actual_masked_residue_minus_cleanup_v1",
             "strength": float(args.strength),
             "mask_power": float(args.mask_power),
+            "base_overlap_power": float(args.base_overlap_power),
             "smoothing_sec": float(args.smoothing_sec),
             "window_sec": float(args.window_sec),
+            "include_low_priority_windows": bool(args.include_low_priority_windows),
+            "min_low_priority_score": float(args.min_low_priority_score),
             "projection_only_is_not_vocal_evidence": True,
         },
         "audio": {

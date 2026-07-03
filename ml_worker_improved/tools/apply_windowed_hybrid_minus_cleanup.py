@@ -154,6 +154,24 @@ def _frame_score_gate(
     }
 
 
+def _apply_guide_floor(
+    guide_improvement: np.ndarray,
+    cleanup_mask: np.ndarray,
+    time_activity: np.ndarray,
+    *,
+    guide_floor: float,
+) -> np.ndarray:
+    guide_floor = max(0.0, min(1.0, float(guide_floor)))
+    if guide_floor <= 0.0:
+        return guide_improvement
+    floor = (
+        guide_floor
+        * np.clip(cleanup_mask, 0.0, 1.0)
+        * np.clip(time_activity, 0.0, 1.0)[None, :]
+    )
+    return np.maximum(guide_improvement, floor).astype(np.float32, copy=False)
+
+
 def main() -> None:
     require_docker_runtime(
         tool_name="apply_windowed_hybrid_minus_cleanup.py",
@@ -172,6 +190,7 @@ def main() -> None:
     parser.add_argument("--secondary-weight", type=float, default=0.82)
     parser.add_argument("--mask-power", type=float, default=1.55)
     parser.add_argument("--guide-power", type=float, default=1.25)
+    parser.add_argument("--guide-floor", type=float, default=0.0)
     parser.add_argument("--activity-threshold", type=float, default=0.06)
     parser.add_argument("--score-percentile", type=float, default=76.0)
     parser.add_argument("--gate-smooth-width", type=int, default=41)
@@ -240,6 +259,12 @@ def main() -> None:
 
         guide_ratio = np.clip(guide_mag / np.maximum(base_mag, 1e-8), 0.0, 1.0)
         guide_improvement = np.power(np.clip(1.0 - guide_ratio, 0.0, 1.0), float(args.guide_power))
+        guide_improvement = _apply_guide_floor(
+            guide_improvement,
+            cleanup_mask,
+            time_activity,
+            guide_floor=float(args.guide_floor),
+        )
 
         frame_score = time_activity * guide_improvement[voice_band].mean(axis=0)
         gate, gate_metrics = _frame_score_gate(
@@ -285,6 +310,9 @@ def main() -> None:
                 "air_band_mean_base": _band_mean(base_mag, freqs, lo=4500.0, hi=8000.0),
                 "air_band_mean_after": _band_mean(np.abs(refined_z), freqs, lo=4500.0, hi=8000.0),
                 **gate_metrics,
+                "guide_floor": float(args.guide_floor),
+                "guide_improvement_voice_mean": float(guide_improvement[voice_band].mean()),
+                "guide_improvement_voice_max": float(guide_improvement[voice_band].max()),
                 "gate_mean": float(gate.mean()),
                 "gate_max": float(gate.max()),
                 "selected_windows": windows[:12],
@@ -318,6 +346,7 @@ def main() -> None:
             "secondary_weight": float(args.secondary_weight),
             "mask_power": float(args.mask_power),
             "guide_power": float(args.guide_power),
+            "guide_floor": float(args.guide_floor),
             "activity_threshold": float(args.activity_threshold),
             "score_percentile": float(args.score_percentile),
             "gate_smooth_width": int(args.gate_smooth_width),
