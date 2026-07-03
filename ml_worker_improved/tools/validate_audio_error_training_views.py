@@ -40,6 +40,11 @@ REQUIRED_ROW_FIELDS = {
     "label",
     "label_source",
     "blocker_labels",
+    "issue_labels",
+    "corrective_action_labels",
+    "corrective_target_lanes",
+    "unmapped_blocker_labels",
+    "corrective_status",
     "provenance_source_files",
     "safe_for_this_view",
     "unsafe_reason_for_this_view",
@@ -108,6 +113,11 @@ def validate_safe_row(row: dict[str, Any], row_key: str, errors: list[str]) -> N
     for field in ("track_id", "run_id", "candidate_id", "route_id", "mix_path", "candidate_audio_path"):
         if not is_real_value(row.get(field)):
             errors.append(f"safe_row_missing_{field}:{row_key}")
+    for field in ("issue_labels", "corrective_action_labels", "corrective_target_lanes", "unmapped_blocker_labels"):
+        if not isinstance(row.get(field), list):
+            errors.append(f"safe_row_invalid_{field}:{row_key}")
+    if str(row.get("corrective_status") or "") not in {"not_required", "actionable_hardcase"}:
+        errors.append(f"safe_row_invalid_corrective_status:{row_key}")
     if str(row.get("route_id") or "").strip().lower() == "unknown":
         errors.append(f"safe_row_unknown_route_id:{row_key}")
     if is_synthetic_candidate_id(row.get("candidate_id")):

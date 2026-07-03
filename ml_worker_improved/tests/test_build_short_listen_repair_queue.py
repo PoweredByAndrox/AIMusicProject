@@ -15,6 +15,12 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def _write_jsonl(path: Path, rows: list[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
 def _feedback(tmp_path: Path, *, overall: str = "rejected", failed: list[str] | None = None, release_ready: bool = False) -> Path:
     items = [
         {
@@ -296,6 +302,86 @@ def test_build_short_listen_repair_queue_routes_full_pack_machine_gate(tmp_path:
     assert by_stem["guitar"]["issue_tags"] == ["train_ready_model_missing", "training_job_missing"]
     assert "gpu_teacher_mask_train" not in by_stem["guitar"]["required_actions"]
     assert by_stem["guitar"]["diagnostic_context"]["machine_gate"]["train_ready_stems"] == ["vocal"]
+
+
+def test_build_short_listen_repair_queue_routes_training_view_hardcases_with_corrective_actions(tmp_path: Path) -> None:
+    training_view = _write_jsonl(
+        tmp_path / "views" / "minus_critic_training_view.jsonl",
+        [
+            {
+                "schema": "audio_error_training_view_row.v1",
+                "view_name": "minus_critic",
+                "target_name": "minus",
+                "track_id": "trk-hardcase",
+                "candidate_audio_path": "/app/artifacts/cand/minus.flac",
+                "safe_for_this_view": True,
+                "label": 0,
+                "blocker_labels": [
+                    "minus_detail_gate_blocked",
+                    "phase_stereo_stability_below_detail_gate",
+                ],
+                "issue_labels": ["minus_detail_loss", "phase_stereo_damage"],
+                "corrective_action_labels": [
+                    "preserve_minus_instrumental_detail",
+                    "repair_phase_stereo_stability",
+                ],
+                "corrective_target_lanes": ["minus_model", "minus_detail_guard", "pair_router"],
+            },
+            {
+                "schema": "audio_error_training_view_row.v1",
+                "view_name": "minus_critic",
+                "target_name": "minus",
+                "track_id": "trk-positive",
+                "candidate_audio_path": "/app/artifacts/cand/clean.flac",
+                "safe_for_this_view": True,
+                "label": 1,
+                "blocker_labels": [],
+                "issue_labels": [],
+                "corrective_action_labels": [],
+                "corrective_target_lanes": [],
+            },
+            {
+                "schema": "audio_error_training_view_row.v1",
+                "view_name": "pair_critic",
+                "target_name": "minus",
+                "track_id": "trk-wrong-view",
+                "candidate_audio_path": "/app/artifacts/cand/pair.flac",
+                "safe_for_this_view": True,
+                "label": 0,
+                "blocker_labels": ["phase_stereo_stability_below_detail_gate"],
+                "issue_labels": ["phase_stereo_damage"],
+                "corrective_action_labels": ["repair_phase_stereo_stability"],
+                "corrective_target_lanes": ["pair_router"],
+            },
+        ],
+    )
+
+    manifest = build_short_listen_repair_queue(
+        training_view_jsonl=training_view,
+        output_dir=tmp_path / "queue",
+    )
+
+    assert manifest["queue_status"] == "ready_for_full_pack_loop"
+    assert manifest["queue_source"] == "training_view_hardcase"
+    assert manifest["queue_item_count"] == 1
+    rows = [json.loads(line) for line in (tmp_path / "queue" / "rows.jsonl").read_text(encoding="utf-8").splitlines()]
+    row = rows[0]
+    assert row["audio_path"] == "audio/trv/q001/minus.flac"
+    assert row["route_intent"] == "minus_repair"
+    assert row["source_blocker_labels"] == [
+        "minus_detail_gate_blocked",
+        "phase_stereo_stability_below_detail_gate",
+    ]
+    assert row["source_issue_labels"] == ["minus_detail_loss", "phase_stereo_damage"]
+    assert row["corrective_action_labels"] == [
+        "preserve_minus_instrumental_detail",
+        "repair_phase_stereo_stability",
+    ]
+    assert row["corrective_target_lanes"] == ["minus_model", "minus_detail_guard", "pair_router"]
+    assert "preserve_minus_instrumental_detail" in row["required_actions"]
+    assert "repair_phase_stereo_stability" in row["required_actions"]
+    assert row["source_audio_path"] == "/app/artifacts/cand/minus.flac"
+    assert row["source_row"]["track_id"] == "trk-hardcase"
 
 
 def test_build_short_listen_repair_queue_prioritizes_explicit_vocal_stem(tmp_path: Path) -> None:

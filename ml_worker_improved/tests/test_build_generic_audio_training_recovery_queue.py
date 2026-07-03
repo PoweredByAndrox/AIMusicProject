@@ -164,6 +164,10 @@ def test_recovery_queue_blocks_feedback_without_permission(tmp_path: Path) -> No
                 "attach_trainable_permission_status_or_exclude",
                 "attach_accepted_machine_gate_or_verified_reference",
             ],
+            "source_blocker_labels": [],
+            "source_issue_labels": [],
+            "corrective_action_labels": [],
+            "corrective_target_lanes": [],
         }
     ]
 
@@ -198,6 +202,10 @@ def test_recovery_queue_links_full_pack_loop_plan_stem_gaps(tmp_path: Path) -> N
                 "unique_track_count": 1,
                 "min_unique_tracks": 3,
                 "required_next_actions": ["verified_reference_corpus_expand"],
+                "source_blocker_labels": ["minus_detail_gate_blocked"],
+                "source_issue_labels": ["minus_detail_loss"],
+                "corrective_action_labels": ["preserve_minus_instrumental_detail"],
+                "corrective_target_lanes": ["minus_model", "minus_detail_guard"],
                 "release_ready": False,
                 "can_publish_as_result": False,
             },
@@ -208,6 +216,10 @@ def test_recovery_queue_links_full_pack_loop_plan_stem_gaps(tmp_path: Path) -> N
                 "route_intent": "stem_training_coverage_gap",
                 "action_status": "blocked_missing_training_job",
                 "required_next_actions": ["verified_reference_corpus_expand", "rerun_generic_audio_finetune_job_plan"],
+                "source_blocker_labels": ["phase_stereo_stability_below_detail_gate"],
+                "source_issue_labels": ["phase_stereo_damage"],
+                "corrective_action_labels": ["repair_phase_stereo_stability"],
+                "corrective_target_lanes": ["pair_router"],
                 "release_ready": False,
                 "can_publish_as_result": False,
             },
@@ -239,13 +251,25 @@ def test_recovery_queue_links_full_pack_loop_plan_stem_gaps(tmp_path: Path) -> N
     by_stem = {row["stem_type"]: row for row in rows}
     assert by_stem["drums"]["full_pack_required_stem"] is True
     assert by_stem["drums"]["full_pack_action_status"] == "blocked_insufficient_unique_tracks"
+    assert by_stem["drums"]["source_blocker_labels"] == ["minus_detail_gate_blocked"]
+    assert by_stem["drums"]["source_issue_labels"] == ["minus_detail_loss"]
+    assert by_stem["drums"]["corrective_action_labels"] == ["preserve_minus_instrumental_detail"]
+    assert by_stem["drums"]["corrective_target_lanes"] == ["minus_model", "minus_detail_guard"]
     assert by_stem["drums"]["ready_for_audio_training"] is True
     assert by_stem["guitar"]["source_type"] == "full_pack_loop_plan_missing_stem"
     assert by_stem["guitar"]["ready_for_audio_training"] is False
     assert by_stem["guitar"]["blockers"] == ["missing_verified_reference_candidate"]
+    assert by_stem["guitar"]["source_blocker_labels"] == ["phase_stereo_stability_below_detail_gate"]
+    assert by_stem["guitar"]["source_issue_labels"] == ["phase_stereo_damage"]
+    assert by_stem["guitar"]["corrective_action_labels"] == ["repair_phase_stereo_stability"]
+    assert by_stem["guitar"]["corrective_target_lanes"] == ["pair_router"]
     assert "collect_verified_reference_stem" in by_stem["guitar"]["recommended_actions"]
     template_rows = read_jsonl(tmp_path / "out" / "generic_audio_training_recovery_decision_template.jsonl")
-    assert any(row["stem_type"] == "guitar" for row in template_rows)
+    guitar_template = next(row for row in template_rows if row["stem_type"] == "guitar")
+    assert guitar_template["source_blocker_labels"] == ["phase_stereo_stability_below_detail_gate"]
+    assert guitar_template["source_issue_labels"] == ["phase_stereo_damage"]
+    assert guitar_template["corrective_action_labels"] == ["repair_phase_stereo_stability"]
+    assert guitar_template["corrective_target_lanes"] == ["pair_router"]
 
 
 def test_recovery_queue_recovers_feedback_audio_paths_from_listen_manifest(tmp_path: Path) -> None:

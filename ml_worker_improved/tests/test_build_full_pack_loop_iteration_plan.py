@@ -43,6 +43,16 @@ def full_pack_loop_queue(tmp_path: Path) -> Path:
                 "verified_reference_corpus_expand",
                 "train_ready_decision_gate",
             ],
+            "source_blocker_labels": [
+                "minus_detail_gate_blocked",
+                "phase_stereo_stability_below_detail_gate",
+            ],
+            "source_issue_labels": ["minus_detail_loss", "phase_stereo_damage"],
+            "corrective_action_labels": [
+                "preserve_minus_instrumental_detail",
+                "repair_phase_stereo_stability",
+            ],
+            "corrective_target_lanes": ["minus_model", "minus_detail_guard", "pair_router"],
             "source_row": {"machine_gate_json": "/app/gate/gate.json"},
             "release_ready": False,
             "can_publish_as_result": False,
@@ -201,6 +211,18 @@ def test_full_pack_loop_iteration_plan_blocks_missing_training_coverage(tmp_path
     assert by_stem["minus"]["action_status"] == "blocked_minus_repair_and_training_coverage"
     assert by_stem["minus"]["training_job_statuses"] == ["blocked_insufficient_unique_tracks"]
     assert "run_minus_repair_route" in by_stem["minus"]["required_next_actions"]
+    assert by_stem["minus"]["source_blocker_labels"] == [
+        "minus_detail_gate_blocked",
+        "phase_stereo_stability_below_detail_gate",
+    ]
+    assert by_stem["minus"]["source_issue_labels"] == ["minus_detail_loss", "phase_stereo_damage"]
+    assert by_stem["minus"]["corrective_action_labels"] == [
+        "preserve_minus_instrumental_detail",
+        "repair_phase_stereo_stability",
+    ]
+    assert by_stem["minus"]["corrective_target_lanes"] == ["minus_model", "minus_detail_guard", "pair_router"]
+    assert "preserve_minus_instrumental_detail" in by_stem["minus"]["required_next_actions"]
+    assert "repair_phase_stereo_stability" in by_stem["minus"]["required_next_actions"]
     assert by_stem["drums"]["action_status"] == "blocked_insufficient_unique_tracks"
     assert by_stem["drums"]["unique_track_count"] == 1
     assert by_stem["guitar"]["action_status"] == "blocked_missing_training_job"

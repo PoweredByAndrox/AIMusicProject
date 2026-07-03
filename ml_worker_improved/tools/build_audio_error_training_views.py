@@ -63,6 +63,58 @@ STRICT_TRAINING_LABEL_SOURCES = {
 RUN_MARKER_FILES = ("candidate_pool.jsonl", "minus_windowed_judge.jsonl", "vocal_windowed_judge.jsonl")
 ACCEPTED_PREVIEW_MINUS_JUDGE_FILE = "no_reference_minus_windowed_judge.jsonl"
 ACOUSTIC_SCALAR_FEATURE_COLUMNS = tuple(name for name in SCALAR_FEATURE_COLUMNS if not name.startswith("window_"))
+CORRECTIVE_TARGETS_BY_BLOCKER = {
+    "severe_vocal_bleed_in_minus": {
+        "issues": ("vocal_bleed_in_minus",),
+        "actions": ("reduce_vocal_bleed_in_minus", "try_stronger_dedicated_minus_route"),
+        "lanes": ("minus_model", "minus_router"),
+    },
+    "vocal_leakage_in_minus": {
+        "issues": ("vocal_bleed_in_minus",),
+        "actions": ("reduce_vocal_bleed_in_minus", "try_stronger_dedicated_minus_route"),
+        "lanes": ("minus_model", "minus_router"),
+    },
+    "minus_detail_gate_blocked": {
+        "issues": ("minus_detail_loss",),
+        "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
+        "lanes": ("minus_model", "minus_detail_guard"),
+    },
+    "instrumental_integrity_below_detail_gate": {
+        "issues": ("minus_detail_loss",),
+        "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
+        "lanes": ("minus_model", "minus_detail_guard"),
+    },
+    "mixture_consistency_score_below_detail_gate": {
+        "issues": ("minus_detail_loss", "mixture_reconstruction_error"),
+        "actions": ("preserve_minus_instrumental_detail", "improve_mix_reconstruction_consistency"),
+        "lanes": ("minus_model", "pair_router"),
+    },
+    "phase_stereo_stability_below_detail_gate": {
+        "issues": ("phase_stereo_damage",),
+        "actions": ("repair_phase_stereo_stability", "reject_phase_damaging_route"),
+        "lanes": ("minus_model", "pair_router"),
+    },
+    "phase_or_stereo_inconsistency": {
+        "issues": ("phase_stereo_damage",),
+        "actions": ("repair_phase_stereo_stability", "reject_phase_damaging_route"),
+        "lanes": ("minus_model", "pair_router"),
+    },
+    "phase_collapse": {
+        "issues": ("phase_stereo_damage",),
+        "actions": ("repair_phase_stereo_stability", "reject_phase_damaging_route"),
+        "lanes": ("pair_router",),
+    },
+    "severe_phase_comb_filtering": {
+        "issues": ("phase_comb_filtering",),
+        "actions": ("repair_phase_comb_filtering", "reject_phase_damaging_route"),
+        "lanes": ("vocal_model", "pair_router"),
+    },
+    "vocal_missing_on_active_region": {
+        "issues": ("vocal_dropout",),
+        "actions": ("preserve_vocal_body_on_active_regions",),
+        "lanes": ("vocal_model",),
+    },
+}
 PROJECT_PATH_MOUNT_PREFIXES = (
     ("D:/AIMusicProject/artifacts", "AIMUSIC_ARTIFACTS_MOUNT", "/host_artifacts"),
     ("/d/AIMusicProject/artifacts", "AIMUSIC_ARTIFACTS_MOUNT", "/host_artifacts"),
@@ -231,6 +283,34 @@ def window_decision_for(stem_type: str, judge_row: dict[str, Any], window: dict[
 
 def window_blockers_for(stem_type: str, window: dict[str, Any]) -> list[str]:
     return stable_unique(value for key in ("blockers", f"{stem_type}_blockers") for value in as_list(window.get(key)))
+
+
+def corrective_targets_for(target_name: str, blocker_labels: Sequence[str]) -> dict[str, Any]:
+    issues: list[str] = []
+    actions: list[str] = []
+    lanes: list[str] = []
+    unmapped: list[str] = []
+    normalized_target = str(target_name or "unknown").strip() or "unknown"
+    for blocker in blocker_labels:
+        label = str(blocker or "").strip()
+        if not label:
+            continue
+        spec = CORRECTIVE_TARGETS_BY_BLOCKER.get(label)
+        if not spec:
+            unmapped.append(label)
+            issues.append(f"{normalized_target}_unmapped_blocker")
+            actions.append("inspect_unmapped_audio_error_blocker")
+            lanes.append(f"{normalized_target}_router")
+            continue
+        issues.extend(str(value) for value in spec.get("issues", ()) if str(value))
+        actions.extend(str(value) for value in spec.get("actions", ()) if str(value))
+        lanes.extend(str(value) for value in spec.get("lanes", ()) if str(value))
+    return {
+        "issue_labels": stable_unique(issues),
+        "corrective_action_labels": stable_unique(actions),
+        "corrective_target_lanes": stable_unique(lanes),
+        "unmapped_blocker_labels": stable_unique(unmapped),
+    }
 
 
 def clip01(value: Any) -> float:
@@ -1150,6 +1230,7 @@ def base_view_row(
     blocker_labels: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     resolved_blockers = list(blocker_labels if blocker_labels is not None else as_list(source_row.get("blockers")))
+    corrective_targets = corrective_targets_for(target_name, resolved_blockers)
     source_run_dir = normalize_runtime_path(source_row.get("source_run_dir"))
     source_candidate_family = str(source_row.get("source_candidate_family") or "")
     candidate_family = str(
@@ -1178,6 +1259,11 @@ def base_view_row(
         "label": label if safe else None,
         "label_source": label_source if safe else "",
         "blocker_labels": resolved_blockers,
+        "issue_labels": corrective_targets["issue_labels"],
+        "corrective_action_labels": corrective_targets["corrective_action_labels"],
+        "corrective_target_lanes": corrective_targets["corrective_target_lanes"],
+        "unmapped_blocker_labels": corrective_targets["unmapped_blocker_labels"],
+        "corrective_status": "actionable_hardcase" if label == 0 and corrective_targets["corrective_action_labels"] else "not_required",
         "candidate_family": candidate_family,
         "source_candidate_family": source_candidate_family,
         "runtime_source_row": str(source_row.get("dataset_id") or "") == "runtime_harvest",
@@ -1334,6 +1420,10 @@ def summarize_view(view_name: str, rows: Sequence[dict[str, Any]]) -> dict[str, 
     negatives = sum(1 for row in safe_rows if row.get("label") == 0)
     training_positives = sum(1 for row in training_rows if row.get("label") == 1)
     training_negatives = sum(1 for row in training_rows if row.get("label") == 0)
+    issue_counts = Counter(issue for row in safe_rows for issue in as_list(row.get("issue_labels")))
+    corrective_action_counts = Counter(action for row in safe_rows for action in as_list(row.get("corrective_action_labels")))
+    corrective_lane_counts = Counter(lane for row in safe_rows for lane in as_list(row.get("corrective_target_lanes")))
+    unmapped_blocker_counts = Counter(blocker for row in safe_rows for blocker in as_list(row.get("unmapped_blocker_labels")))
     reasons = Counter(
         reason
         for row in unsafe_rows
@@ -1351,6 +1441,11 @@ def summarize_view(view_name: str, rows: Sequence[dict[str, Any]]) -> dict[str, 
         "negative_labels": negatives,
         "training_positive_labels": training_positives,
         "training_negative_labels": training_negatives,
+        "actionable_hardcase_rows": sum(1 for row in safe_rows if row.get("corrective_status") == "actionable_hardcase"),
+        "issue_counts": dict(sorted(issue_counts.items())),
+        "corrective_action_counts": dict(sorted(corrective_action_counts.items())),
+        "corrective_lane_counts": dict(sorted(corrective_lane_counts.items())),
+        "unmapped_blocker_counts": dict(sorted(unmapped_blocker_counts.items())),
         "unsafe_reason_counts": dict(sorted(reasons.items())),
         "readiness_blockers": blockers,
         "can_train": not blockers,
@@ -1386,6 +1481,10 @@ def write_summary(path: Path, manifest: dict[str, Any]) -> None:
                 f"- negative_labels: {view['negative_labels']}",
                 f"- training_positive_labels: {view['training_positive_labels']}",
                 f"- training_negative_labels: {view['training_negative_labels']}",
+                f"- actionable_hardcase_rows: {view['actionable_hardcase_rows']}",
+                f"- issue_counts: `{json.dumps(view['issue_counts'], sort_keys=True)}`",
+                f"- corrective_action_counts: `{json.dumps(view['corrective_action_counts'], sort_keys=True)}`",
+                f"- corrective_lane_counts: `{json.dumps(view['corrective_lane_counts'], sort_keys=True)}`",
                 f"- can_train: {str(view['can_train']).lower()}",
                 f"- readiness_blockers: `{json.dumps(view['readiness_blockers'], sort_keys=True)}`",
                 "",

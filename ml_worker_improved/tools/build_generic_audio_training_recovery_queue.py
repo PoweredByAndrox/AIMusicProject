@@ -421,6 +421,10 @@ def decision_template_row(row: dict[str, Any]) -> dict[str, Any]:
         "recovery_priority": row["recovery_priority"],
         "blockers": row["blockers"],
         "recommended_actions": row["recommended_actions"],
+        "source_blocker_labels": [str(label) for label in row.get("source_blocker_labels") or [] if str(label)],
+        "source_issue_labels": [str(label) for label in row.get("source_issue_labels") or [] if str(label)],
+        "corrective_action_labels": [str(action) for action in row.get("corrective_action_labels") or [] if str(action)],
+        "corrective_target_lanes": [str(lane) for lane in row.get("corrective_target_lanes") or [] if str(lane)],
     }
 
 
@@ -668,6 +672,12 @@ def annotate_full_pack_rows(rows: Sequence[dict[str, Any]], action_rows: Sequenc
         row["full_pack_required_next_actions"] = [
             str(action_name) for action_name in action.get("required_next_actions") or [] if str(action_name)
         ]
+        row["source_blocker_labels"] = [str(label) for label in action.get("source_blocker_labels") or [] if str(label)]
+        row["source_issue_labels"] = [str(label) for label in action.get("source_issue_labels") or [] if str(label)]
+        row["corrective_action_labels"] = [
+            str(action_name) for action_name in action.get("corrective_action_labels") or [] if str(action_name)
+        ]
+        row["corrective_target_lanes"] = [str(lane) for lane in action.get("corrective_target_lanes") or [] if str(lane)]
         row["full_pack_unique_track_count"] = action.get("unique_track_count")
         row["full_pack_min_unique_tracks"] = action.get("min_unique_tracks")
         candidate_stems.append(stem_type)
@@ -709,6 +719,12 @@ def full_pack_missing_candidate_row(
         "full_pack_required_next_actions": [
             str(action_name) for action_name in action.get("required_next_actions") or [] if str(action_name)
         ],
+        "source_blocker_labels": [str(label) for label in action.get("source_blocker_labels") or [] if str(label)],
+        "source_issue_labels": [str(label) for label in action.get("source_issue_labels") or [] if str(label)],
+        "corrective_action_labels": [
+            str(action_name) for action_name in action.get("corrective_action_labels") or [] if str(action_name)
+        ],
+        "corrective_target_lanes": [str(lane) for lane in action.get("corrective_target_lanes") or [] if str(lane)],
         "full_pack_unique_track_count": action.get("unique_track_count"),
         "full_pack_min_unique_tracks": action.get("min_unique_tracks"),
         "full_pack_source_audio_path": str(action.get("source_audio_path") or ""),

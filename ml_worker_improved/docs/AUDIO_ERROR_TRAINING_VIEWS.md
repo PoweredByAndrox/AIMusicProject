@@ -75,6 +75,26 @@ rows preserve structured source provenance in addition to
 - `hardcase`
 - `hardcase_holdout`
 
+Blocked runtime rows also carry corrective metadata so the next loop can fix
+the failure instead of only counting it:
+
+- `issue_labels`
+- `corrective_action_labels`
+- `corrective_target_lanes`
+- `corrective_status`
+- `unmapped_blocker_labels`
+
+For example, `severe_vocal_bleed_in_minus` maps to
+`issue_labels=["vocal_bleed_in_minus"]`,
+`corrective_action_labels=["reduce_vocal_bleed_in_minus",
+"try_stronger_dedicated_minus_route"]`, and
+`corrective_target_lanes=["minus_model", "minus_router"]`.
+`minus_detail_gate_blocked` maps to detail-preservation actions, while
+`phase_stereo_stability_below_detail_gate` maps to phase/stereo repair or
+route rejection. These fields are action targets for the repair/training loop;
+they do not relax labels, start training, or make a diagnostic candidate
+deliverable.
+
 Runtime judge rows may be self-contained. If `candidate_pool.jsonl` contains a
 matching `(track_id, candidate_id)` row, its candidate metadata is preferred.
 Otherwise the builder imports paths, route aliases such as `minus_route_id`, and

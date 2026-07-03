@@ -525,6 +525,22 @@ def test_runtime_run_roots_add_strict_window_view_rows(tmp_path: Path) -> None:
     assert all(row["candidate_family"] == "runtime_candidate" for row in safe_rows)
     assert [row["hardcase"] for row in safe_rows] == [False, True]
     assert all(row["hardcase_holdout"] is False for row in safe_rows)
+    assert safe_rows[0]["corrective_status"] == "not_required"
+    assert safe_rows[0]["corrective_action_labels"] == []
+    assert safe_rows[1]["issue_labels"] == ["vocal_bleed_in_minus"]
+    assert safe_rows[1]["corrective_action_labels"] == [
+        "reduce_vocal_bleed_in_minus",
+        "try_stronger_dedicated_minus_route",
+    ]
+    assert safe_rows[1]["corrective_target_lanes"] == ["minus_model", "minus_router"]
+    assert safe_rows[1]["corrective_status"] == "actionable_hardcase"
+    minus_summary = manifest["views"]["minus_critic"]
+    assert minus_summary["actionable_hardcase_rows"] == 1
+    assert minus_summary["issue_counts"] == {"vocal_bleed_in_minus": 1}
+    assert minus_summary["corrective_action_counts"] == {
+        "reduce_vocal_bleed_in_minus": 1,
+        "try_stronger_dedicated_minus_route": 1,
+    }
 
 
 def test_repaired_rows_preserve_source_run_without_runtime_flag(tmp_path: Path) -> None:
@@ -598,7 +614,7 @@ def test_runtime_run_roots_import_no_reference_scores_as_acoustic_evidence(tmp_p
                             "start_sec": 1.0,
                             "duration_sec": 1.0,
                             "minus_decision": "blocked_hard_case",
-                            "minus_blockers": ["minus_detail_gate_blocked"],
+                            "minus_blockers": ["minus_detail_gate_blocked", "phase_stereo_stability_below_detail_gate"],
                         },
                         accepted=False,
                     ),
@@ -620,6 +636,14 @@ def test_runtime_run_roots_import_no_reference_scores_as_acoustic_evidence(tmp_p
     assert all(row["feature_values"]["acoustic_feature_evidence_present"] == 1.0 for row in safe_rows)
     assert safe_rows[0]["feature_values"]["mixture_consistency_error"] > 0.0
     assert safe_rows[1]["feature_values"]["phase_collapse_score"] > 0.0
+    assert safe_rows[1]["issue_labels"] == ["minus_detail_loss", "phase_stereo_damage"]
+    assert safe_rows[1]["corrective_action_labels"] == [
+        "preserve_minus_instrumental_detail",
+        "reject_detail_damaging_minus_route",
+        "repair_phase_stereo_stability",
+        "reject_phase_damaging_route",
+    ]
+    assert safe_rows[1]["corrective_target_lanes"] == ["minus_model", "minus_detail_guard", "pair_router"]
     assert "missing_acoustic_feature_evidence" not in ";".join(row["unsafe_reason_for_this_view"] for row in minus_rows)
 
 

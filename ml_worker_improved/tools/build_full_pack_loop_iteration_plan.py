@@ -197,6 +197,10 @@ def stem_training_row(queue_item: dict[str, Any], jobs: Sequence[dict[str, Any]]
         "stem_type": stem,
         "route_intent": str(queue_item.get("route_intent") or ""),
         "issue_tags": [str(tag) for tag in queue_item.get("issue_tags") or [] if str(tag)],
+        "source_blocker_labels": [str(label) for label in queue_item.get("source_blocker_labels") or [] if str(label)],
+        "source_issue_labels": [str(label) for label in queue_item.get("source_issue_labels") or [] if str(label)],
+        "corrective_action_labels": [str(action) for action in queue_item.get("corrective_action_labels") or [] if str(action)],
+        "corrective_target_lanes": [str(lane) for lane in queue_item.get("corrective_target_lanes") or [] if str(lane)],
         "source_audio_path": str(queue_item.get("audio_path") or ""),
         "training_job_statuses": training_job_statuses(jobs),
         "required_next_actions": [],
@@ -237,6 +241,8 @@ def stem_training_row(queue_item: dict[str, Any], jobs: Sequence[dict[str, Any]]
 def minus_repair_row(queue_item: dict[str, Any], jobs: Sequence[dict[str, Any]]) -> dict[str, Any]:
     training_status = blocked_status_from_jobs(jobs)
     actions = ["run_minus_repair_route", "minus_audit_gate", "verified_reference_corpus_expand", "train_ready_decision_gate", "full_pack_gate_rebuild"]
+    queue_required_actions = [str(action) for action in queue_item.get("required_actions") or [] if str(action)]
+    corrective_actions = [str(action) for action in queue_item.get("corrective_action_labels") or [] if str(action)]
     unique_counts = [job.get("unique_track_count") for job in jobs if job.get("unique_track_count") is not None]
     min_counts = [job.get("min_unique_tracks") for job in jobs if job.get("min_unique_tracks") is not None]
     status = "blocked_minus_repair_and_training_coverage"
@@ -248,12 +254,16 @@ def minus_repair_row(queue_item: dict[str, Any], jobs: Sequence[dict[str, Any]])
         "stem_type": normalize_stem(queue_item.get("stem_type")),
         "route_intent": str(queue_item.get("route_intent") or ""),
         "issue_tags": [str(tag) for tag in queue_item.get("issue_tags") or [] if str(tag)],
+        "source_blocker_labels": [str(label) for label in queue_item.get("source_blocker_labels") or [] if str(label)],
+        "source_issue_labels": [str(label) for label in queue_item.get("source_issue_labels") or [] if str(label)],
+        "corrective_action_labels": corrective_actions,
+        "corrective_target_lanes": [str(lane) for lane in queue_item.get("corrective_target_lanes") or [] if str(lane)],
         "source_audio_path": str(queue_item.get("audio_path") or ""),
         "action_status": status,
         "training_job_statuses": training_job_statuses(jobs),
         "unique_track_count": min(unique_counts) if unique_counts else None,
         "min_unique_tracks": max(min_counts) if min_counts else None,
-        "required_next_actions": actions,
+        "required_next_actions": stable_unique([*actions, *queue_required_actions, *corrective_actions]),
         "docker_commands": [],
         "expected_acceleration_mode": "gpu_inference_then_gpu_training",
         "execution_started": False,

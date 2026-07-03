@@ -38,7 +38,17 @@ BLOCKED_TRUE_FLAGS = (
     "cleanup_routes_added",
 )
 
-MINUS_ISSUES = {"muffled_minus", "residual_vocal_middle", "residual_vocal", "vocal_bleed", "severe_vocal_bleed_in_minus"}
+MINUS_ISSUES = {
+    "muffled_minus",
+    "residual_vocal_middle",
+    "residual_vocal",
+    "vocal_bleed",
+    "severe_vocal_bleed_in_minus",
+    "vocal_bleed_in_minus",
+    "minus_detail_loss",
+    "phase_stereo_damage",
+    "mixture_reconstruction_error",
+}
 VOCAL_ISSUES = {"bad_vocal_quality", "vocal_artifact", "vocal_missing_detail", "vocal_bleed"}
 TRAINING_ISSUES = {
     "insufficient_unique_tracks",
@@ -213,6 +223,8 @@ def build_row(index: int, item: dict[str, Any]) -> dict[str, Any]:
     audio_path = canonical_audio_path(item.get("audio_path"))
     intent = route_intent(item)
     issue_tags = [str(tag) for tag in item.get("issue_tags") or [] if str(tag)]
+    corrective_actions = [str(action) for action in item.get("corrective_action_labels") or [] if str(action)]
+    required = stable_unique(required_actions(intent, issue_tags) + corrective_actions)
     return {
         "schema": "short_listen_repair_queue_item.v1",
         "queue_item_id": indexed_alias("q", index),
@@ -222,9 +234,13 @@ def build_row(index: int, item: dict[str, Any]) -> dict[str, Any]:
         "track_alias": str(item.get("track_alias") or ""),
         "verdict": str(item.get("verdict") or ""),
         "issue_tags": issue_tags,
+        "source_blocker_labels": [str(label) for label in item.get("source_blocker_labels") or [] if str(label)],
+        "source_issue_labels": [str(label) for label in item.get("source_issue_labels") or [] if str(label)],
+        "corrective_action_labels": corrective_actions,
+        "corrective_target_lanes": [str(lane) for lane in item.get("corrective_target_lanes") or [] if str(lane)],
         "note": str(item.get("note") or ""),
         "route_intent": intent,
-        "required_actions": required_actions(intent, issue_tags),
+        "required_actions": required,
         "priority": "high" if item.get("verdict") == "machine_blocked" or "user_reported_unacceptable" in issue_tags else "normal",
         "source_manifest": str(item.get("source_manifest") or ""),
         "source_audio_path": str(item.get("source_audio_path") or ""),
@@ -319,6 +335,55 @@ def audit_warning_items(minus_audit_json: Path) -> tuple[dict[str, Any], list[di
             }
         )
     return audit, items, stable_unique(failed)
+
+
+def training_view_items(training_view_jsonl: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    failed: list[str] = []
+    if not training_view_jsonl.exists():
+        return {}, [], ["training_view_jsonl_missing"]
+    rows = read_jsonl(training_view_jsonl)
+    items: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        if row.get("safe_for_this_view") is not True:
+            continue
+        if row.get("label") != 0:
+            continue
+        if str(row.get("view_name") or "") != "minus_critic" or str(row.get("target_name") or "") != "minus":
+            continue
+        blockers = [str(label) for label in row.get("blocker_labels") or [] if str(label)]
+        issue_labels = [str(label) for label in row.get("issue_labels") or [] if str(label)]
+        corrective_actions = [str(action) for action in row.get("corrective_action_labels") or [] if str(action)]
+        corrective_lanes = [str(lane) for lane in row.get("corrective_target_lanes") or [] if str(lane)]
+        if not blockers or not corrective_actions:
+            continue
+        items.append(
+            {
+                "schema": "short_listen_feedback_item.v1",
+                "audio_path": f"audio/trv/{indexed_alias('q', index)}/minus.flac",
+                "verdict": "machine_blocked",
+                "issue_tags": stable_unique([*issue_labels, *blockers]),
+                "source_blocker_labels": blockers,
+                "source_issue_labels": issue_labels,
+                "corrective_action_labels": corrective_actions,
+                "corrective_target_lanes": corrective_lanes,
+                "note": "Machine training-view hardcase blocker; not a human rejection.",
+                "source_alias": "tview",
+                "stem_type": "minus",
+                "track_alias": str(row.get("track_id") or ""),
+                "source_manifest": str(training_view_jsonl),
+                "source_audio_path": str(row.get("candidate_audio_path") or ""),
+                "source_row": row,
+                "release_ready": False,
+                "can_publish_as_result": False,
+            }
+        )
+    if not items:
+        failed.append("no_training_view_actionable_minus_items")
+    return {
+        "schema": "training_view_queue_source.v1",
+        "training_view_jsonl": str(training_view_jsonl),
+        "rows_scanned": len(rows),
+    }, items, stable_unique(failed)
 
 
 def normalize_stem(value: Any) -> str:
@@ -539,6 +604,7 @@ def build_short_listen_repair_queue(
     feedback_manifest_json: Path | None = None,
     minus_audit_json: Path | None = None,
     machine_gate_json: Path | None = None,
+    training_view_jsonl: Path | None = None,
     output_dir: Path,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -552,15 +618,20 @@ def build_short_listen_repair_queue(
         feedback_manifest_json=str(feedback_manifest_json or ""),
         minus_audit_json=str(minus_audit_json or ""),
         machine_gate_json=str(machine_gate_json or ""),
+        training_view_jsonl=str(training_view_jsonl or ""),
     )
 
     failed: list[str] = []
     feedback: dict[str, Any] = {}
     queue_source = "human_feedback"
     source_items: list[dict[str, Any]] = []
-    source_count = sum(1 for path in (feedback_manifest_json, minus_audit_json, machine_gate_json) if path)
+    source_count = sum(1 for path in (feedback_manifest_json, minus_audit_json, machine_gate_json, training_view_jsonl) if path)
     if source_count > 1:
         failed.append("multiple_queue_sources")
+    elif training_view_jsonl:
+        queue_source = "training_view_hardcase"
+        feedback, source_items, view_failed = training_view_items(training_view_jsonl)
+        failed.extend(view_failed)
     elif machine_gate_json:
         queue_source = "machine_full_pack_gate"
         gate, source_items, gate_failed = machine_gate_items(machine_gate_json)
@@ -631,7 +702,7 @@ def build_short_listen_repair_queue(
             "ready_for_machine_warning_cycle"
             if queue_source == "minus_audit_warning"
             else "ready_for_full_pack_loop"
-            if queue_source == "machine_full_pack_gate"
+            if queue_source in {"machine_full_pack_gate", "training_view_hardcase"}
             else "ready_for_repair_cycle"
         )
         if accepted
@@ -640,6 +711,7 @@ def build_short_listen_repair_queue(
         "feedback_manifest_json": str(feedback_manifest_json or ""),
         "minus_audit_json": str(minus_audit_json or ""),
         "machine_gate_json": str(machine_gate_json or ""),
+        "training_view_jsonl": str(training_view_jsonl or ""),
         "pack_id": str(feedback.get("pack_id") or ""),
         "pack_manifest_json": str(feedback.get("pack_manifest_json") or ""),
         "review_coverage_status": str(feedback.get("review_coverage_status") or "unknown"),
@@ -681,6 +753,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feedback-manifest-json", type=Path)
     parser.add_argument("--minus-audit-json", type=Path)
     parser.add_argument("--machine-gate-json", type=Path)
+    parser.add_argument("--training-view-jsonl", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args(argv)
 
@@ -695,6 +768,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         feedback_manifest_json=args.feedback_manifest_json,
         minus_audit_json=args.minus_audit_json,
         machine_gate_json=args.machine_gate_json,
+        training_view_jsonl=args.training_view_jsonl,
         output_dir=args.output_dir,
         command_args=list(argv if argv is not None else sys.argv[1:]),
     )
