@@ -46,6 +46,54 @@ VENDOR_CPU_FALLBACK_MARKERS = (
     "cpu inference",
 )
 INSTRUMENTAL_MINUS_NAMING_CONTRACT = "source_manifest_uses_instrumental_stem; judge_rows_use_minus_product_role"
+VENDOR_ORIGINAL_DEVICE_BLOCK = """    if torch.cuda.is_available():
+        if type(args.device_ids) == int:
+            device = torch.device(f'cuda:{args.device_ids}')
+            model = model.to(device)
+        else:
+            device = torch.device(f'cuda:{args.device_ids[0]}')
+            model = nn.DataParallel(model, device_ids=args.device_ids).to(device)
+    else:
+        device = 'cpu'
+        print('CUDA is not available. Run inference on CPU. It will be very slow...')
+        model = model.to(device)
+"""
+VENDOR_CONFIGURE_DEVICE_CALL = "    device, model = configure_inference_device(model, args.device_ids)\n"
+VENDOR_MPS_DEVICE_HELPER = """
+
+def configure_inference_device(model, device_ids):
+    if torch.cuda.is_available():
+        if type(device_ids) == int:
+            device = torch.device(f'cuda:{device_ids}')
+            return device, model.to(device)
+        device = torch.device(f'cuda:{device_ids[0]}')
+        return device, nn.DataParallel(model, device_ids=device_ids).to(device)
+
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        device = torch.device('mps')
+        print('CUDA is not available. Run inference on MPS.')
+        return device, model.to(device)
+
+    device = 'cpu'
+    print('CUDA is not available. Run inference on CPU. It will be very slow...')
+    return device, model.to(device)
+"""
+VENDOR_ORIGINAL_SCATTER_LINE = (
+    "        masks_summed = torch.zeros_like(stft_repr_expanded_stems).scatter_add_(2, scatter_indices, masks)\n"
+)
+VENDOR_MPS_SCATTER_LINE = (
+    "        masks_summed = scatter_add_complex_mps_safe(stft_repr_expanded_stems, 2, scatter_indices, masks)\n"
+)
+VENDOR_COMPLEX_SCATTER_HELPER = """
+
+def scatter_add_complex_mps_safe(target, dim, index, src):
+    if src.is_complex() and src.device.type == 'mps':
+        real = torch.zeros_like(target.real).scatter_add_(dim, index, src.real)
+        imag = torch.zeros_like(target.imag).scatter_add_(dim, index, src.imag)
+        return torch.complex(real, imag)
+    return torch.zeros_like(target).scatter_add_(dim, index, src)
+"""
 
 
 def _emit(message: str) -> None:
@@ -57,6 +105,75 @@ def _native_macos_diagnostic_allowed() -> bool:
         os.environ.get("AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC") == "1"
         and platform.system() == "Darwin"
     )
+
+
+def _patch_text_file(path: Path, source: str, patch_id: str) -> dict[str, Any]:
+    path.write_text(source, encoding="utf-8")
+    return {
+        "patch_id": patch_id,
+        "file": str(path),
+        "status": "applied",
+        "sha256": _sha256_file(path),
+    }
+
+
+def patch_vendor_inference_for_mps(repo_path: Path) -> dict[str, Any]:
+    path = repo_path / "inference.py"
+    source = path.read_text(encoding="utf-8")
+    changed = False
+    if "def configure_inference_device" not in source:
+        marker = 'warnings.filterwarnings("ignore")\n'
+        if marker not in source:
+            raise RuntimeError("MelBand vendor inference.py missing warnings marker for MPS device patch")
+        source = source.replace(marker, marker + VENDOR_MPS_DEVICE_HELPER, 1)
+        changed = True
+    if VENDOR_CONFIGURE_DEVICE_CALL not in source:
+        if VENDOR_ORIGINAL_DEVICE_BLOCK not in source:
+            raise RuntimeError("MelBand vendor inference.py missing expected CUDA/CPU device block for MPS patch")
+        source = source.replace(VENDOR_ORIGINAL_DEVICE_BLOCK, VENDOR_CONFIGURE_DEVICE_CALL, 1)
+        changed = True
+    if not changed:
+        return {
+            "patch_id": "melband_vendor_mps_device",
+            "file": str(path),
+            "status": "already_present",
+            "sha256": _sha256_file(path),
+        }
+    return _patch_text_file(path, source, "melband_vendor_mps_device")
+
+
+def patch_vendor_complex_scatter_for_mps(repo_path: Path) -> dict[str, Any]:
+    path = repo_path / "models" / "mel_band_roformer" / "mel_band_roformer.py"
+    source = path.read_text(encoding="utf-8")
+    changed = False
+    if "def scatter_add_complex_mps_safe" not in source:
+        marker = "def exists(val):\n    return val is not None\n"
+        if marker not in source:
+            raise RuntimeError("MelBand RoFormer model missing exists() marker for MPS complex scatter patch")
+        source = source.replace(marker, marker + VENDOR_COMPLEX_SCATTER_HELPER, 1)
+        changed = True
+    if VENDOR_MPS_SCATTER_LINE not in source:
+        if VENDOR_ORIGINAL_SCATTER_LINE not in source:
+            raise RuntimeError("MelBand RoFormer model missing expected complex scatter_add line for MPS patch")
+        source = source.replace(VENDOR_ORIGINAL_SCATTER_LINE, VENDOR_MPS_SCATTER_LINE, 1)
+        changed = True
+    if not changed:
+        return {
+            "patch_id": "melband_vendor_mps_complex_scatter",
+            "file": str(path),
+            "status": "already_present",
+            "sha256": _sha256_file(path),
+        }
+    return _patch_text_file(path, source, "melband_vendor_mps_complex_scatter")
+
+
+def apply_vendor_mps_runtime_patches(repo_path: Path, preflight: dict[str, Any]) -> list[dict[str, Any]]:
+    if preflight.get("acceleration_mode") != "native_macos_mps_diagnostic":
+        return []
+    return [
+        patch_vendor_inference_for_mps(repo_path),
+        patch_vendor_complex_scatter_for_mps(repo_path),
+    ]
 
 
 def verify_cuda_inference_device(device_id: int) -> dict[str, Any]:
@@ -290,9 +407,11 @@ def build_full_track_stem_manifest(
     inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
     minus_product_flac_path: Path | None = None,
+    runtime_patches: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stem_provenance = stem_provenance or {}
     inference_runtime = inference_runtime or {}
+    runtime_patches = runtime_patches or []
     fallback_used = bool(inference_runtime.get("vendor_cpu_fallback_detected"))
     delivery_blocking_runtime = bool(inference_runtime.get("delivery_blocking"))
     target_stem = choose_primary_stem(primary_stem=primary_stem, stem_provenance=stem_provenance)
@@ -320,7 +439,7 @@ def build_full_track_stem_manifest(
         "schema_version": 1,
         "source_audio_path": str(source_audio_path),
         "model_id": model_id,
-        "model_name": model_id,
+        "model_name": model_display_name,
         "target_stem": target_stem,
         "target_product_stem": target_product_stem,
         "target_audio_path": str(target_audio_path),
@@ -349,7 +468,11 @@ def build_full_track_stem_manifest(
         },
         "execution_contract": {
             "docker_runtime_required": True,
-            "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
+            "expected_acceleration_mode": (
+                inference_runtime.get("expected_acceleration_mode")
+                or (cuda_preflight or {}).get("acceleration_mode")
+                or "gpu_inference_then_cpu_dsp_scoring"
+            ),
             "gpu_inference_required": True,
             "gpu_inference_skipped": bool(inference_runtime.get("gpu_inference_skipped")),
             "actual_acceleration_mode": inference_runtime.get(
@@ -358,6 +481,8 @@ def build_full_track_stem_manifest(
             ),
             "cuda_preflight": dict(cuda_preflight or {}),
             "inference_runtime": dict(inference_runtime),
+            "vendor_runtime_patches": runtime_patches,
+            "vendor_runtime_patches_applied": bool(runtime_patches),
         },
         "stems": stem_manifest_stems(
             target_stem=target_stem,
@@ -418,6 +543,7 @@ def write_full_track_stem_manifest(
     inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
     minus_product_flac_path: Path | None = None,
+    runtime_patches: list[dict[str, Any]] | None = None,
 ) -> Path:
     manifest = build_full_track_stem_manifest(
         source_audio_path=source_audio_path,
@@ -442,6 +568,7 @@ def write_full_track_stem_manifest(
         inference_runtime=inference_runtime,
         primary_stem=primary_stem,
         minus_product_flac_path=minus_product_flac_path,
+        runtime_patches=runtime_patches,
     )
     manifest_path = output_dir / "stem_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -746,6 +873,15 @@ def main() -> None:
         f"device_count={cuda_preflight['device_count']} "
         f"device_name={cuda_preflight['device_name']}"
     )
+    runtime_patches = apply_vendor_mps_runtime_patches(repo_path, cuda_preflight)
+    for runtime_patch in runtime_patches:
+        _emit(
+            "vendor_runtime_patch "
+            f"patch_id={runtime_patch['patch_id']} "
+            f"status={runtime_patch['status']} "
+            f"file={runtime_patch['file']} "
+            f"sha256={runtime_patch['sha256']}"
+        )
 
     start_wall = time.time()
     with tempfile.TemporaryDirectory(prefix="melband_full_input_") as input_dir_str, tempfile.TemporaryDirectory(
@@ -789,12 +925,14 @@ def main() -> None:
             cwd=str(repo_path),
             capture_output=True,
             text=True,
-            check=True,
+            check=False,
         )
         if completed.stdout.strip():
             print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n", flush=True)
         if completed.stderr.strip():
             print(completed.stderr, end="" if completed.stderr.endswith("\n") else "\n", flush=True)
+        if completed.returncode != 0:
+            raise RuntimeError(f"MelBand vendor inference failed with returncode={completed.returncode}")
         inference_runtime = inspect_vendor_inference_runtime(
             stdout=completed.stdout or "",
             stderr=completed.stderr or "",
@@ -941,6 +1079,7 @@ def main() -> None:
             inference_runtime=inference_runtime,
             primary_stem=target_stem,
             minus_product_flac_path=minus_product_flac_path,
+            runtime_patches=runtime_patches,
         )
 
         if listen_dir is not None:

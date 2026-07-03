@@ -63,12 +63,14 @@ def test_full_track_manifest_is_quality_gate_compatible(tmp_path: Path) -> None:
         frames=441000,
         elapsed_sec=12.345,
         postprocess={"name": None},
+        model_display_name="MelBand RoFormer vocal checkpoint",
     )
 
     assert "preview_window_sec" not in manifest
     assert manifest["schema_version"] == 1
     assert manifest["model_id"] == "melband_roformer_vocals"
-    assert manifest["model_name"] == "melband_roformer_vocals"
+    assert manifest["model_name"] == "MelBand RoFormer vocal checkpoint"
+    assert manifest["model"]["name"] == "MelBand RoFormer vocal checkpoint"
     assert manifest["contract"]["full_track"] is True
     assert manifest["contract"]["benchmark_compatible"] is True
     assert manifest["contract"]["fallback_used"] is False
@@ -119,6 +121,50 @@ def test_manifest_records_cuda_preflight_for_gpu_inference(tmp_path: Path) -> No
     assert manifest["execution_contract"]["gpu_inference_required"] is True
     assert manifest["execution_contract"]["gpu_inference_skipped"] is False
     assert manifest["execution_contract"]["cuda_preflight"]["device_name"] == "Unit Test GPU"
+
+
+def test_manifest_records_vendor_runtime_patches(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    vocals_path = output_dir / "vocals.flac"
+    instrumental_path = output_dir / "instrumental.flac"
+    raw_ref_path = output_dir / "raw_ref.flac"
+    output_dir.mkdir()
+    for path in (source_audio_path, vocals_path, instrumental_path, raw_ref_path):
+        _write_tiny_flac(path)
+
+    manifest = module.build_full_track_stem_manifest(
+        source_audio_path=source_audio_path,
+        vocals_flac_path=vocals_path,
+        instrumental_flac_path=instrumental_path,
+        raw_ref_flac_path=raw_ref_path,
+        repo_path=Path("/repo"),
+        model_path=Path("/model.ckpt"),
+        config_template_path=Path("/config.yaml"),
+        runtime_config_path=Path("/runtime.yaml"),
+        device_id=0,
+        num_overlap=2,
+        sample_rate=44100,
+        frames=44100,
+        elapsed_sec=1.0,
+        postprocess={"name": None},
+        cuda_preflight={"acceleration_mode": "native_macos_mps_diagnostic"},
+        runtime_patches=[
+            {
+                "patch_id": "melband_vendor_mps_complex_scatter",
+                "file": "/repo/models/mel_band_roformer/mel_band_roformer.py",
+                "status": "applied",
+                "sha256": "abc",
+            }
+        ],
+    )
+
+    assert manifest["execution_contract"]["vendor_runtime_patches_applied"] is True
+    assert manifest["execution_contract"]["expected_acceleration_mode"] == "native_macos_mps_diagnostic"
+    assert manifest["execution_contract"]["vendor_runtime_patches"][0]["patch_id"] == (
+        "melband_vendor_mps_complex_scatter"
+    )
 
 
 def test_verify_cuda_inference_device_rejects_unavailable_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,6 +264,82 @@ def test_vendor_cpu_fallback_blocks_manifest_delivery(tmp_path: Path) -> None:
     assert manifest["execution_contract"]["actual_acceleration_mode"] == "cpu_inference_fallback"
     assert manifest["delivery_allowed"] is False
     assert manifest["delivery_status"] == "blocked_runtime_contract"
+
+
+def test_vendor_mps_runtime_patch_skips_cuda_preflight(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+
+    assert module.apply_vendor_mps_runtime_patches(
+        tmp_path / "missing_vendor",
+        {"acceleration_mode": "cuda_gpu_inference"},
+    ) == []
+
+
+def test_vendor_mps_runtime_patch_materializes_device_and_complex_scatter(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    repo_path = tmp_path / "vendor"
+    model_path = repo_path / "models" / "mel_band_roformer" / "mel_band_roformer.py"
+    model_path.parent.mkdir(parents=True)
+    inference_path = repo_path / "inference.py"
+    inference_path.write_text(
+        "\n".join(
+            [
+                "import torch",
+                "import torch.nn as nn",
+                "import warnings",
+                "warnings.filterwarnings(\"ignore\")",
+                "",
+                "def proc_folder(args):",
+                "    model = object()",
+                module.VENDOR_ORIGINAL_DEVICE_BLOCK.rstrip("\n"),
+                "    run_folder(model, args, config, device, verbose=False)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    model_path.write_text(
+        "\n".join(
+            [
+                "import torch",
+                "",
+                "def exists(val):",
+                "    return val is not None",
+                "",
+                "def forward():",
+                module.VENDOR_ORIGINAL_SCATTER_LINE.rstrip("\n"),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    patches = module.apply_vendor_mps_runtime_patches(
+        repo_path,
+        {"acceleration_mode": "native_macos_mps_diagnostic"},
+    )
+
+    assert [patch["patch_id"] for patch in patches] == [
+        "melband_vendor_mps_device",
+        "melband_vendor_mps_complex_scatter",
+    ]
+    assert [patch["status"] for patch in patches] == ["applied", "applied"]
+    inference_source = inference_path.read_text(encoding="utf-8")
+    model_source = model_path.read_text(encoding="utf-8")
+    assert "def configure_inference_device" in inference_source
+    assert "torch.device('mps')" in inference_source
+    assert "Run inference on MPS" in inference_source
+    assert module.VENDOR_CONFIGURE_DEVICE_CALL.strip() in inference_source
+    assert "def scatter_add_complex_mps_safe" in model_source
+    assert "src.device.type == 'mps'" in model_source
+    assert "torch.complex(real, imag)" in model_source
+    assert module.VENDOR_MPS_SCATTER_LINE.strip() in model_source
+
+    repeat_patches = module.apply_vendor_mps_runtime_patches(
+        repo_path,
+        {"acceleration_mode": "native_macos_mps_diagnostic"},
+    )
+    assert [patch["status"] for patch in repeat_patches] == ["already_present", "already_present"]
 
 
 def test_melband_preflight_accepts_explicit_native_macos_mps(monkeypatch: pytest.MonkeyPatch) -> None:
