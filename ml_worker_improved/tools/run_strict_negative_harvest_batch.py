@@ -272,6 +272,8 @@ def runtime_command(
         "true" if enable_audio_preview_render else "false",
         "--require-preview-audio-for-preview-ready",
         "true" if require_preview_audio_for_preview_ready else "false",
+        "--stop-after-windowed-judges",
+        "true",
     ]
 
 

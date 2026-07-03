@@ -179,6 +179,71 @@ def test_autonomous_controller_runs_full_mocked_pipeline_from_one_command(tmp_pa
     assert "- recommendation_index_updated: false" in runtime_summary
 
 
+def test_stop_after_windowed_judges_skips_missing_learned_critic_bundle(tmp_path: Path) -> None:
+    output_dir = tmp_path / "run"
+    missing_model_dir = tmp_path / "missing_models"
+    vocal = sine(440, 2.0)
+    minus = sine(120, 2.0)
+    mix = vocal + minus
+    mix_path = write_wav(tmp_path / "audio" / "song.wav", mix)
+    vocal_path = write_wav(tmp_path / "audio" / "cand" / "vocal.wav", vocal)
+    minus_path = write_wav(tmp_path / "audio" / "cand" / "minus.wav", minus)
+    write_jsonl(
+        output_dir / "candidate_pool.jsonl",
+        [
+            {
+                "track_id": "song-001",
+                "candidate_id": "candidate-a",
+                "mix_path": mix_path,
+                "vocal_path": vocal_path,
+                "instrumental_path": minus_path,
+                "minus_path": minus_path,
+                "is_complete_pair": True,
+            }
+        ],
+    )
+
+    exit_code = main(
+        [
+            "--input-audio",
+            mix_path,
+            "--output-dir",
+            str(output_dir),
+            "--model-dir",
+            str(missing_model_dir),
+            "--profile",
+            "safe",
+            "--generate-candidates",
+            "false",
+            "--window-seconds",
+            "0.5",
+            "--max-windows-per-candidate",
+            "1",
+            "--stop-after-windowed-judges",
+            "true",
+        ]
+    )
+
+    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    learned_rows = (output_dir / "learned_critic_scores.jsonl").read_text(encoding="utf-8")
+    minus_rows = (output_dir / "minus_windowed_judge.jsonl").read_text(encoding="utf-8")
+
+    assert exit_code == 0
+    assert manifest["output_status"] == "needs_pair_reconciliation"
+    assert manifest["failure_reason"] == "learned_critic_skipped_for_windowed_judge_harvest"
+    assert manifest["stop_after_windowed_judges"] is True
+    assert manifest["release_ready"] is False
+    assert manifest["selected_vocal_candidate"] == ""
+    assert manifest["selected_minus_candidate"] == ""
+    assert learned_rows == ""
+    assert "candidate-a" in minus_rows
+    assert any(
+        stage["stage"] == "run_learned_critic_shadow_hybrid_scoring"
+        and stage["status"] == "skipped_harvest_only"
+        for stage in manifest["stages"]
+    )
+
+
 def test_learned_accept_cannot_bypass_script_blocker() -> None:
     rows = [
         {

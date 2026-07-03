@@ -40,6 +40,7 @@ def test_negative_harvest_batch_plans_runtime_jobs_without_training(tmp_path: Pa
     assert rows[0]["candidate_artifact_requirements"]["route_id"] is True
     assert "--enable-conditional-hard-case-routes" in rows[0]["command"]
     assert "--require-preview-audio-for-preview-ready" in rows[0]["command"]
+    assert "--stop-after-windowed-judges" in rows[0]["command"]
 
 
 def test_negative_harvest_batch_writes_no_release_ready_when_input_empty(tmp_path: Path) -> None:

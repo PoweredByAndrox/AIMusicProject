@@ -681,6 +681,7 @@ def run_pipeline(
     preview_start_sec: float | None = None,
     preview_render_mode: str = "bounded",
     require_preview_audio_for_preview_ready: bool = True,
+    stop_after_windowed_judges: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     ensure_output_files(output_dir)
@@ -865,6 +866,26 @@ def run_pipeline(
     optimizer_result = optimize_tracks_mode_specific(vocal_judge["rows"], minus_judge["rows"])
     write_jsonl(output_dir / "optimizer_mode_specific_result.jsonl", optimizer_result["rows"])
     stages.append(stage("run_optimizer", "completed", rows=len(optimizer_result["rows"])))
+
+    if stop_after_windowed_judges:
+        reason = "learned_critic_skipped_for_windowed_judge_harvest"
+        stages.append(stage("run_learned_critic_shadow_hybrid_scoring", "skipped_harvest_only", reason=reason))
+        return build_failure_manifest(
+            output_dir=output_dir,
+            input_audio=input_audio,
+            output_status="needs_pair_reconciliation",
+            reason=reason,
+            stages=stages,
+            model_info=model_info,
+            candidate_wave_executed=candidate_wave_executed,
+            candidate_wave_summary=candidate_wave_summary,
+            candidate_pool_jsonl=candidate_source,
+            candidate_execution_mode=candidate_execution_mode,
+            profile=profile,
+            allow_shape_normalization=allow_shape_normalization,
+            candidate_diversity_profile=candidate_diversity_profile,
+            escalation={**escalation, **minus_hard_case, "stop_after_windowed_judges": True},
+        )
 
     shadow_result = build_shadow_rerank(
         candidate_pool_rows=candidate_rows,
@@ -1352,6 +1373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--preview-start-sec", type=float)
     parser.add_argument("--preview-render-mode", choices=("bounded", "full"), default="bounded")
     parser.add_argument("--require-preview-audio-for-preview-ready", type=parse_bool, default=True)
+    parser.add_argument("--stop-after-windowed-judges", type=parse_bool, default=False)
     args = parser.parse_args(argv)
     manifest = run_pipeline(
         input_audio=args.input_audio,
@@ -1384,6 +1406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         preview_start_sec=args.preview_start_sec,
         preview_render_mode=args.preview_render_mode,
         require_preview_audio_for_preview_ready=args.require_preview_audio_for_preview_ready,
+        stop_after_windowed_judges=args.stop_after_windowed_judges,
     )
     print(json.dumps({"output_status": manifest["output_status"], "output_dir": str(args.output_dir), "release_ready": False}, ensure_ascii=False, sort_keys=True))
     return 0

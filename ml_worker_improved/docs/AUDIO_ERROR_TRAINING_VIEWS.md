@@ -184,3 +184,11 @@ Use a fresh `--output-dir` for every harvest batch. The wrapper rejects stale
 strict positive/negative counts. It also rejects `testing_flstudio_music` and,
 unless a test-only bypass is explicitly enabled, requires the input corpus path
 to be `testing_stuff_music` / `/host_testing_stuff_music`.
+
+The strict harvest wrapper runs the autonomous runtime with
+`--stop-after-windowed-judges true`. That mode writes candidate-pool,
+vocal/minus windowed judge, optimizer, preview contract, learning outcome, and
+run manifest surfaces, but intentionally skips learned-critic selection. Its
+manifest is diagnostic/non-release (`release_ready=false`) and exists only to
+feed strict positive/negative windows into training views without requiring a
+complete no-reference critic bundle.
