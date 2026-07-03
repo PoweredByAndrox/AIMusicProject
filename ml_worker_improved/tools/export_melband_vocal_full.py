@@ -107,20 +107,40 @@ def _native_macos_diagnostic_allowed() -> bool:
     )
 
 
-def _patch_text_file(path: Path, source: str, patch_id: str) -> dict[str, Any]:
+def _sha256_text(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _patch_text_file(
+    path: Path,
+    source: str,
+    patch_id: str,
+    *,
+    pre_patch_sha256: str,
+    patch_origin: str,
+) -> dict[str, Any]:
     path.write_text(source, encoding="utf-8")
+    post_patch_sha256 = _sha256_file(path)
     return {
         "patch_id": patch_id,
         "file": str(path),
         "status": "applied",
-        "sha256": _sha256_file(path),
+        "sha256": post_patch_sha256,
+        "pre_patch_sha256": pre_patch_sha256,
+        "post_patch_sha256": post_patch_sha256,
+        "patch_origin": patch_origin,
     }
 
 
 def patch_vendor_inference_for_mps(repo_path: Path) -> dict[str, Any]:
     path = repo_path / "inference.py"
     source = path.read_text(encoding="utf-8")
+    pre_patch_sha256 = _sha256_text(source)
     changed = False
+    if "def configure_inference_device" in source and VENDOR_MPS_DEVICE_HELPER.strip() not in source:
+        raise RuntimeError(
+            "MelBand vendor inference.py has divergent MPS device helper; refusing to trust prepatched state"
+        )
     if "def configure_inference_device" not in source:
         marker = 'warnings.filterwarnings("ignore")\n'
         if marker not in source:
@@ -133,19 +153,34 @@ def patch_vendor_inference_for_mps(repo_path: Path) -> dict[str, Any]:
         source = source.replace(VENDOR_ORIGINAL_DEVICE_BLOCK, VENDOR_CONFIGURE_DEVICE_CALL, 1)
         changed = True
     if not changed:
+        post_patch_sha256 = _sha256_file(path)
         return {
             "patch_id": "melband_vendor_mps_device",
             "file": str(path),
             "status": "already_present",
-            "sha256": _sha256_file(path),
+            "sha256": post_patch_sha256,
+            "pre_patch_sha256": pre_patch_sha256,
+            "post_patch_sha256": post_patch_sha256,
+            "patch_origin": "validated_exact_runtime_patch",
         }
-    return _patch_text_file(path, source, "melband_vendor_mps_device")
+    return _patch_text_file(
+        path,
+        source,
+        "melband_vendor_mps_device",
+        pre_patch_sha256=pre_patch_sha256,
+        patch_origin="tracked_exporter_runtime_patch",
+    )
 
 
 def patch_vendor_complex_scatter_for_mps(repo_path: Path) -> dict[str, Any]:
     path = repo_path / "models" / "mel_band_roformer" / "mel_band_roformer.py"
     source = path.read_text(encoding="utf-8")
+    pre_patch_sha256 = _sha256_text(source)
     changed = False
+    if "def scatter_add_complex_mps_safe" in source and VENDOR_COMPLEX_SCATTER_HELPER.strip() not in source:
+        raise RuntimeError(
+            "MelBand RoFormer model has divergent MPS complex scatter helper; refusing to trust prepatched state"
+        )
     if "def scatter_add_complex_mps_safe" not in source:
         marker = "def exists(val):\n    return val is not None\n"
         if marker not in source:
@@ -158,13 +193,23 @@ def patch_vendor_complex_scatter_for_mps(repo_path: Path) -> dict[str, Any]:
         source = source.replace(VENDOR_ORIGINAL_SCATTER_LINE, VENDOR_MPS_SCATTER_LINE, 1)
         changed = True
     if not changed:
+        post_patch_sha256 = _sha256_file(path)
         return {
             "patch_id": "melband_vendor_mps_complex_scatter",
             "file": str(path),
             "status": "already_present",
-            "sha256": _sha256_file(path),
+            "sha256": post_patch_sha256,
+            "pre_patch_sha256": pre_patch_sha256,
+            "post_patch_sha256": post_patch_sha256,
+            "patch_origin": "validated_exact_runtime_patch",
         }
-    return _patch_text_file(path, source, "melband_vendor_mps_complex_scatter")
+    return _patch_text_file(
+        path,
+        source,
+        "melband_vendor_mps_complex_scatter",
+        pre_patch_sha256=pre_patch_sha256,
+        patch_origin="tracked_exporter_runtime_patch",
+    )
 
 
 def apply_vendor_mps_runtime_patches(repo_path: Path, preflight: dict[str, Any]) -> list[dict[str, Any]]:
@@ -412,6 +457,16 @@ def build_full_track_stem_manifest(
     stem_provenance = stem_provenance or {}
     inference_runtime = inference_runtime or {}
     runtime_patches = runtime_patches or []
+    preflight_acceleration_mode = (cuda_preflight or {}).get("acceleration_mode")
+    expected_inference_acceleration_mode = (
+        inference_runtime.get("expected_acceleration_mode")
+        or preflight_acceleration_mode
+        or "cuda_gpu_inference"
+    )
+    actual_inference_acceleration_mode = inference_runtime.get(
+        "actual_acceleration_mode",
+        preflight_acceleration_mode or "cuda_gpu_inference",
+    )
     fallback_used = bool(inference_runtime.get("vendor_cpu_fallback_detected"))
     delivery_blocking_runtime = bool(inference_runtime.get("delivery_blocking"))
     target_stem = choose_primary_stem(primary_stem=primary_stem, stem_provenance=stem_provenance)
@@ -468,17 +523,13 @@ def build_full_track_stem_manifest(
         },
         "execution_contract": {
             "docker_runtime_required": True,
-            "expected_acceleration_mode": (
-                inference_runtime.get("expected_acceleration_mode")
-                or (cuda_preflight or {}).get("acceleration_mode")
-                or "gpu_inference_then_cpu_dsp_scoring"
-            ),
+            "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
+            "expected_inference_acceleration_mode": expected_inference_acceleration_mode,
             "gpu_inference_required": True,
             "gpu_inference_skipped": bool(inference_runtime.get("gpu_inference_skipped")),
-            "actual_acceleration_mode": inference_runtime.get(
-                "actual_acceleration_mode",
-                (cuda_preflight or {}).get("acceleration_mode", "cuda_gpu_inference"),
-            ),
+            "actual_acceleration_mode": actual_inference_acceleration_mode,
+            "actual_inference_acceleration_mode": actual_inference_acceleration_mode,
+            "preflight_acceleration_mode": preflight_acceleration_mode or "",
             "cuda_preflight": dict(cuda_preflight or {}),
             "inference_runtime": dict(inference_runtime),
             "vendor_runtime_patches": runtime_patches,

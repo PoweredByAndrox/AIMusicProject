@@ -114,10 +114,14 @@ def test_manifest_records_cuda_preflight_for_gpu_inference(tmp_path: Path) -> No
             "device_id": 0,
             "device_count": 1,
             "device_name": "Unit Test GPU",
+            "acceleration_mode": "cuda_gpu_inference",
         },
     )
 
     assert manifest["execution_contract"]["expected_acceleration_mode"] == "gpu_inference_then_cpu_dsp_scoring"
+    assert manifest["execution_contract"]["expected_inference_acceleration_mode"] == "cuda_gpu_inference"
+    assert manifest["execution_contract"]["actual_acceleration_mode"] == "cuda_gpu_inference"
+    assert manifest["execution_contract"]["preflight_acceleration_mode"] == "cuda_gpu_inference"
     assert manifest["execution_contract"]["gpu_inference_required"] is True
     assert manifest["execution_contract"]["gpu_inference_skipped"] is False
     assert manifest["execution_contract"]["cuda_preflight"]["device_name"] == "Unit Test GPU"
@@ -161,7 +165,9 @@ def test_manifest_records_vendor_runtime_patches(tmp_path: Path) -> None:
     )
 
     assert manifest["execution_contract"]["vendor_runtime_patches_applied"] is True
-    assert manifest["execution_contract"]["expected_acceleration_mode"] == "native_macos_mps_diagnostic"
+    assert manifest["execution_contract"]["expected_acceleration_mode"] == "gpu_inference_then_cpu_dsp_scoring"
+    assert manifest["execution_contract"]["expected_inference_acceleration_mode"] == "native_macos_mps_diagnostic"
+    assert manifest["execution_contract"]["actual_acceleration_mode"] == "native_macos_mps_diagnostic"
     assert manifest["execution_contract"]["vendor_runtime_patches"][0]["patch_id"] == (
         "melband_vendor_mps_complex_scatter"
     )
@@ -324,6 +330,9 @@ def test_vendor_mps_runtime_patch_materializes_device_and_complex_scatter(tmp_pa
         "melband_vendor_mps_complex_scatter",
     ]
     assert [patch["status"] for patch in patches] == ["applied", "applied"]
+    assert all(patch["patch_origin"] == "tracked_exporter_runtime_patch" for patch in patches)
+    assert all(patch["pre_patch_sha256"] != patch["post_patch_sha256"] for patch in patches)
+    assert all(patch["sha256"] == patch["post_patch_sha256"] for patch in patches)
     inference_source = inference_path.read_text(encoding="utf-8")
     model_source = model_path.read_text(encoding="utf-8")
     assert "def configure_inference_device" in inference_source
@@ -340,6 +349,66 @@ def test_vendor_mps_runtime_patch_materializes_device_and_complex_scatter(tmp_pa
         {"acceleration_mode": "native_macos_mps_diagnostic"},
     )
     assert [patch["status"] for patch in repeat_patches] == ["already_present", "already_present"]
+    assert all(patch["patch_origin"] == "validated_exact_runtime_patch" for patch in repeat_patches)
+    assert all(patch["pre_patch_sha256"] == patch["post_patch_sha256"] for patch in repeat_patches)
+
+
+def test_vendor_mps_runtime_patch_rejects_divergent_device_helper(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    repo_path = tmp_path / "vendor"
+    repo_path.mkdir()
+    inference_path = repo_path / "inference.py"
+    inference_path.write_text(
+        "\n".join(
+            [
+                "import torch",
+                "import torch.nn as nn",
+                "import warnings",
+                "warnings.filterwarnings(\"ignore\")",
+                "",
+                "def configure_inference_device(model, device_ids):",
+                "    return 'cpu', model",
+                "",
+                "def proc_folder(args):",
+                "    model = object()",
+                module.VENDOR_CONFIGURE_DEVICE_CALL.rstrip("\n"),
+                "    run_folder(model, args, config, device, verbose=False)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="divergent MPS device helper"):
+        module.patch_vendor_inference_for_mps(repo_path)
+
+
+def test_vendor_mps_runtime_patch_rejects_divergent_complex_scatter_helper(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    repo_path = tmp_path / "vendor"
+    model_path = repo_path / "models" / "mel_band_roformer" / "mel_band_roformer.py"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_text(
+        "\n".join(
+            [
+                "import torch",
+                "",
+                "def exists(val):",
+                "    return val is not None",
+                "",
+                "def scatter_add_complex_mps_safe(target, dim, index, src):",
+                "    return target",
+                "",
+                "def forward():",
+                module.VENDOR_MPS_SCATTER_LINE.rstrip("\n"),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="divergent MPS complex scatter helper"):
+        module.patch_vendor_complex_scatter_for_mps(repo_path)
 
 
 def test_melband_preflight_accepts_explicit_native_macos_mps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -658,6 +727,81 @@ def test_main_uses_current_python_for_vendor_inference(tmp_path: Path, monkeypat
     module.main()
 
     assert captured["command"][0] == sys.executable
+
+
+def test_main_prints_vendor_output_before_nonzero_runtime_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    repo_path = tmp_path / "repo"
+    model_path = tmp_path / "model.ckpt"
+    config_path = tmp_path / "config.yaml"
+    repo_path.mkdir()
+    model_path.write_text("stub checkpoint", encoding="utf-8")
+    _write_tiny_flac(source_audio_path, sample_rate=44100, frames=8)
+    config_path.write_text(
+        yaml.dump(
+            {
+                "audio": {"chunk_size": 44100},
+                "model": {"num_stems": 2},
+                "training": {"instruments": ["Vocals", "Instrumental"]},
+                "inference": {"num_overlap": 2},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    raw_audio = np.array([[0.5, -0.5], [0.2, -0.2]], dtype=np.float32)
+
+    def fake_save_audio_window_as_wav(_source: Path, target: Path, *_args, **_kwargs):
+        sf.write(str(target), raw_audio, 44100, subtype="FLOAT")
+        return 44100, int(raw_audio.shape[0])
+
+    def fake_run(command: list[str], *_args, **_kwargs):
+        return module.subprocess.CompletedProcess(
+            command,
+            17,
+            stdout="vendor stdout before failure\n",
+            stderr="vendor stderr before failure\n",
+        )
+
+    monkeypatch.setattr(module, "require_docker_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "verify_cuda_inference_device",
+        lambda _device_id: {
+            "device_id": 0,
+            "device_count": 1,
+            "device_name": "test",
+            "acceleration_mode": "cuda_gpu_inference",
+        },
+    )
+    monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_melband_vocal_full.py",
+            str(source_audio_path),
+            str(output_dir),
+            "--repo-path",
+            str(repo_path),
+            "--model-path",
+            str(model_path),
+            "--config-path",
+            str(config_path),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="returncode=17"):
+        module.main()
+
+    captured = capsys.readouterr()
+    assert "vendor stdout before failure" in captured.out
+    assert "vendor stderr before failure" in captured.out
 
 
 def test_manifest_records_residual_companion_materialization(tmp_path: Path) -> None:
