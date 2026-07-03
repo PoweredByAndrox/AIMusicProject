@@ -46,6 +46,7 @@ MINUS_ISSUES = {
     "severe_vocal_bleed_in_minus",
     "vocal_bleed_in_minus",
     "minus_detail_loss",
+    "minus_repair_no_effect",
     "phase_stereo_damage",
     "mixture_reconstruction_error",
 }

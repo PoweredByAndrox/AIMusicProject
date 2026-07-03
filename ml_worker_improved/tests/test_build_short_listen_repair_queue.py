@@ -384,6 +384,42 @@ def test_build_short_listen_repair_queue_routes_training_view_hardcases_with_cor
     assert row["source_row"]["track_id"] == "trk-hardcase"
 
 
+def test_build_short_listen_repair_queue_routes_no_delta_minus_hardcase(tmp_path: Path) -> None:
+    training_view = _write_jsonl(
+        tmp_path / "views" / "minus_critic_training_view.jsonl",
+        [
+            {
+                "schema": "audio_error_training_view_row.v1",
+                "view_name": "minus_critic",
+                "target_name": "minus",
+                "track_id": "trk-no-delta",
+                "candidate_audio_path": "/app/artifacts/cand/no_delta.flac",
+                "safe_for_this_view": True,
+                "label": 0,
+                "blocker_labels": ["no_meaningful_minus_delta"],
+                "issue_labels": ["minus_repair_no_effect"],
+                "corrective_action_labels": [
+                    "route_to_alternative_minus_model_candidate",
+                    "reject_no_delta_repair_route",
+                ],
+                "corrective_target_lanes": ["minus_model", "minus_router"],
+            },
+        ],
+    )
+
+    manifest = build_short_listen_repair_queue(
+        training_view_jsonl=training_view,
+        output_dir=tmp_path / "queue",
+    )
+
+    rows = [json.loads(line) for line in (tmp_path / "queue" / "rows.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert manifest["queue_status"] == "ready_for_full_pack_loop"
+    assert manifest["route_intent_counts"] == {"minus_repair": 1}
+    assert rows[0]["route_intent"] == "minus_repair"
+    assert rows[0]["issue_tags"] == ["minus_repair_no_effect", "no_meaningful_minus_delta"]
+    assert "route_to_alternative_minus_model_candidate" in rows[0]["required_actions"]
+
+
 def test_build_short_listen_repair_queue_prioritizes_explicit_vocal_stem(tmp_path: Path) -> None:
     feedback_json = _feedback(tmp_path)
     feedback = json.loads(feedback_json.read_text(encoding="utf-8"))

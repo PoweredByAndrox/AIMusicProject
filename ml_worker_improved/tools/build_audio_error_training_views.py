@@ -84,10 +84,45 @@ CORRECTIVE_TARGETS_BY_BLOCKER = {
         "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
         "lanes": ("minus_model", "minus_detail_guard"),
     },
+    "air_dip_damage": {
+        "issues": ("minus_detail_loss",),
+        "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
+        "lanes": ("minus_model", "minus_detail_guard"),
+    },
+    "presence_dip_damage": {
+        "issues": ("minus_detail_loss",),
+        "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
+        "lanes": ("minus_model", "minus_detail_guard"),
+    },
+    "rms_dip_damage": {
+        "issues": ("minus_detail_loss",),
+        "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
+        "lanes": ("minus_model", "minus_detail_guard"),
+    },
+    "cumulative_air_dip_damage": {
+        "issues": ("minus_detail_loss",),
+        "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
+        "lanes": ("minus_model", "minus_detail_guard"),
+    },
+    "cumulative_presence_dip_damage": {
+        "issues": ("minus_detail_loss",),
+        "actions": ("preserve_minus_instrumental_detail", "reject_detail_damaging_minus_route"),
+        "lanes": ("minus_model", "minus_detail_guard"),
+    },
     "mixture_consistency_score_below_detail_gate": {
         "issues": ("minus_detail_loss", "mixture_reconstruction_error"),
         "actions": ("preserve_minus_instrumental_detail", "improve_mix_reconstruction_consistency"),
         "lanes": ("minus_model", "pair_router"),
+    },
+    "insufficient_vocal_residue_improvement": {
+        "issues": ("vocal_bleed_in_minus",),
+        "actions": ("reduce_vocal_bleed_in_minus", "try_stronger_dedicated_minus_route"),
+        "lanes": ("minus_model", "minus_router"),
+    },
+    "no_meaningful_minus_delta": {
+        "issues": ("minus_repair_no_effect",),
+        "actions": ("route_to_alternative_minus_model_candidate", "reject_no_delta_repair_route"),
+        "lanes": ("minus_model", "minus_router"),
     },
     "phase_stereo_stability_below_detail_gate": {
         "issues": ("phase_stereo_damage",),

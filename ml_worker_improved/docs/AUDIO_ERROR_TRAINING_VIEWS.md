@@ -91,9 +91,13 @@ For example, `severe_vocal_bleed_in_minus` maps to
 `corrective_target_lanes=["minus_model", "minus_router"]`.
 `minus_detail_gate_blocked` maps to detail-preservation actions, while
 `phase_stereo_stability_below_detail_gate` maps to phase/stereo repair or
-route rejection. These fields are action targets for the repair/training loop;
-they do not relax labels, start training, or make a diagnostic candidate
-deliverable.
+route rejection. RALPH/minus delta blockers are mapped the same way:
+`insufficient_vocal_residue_improvement` targets vocal-bleed reduction,
+`air_dip_damage` / `presence_dip_damage` / `rms_dip_damage` target
+minus-detail preservation, and `no_meaningful_minus_delta` targets an
+alternative minus-model route instead of repeating a no-effect repair. These
+fields are action targets for the repair/training loop; they do not relax
+labels, start training, or make a diagnostic candidate deliverable.
 
 Runtime judge rows may be self-contained. If `candidate_pool.jsonl` contains a
 matching `(track_id, candidate_id)` row, its candidate metadata is preferred.

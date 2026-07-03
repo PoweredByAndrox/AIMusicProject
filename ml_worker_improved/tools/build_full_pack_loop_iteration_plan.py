@@ -23,6 +23,10 @@ ROWS_NAME = "rows.jsonl"
 SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
 READY_QUEUE_STATUS = "ready_for_full_pack_loop"
+NON_FATAL_ACTION_ROW_FAILURES = {
+    "training_plan_missing",
+    "training_plan_file_missing",
+}
 BLOCKED_TRUE_FLAGS = (
     "release_ready",
     "can_publish_as_result",
@@ -447,7 +451,8 @@ def build_full_pack_loop_iteration_plan(
     rows, row_failed = build_action_rows(queue_rows, jobs_by_stem)
     failed.extend(row_failed)
     failed = stable_unique(failed)
-    if failed:
+    action_row_fatal_failures = [check for check in failed if check not in NON_FATAL_ACTION_ROW_FAILURES]
+    if action_row_fatal_failures:
         rows = []
 
     ready_count = sum(1 for row in rows if str(row.get("action_status") or "").startswith("ready_"))
@@ -465,6 +470,7 @@ def build_full_pack_loop_iteration_plan(
         "blocked_action_count": blocked_count,
         "route_intent_counts": route_counts(rows),
         "failed_checks": failed,
+        "action_row_fatal_failed_checks": action_row_fatal_failures,
         "rows_jsonl": str(output_dir / ROWS_NAME),
         "summary_md": str(output_dir / SUMMARY_NAME),
         "progress_jsonl": str(progress_path),

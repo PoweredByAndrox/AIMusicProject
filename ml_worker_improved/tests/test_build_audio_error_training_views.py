@@ -773,8 +773,33 @@ def test_blocked_listen_preview_manifest_does_not_add_positive_rows(tmp_path: Pa
 
 
 def test_ralph_manifests_add_minus_score_only_hardcase_rows(tmp_path: Path) -> None:
-    from tools.build_audio_error_training_views import build_audio_error_training_views
+    from tools.build_audio_error_training_views import build_audio_error_training_views, corrective_targets_for
     from tools.train_target_audio_error_critics import load_target_rows
+
+    corrective_targets = corrective_targets_for(
+        "minus",
+        [
+            "insufficient_vocal_residue_improvement",
+            "no_meaningful_minus_delta",
+            "air_dip_damage",
+            "presence_dip_damage",
+            "rms_dip_damage",
+        ],
+    )
+    assert corrective_targets["unmapped_blocker_labels"] == []
+    assert corrective_targets["issue_labels"] == [
+        "vocal_bleed_in_minus",
+        "minus_repair_no_effect",
+        "minus_detail_loss",
+    ]
+    assert corrective_targets["corrective_action_labels"] == [
+        "reduce_vocal_bleed_in_minus",
+        "try_stronger_dedicated_minus_route",
+        "route_to_alternative_minus_model_candidate",
+        "reject_no_delta_repair_route",
+        "preserve_minus_instrumental_detail",
+        "reject_detail_damaging_minus_route",
+    ]
 
     dataset_dir = tmp_path / "dataset"
     write_repaired_dataset(dataset_dir, [])
@@ -912,6 +937,13 @@ def test_ralph_manifests_add_minus_score_only_hardcase_rows(tmp_path: Path) -> N
     assert rejected_features["missing_detail_score"] == 1.0
     assert rejected_features["vocal_bleed_proxy_score"] == 1.0
     assert minus_rows[0]["blocker_labels"] == ["insufficient_vocal_residue_improvement"]
+    assert minus_rows[0]["unmapped_blocker_labels"] == []
+    assert minus_rows[0]["issue_labels"] == ["vocal_bleed_in_minus"]
+    assert minus_rows[0]["corrective_action_labels"] == [
+        "reduce_vocal_bleed_in_minus",
+        "try_stronger_dedicated_minus_route",
+    ]
+    assert minus_rows[0]["corrective_status"] == "actionable_hardcase"
     assert minus_rows[0]["source_evidence"]["source"] == "ralph_minus_improvement_manifest"
     assert minus_rows[0]["source_evidence"]["focus_evaluation_used_for_delivery"] is False
     evidence_file = Path(minus_rows[0]["source_run_dir"]) / minus_rows[0]["source_judge_file"]

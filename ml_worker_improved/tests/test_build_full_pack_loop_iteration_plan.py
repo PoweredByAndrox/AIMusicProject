@@ -231,6 +231,25 @@ def test_full_pack_loop_iteration_plan_blocks_missing_training_coverage(tmp_path
     assert all(len(path.name) <= 32 for path in (tmp_path / "plan").iterdir() if path.is_file())
 
 
+def test_full_pack_loop_iteration_plan_preserves_repair_actions_without_training_plan(tmp_path: Path) -> None:
+    manifest = build_full_pack_loop_iteration_plan(
+        repair_queue_manifest_json=full_pack_loop_queue(tmp_path),
+        output_dir=tmp_path / "plan",
+    )
+
+    assert manifest["plan_status"] == "blocked"
+    assert manifest["failed_checks"] == ["training_plan_missing"]
+    assert manifest["action_row_fatal_failed_checks"] == []
+    assert manifest["action_count"] == 6
+    assert manifest["blocked_action_count"] == 6
+    assert manifest["route_intent_counts"] == {"minus_repair": 1, "stem_training_coverage_gap": 5}
+    plan_rows = rows(tmp_path / "plan" / "rows.jsonl")
+    by_stem = {row["stem_type"]: row for row in plan_rows}
+    assert by_stem["minus"]["action_status"] == "blocked_minus_repair_missing_training_job"
+    assert "preserve_minus_instrumental_detail" in by_stem["minus"]["required_next_actions"]
+    assert "repair_phase_stereo_stability" in by_stem["minus"]["required_next_actions"]
+
+
 def test_full_pack_loop_iteration_plan_marks_ready_gpu_training_actions(tmp_path: Path) -> None:
     queue_manifest = full_pack_loop_queue(tmp_path)
     queue = json.loads(queue_manifest.read_text(encoding="utf-8"))
