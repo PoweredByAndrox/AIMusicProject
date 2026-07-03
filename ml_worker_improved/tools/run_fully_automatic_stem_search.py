@@ -33,7 +33,6 @@ from tools.stem_region_repair_common import (
     ISSUE_STEREO_COLLAPSE,
     make_region_mask,
 )
-from tools.stem_region_repair_model import apply_region_repair_model, load_region_repair_checkpoint
 from tools.stem_route_policy_common import (
     ACTION_BLOCK_UNKNOWN,
     ACTION_PRIORITIZE_ROUTE,
@@ -89,6 +88,8 @@ TARGET_SPECIFIC_ROLE_OUTPUTS = {
     "non_vocal_stems": tuple(NON_VOCAL_STEMS),
 }
 MODEL_SPLIT_V2_PROFILE = "model_split_v2"
+PERSISTENT_MPS_MINUS_PAIR_PROFILE = "persistent_mps_minus_pair"
+PERSISTENT_MPS_MINUS_PAIR_ROUTE_ID = "becruily_instrumental_vocals"
 MODEL_SPLIT_V2_DELIVERY_PAIR_ROLES = {"vocals", "minus"}
 MODEL_SPLIT_V2_FAIL_FAST_MUTATION_KEYS = (
     "minus_vocal_debleed",
@@ -108,8 +109,8 @@ ROUTE_BUDGET_PROFILES = (ROUTE_BUDGET_PROFILE_FULL, ROUTE_BUDGET_PROFILE_FAST)
 FAST_ROUTE_TIMEOUT_OVERRIDES_SEC = {
     "mdx23c_vocals": 30,
     "mdx23c_vocals:instrumental": 30,
-    "becruily_instrumental_vocals": 30,
-    "becruily_instrumental_vocals:instrumental": 30,
+    "becruily_instrumental_vocals": 120,
+    "becruily_instrumental_vocals:instrumental": 120,
     "melband_roformer_vocals": 30,
     "melband_roformer_vocals:instrumental": 30,
     "scnet_xl_ihf_musdb18:bass": 30,
@@ -268,6 +269,25 @@ def _collect_cuda_preflight(*, require_gpu: bool, min_free_mib: int) -> dict[str
     else:
         preflight.update({"status": "passed", "reason": ""})
     return preflight
+
+
+def _collect_separator_accelerator_preflight(
+    *,
+    require_gpu: bool,
+    min_free_mib: int,
+    separator_backend_config: SeparatorBackendConfig,
+) -> dict[str, Any]:
+    device = str(separator_backend_config.device or "").strip().lower()
+    if require_gpu and device == "mps" and separator_backend_config.mode == MODE_PERSISTENT_SERVER:
+        return {
+            "schema": "stem_search_accelerator_preflight.v1",
+            "require_gpu": True,
+            "accelerator": "mps",
+            "status": "delegated_to_persistent_backend",
+            "reason": "mps_backend_preflight_delegated",
+            "server_url": separator_backend_config.server_url,
+        }
+    return _collect_cuda_preflight(require_gpu=require_gpu, min_free_mib=min_free_mib)
 
 
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:
@@ -1061,6 +1081,69 @@ def build_model_split_v2_recipe(
     return recipe
 
 
+def build_persistent_mps_minus_pair_recipe(
+    *,
+    contamination_model_manifest: Path | str | None = None,
+) -> dict[str, Any]:
+    route_id = PERSISTENT_MPS_MINUS_PAIR_ROUTE_ID
+    command_template = _vocal_route_command_template(route_id)
+    shared_cache_id = f"{route_id}:vocals_minus_pair"
+    candidate: dict[str, Any] = {
+        "candidate_id": "c001",
+        "profile": PERSISTENT_MPS_MINUS_PAIR_PROFILE,
+        "route_family": "persistent_mps_dedicated_minus_pair",
+        "minus_source": "minus_lane",
+        "minus_rebuilt_from_non_vocal_stems": False,
+        "diagnostic_only": True,
+        "required_stems": ["vocals", "minus"],
+        "contamination_check_mode": "explicit_only",
+        "use_default_contamination_model_manifest": False,
+        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+        "cross_stem_forensic_gate": {
+            "enabled": True,
+            "pairs": [{"tested_stem": "minus", "source_stem": "vocals"}],
+        },
+        "target_specific_commands": [
+            {
+                "role": "vocals",
+                "lane": "vocal_lane",
+                "route_id": route_id,
+                "command_template": command_template,
+                "server_stems": ["vocals", "instrumental"],
+                "shared_separator_cache_id": shared_cache_id,
+            },
+            {
+                "role": "minus",
+                "lane": "minus_lane",
+                "route_id": route_id,
+                "command_template": command_template,
+                "output_map": {"minus": "instrumental"},
+                "server_stems": ["vocals", "instrumental"],
+                "shared_separator_cache_id": shared_cache_id,
+            },
+        ],
+        "delivery_pair_reconstruction": {
+            "max_delivery_pair_residual_ratio": 0.08,
+        },
+    }
+    recipe: dict[str, Any] = {
+        "schema": "stem_search_recipe.v1",
+        "profile": PERSISTENT_MPS_MINUS_PAIR_PROFILE,
+        "recipe_source": "persistent_mps_dedicated_minus_pair",
+        "available": True,
+        "required_stems": ["vocals", "minus"],
+        "target_specific_routes": {
+            "vocal_lane": [route_id],
+            "minus_lane": [route_id],
+        },
+        "timeout_sec": 900,
+        "candidates": [candidate],
+    }
+    if contamination_model_manifest is not None:
+        recipe["contamination_model_manifest"] = str(contamination_model_manifest)
+    return recipe
+
+
 def build_default_from_scratch_recipe(
     *,
     demucs_available: bool | None = None,
@@ -1822,6 +1905,26 @@ def _collect_stem_paths(stems_dir: Path) -> dict[str, str]:
     return {stem: str(stems_dir / f"{stem}.flac") for stem in [*STEMS, "minus"] if (stems_dir / f"{stem}.flac").is_file()}
 
 
+def _candidate_required_stems(candidate: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = candidate.get("required_stems")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return tuple(STEMS)
+    stems: list[str] = []
+    allowed = {*STEMS, "minus"}
+    for value in raw:
+        stem = str(value or "").strip()
+        if stem not in allowed:
+            continue
+        if stem not in stems:
+            stems.append(stem)
+    return tuple(stems or STEMS)
+
+
+def _missing_candidate_required_stems(candidate: Mapping[str, Any], stem_paths: Mapping[str, Any]) -> list[str]:
+    present = set(stem_paths)
+    return [stem for stem in _candidate_required_stems(candidate) if stem not in present]
+
+
 def _safe_artifact_segment(value: str, *, fallback: str) -> str:
     segment = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("._-")
     if not segment:
@@ -1941,21 +2044,36 @@ def _run_target_specific_commands(
         command = render_recipe_command(command_template, replacements)
         route_manifest["command"] = command
         required_outputs = list(TARGET_SPECIFIC_ROLE_OUTPUTS.get(role, ()))
-        server_required_outputs = list(dict.fromkeys(str(output_map.get(stem, stem)) for stem in required_outputs))
+        server_stems = item.get("server_stems") if isinstance(item.get("server_stems"), list) else []
+        server_required_outputs = (
+            list(dict.fromkeys(str(stem) for stem in server_stems if str(stem).strip()))
+            if server_stems
+            else list(dict.fromkeys(str(output_map.get(stem, stem)) for stem in required_outputs))
+        )
+        route_manifest["server_required_outputs"] = list(server_required_outputs)
+        shared_cache_id = str(item.get("shared_separator_cache_id") or "").strip()
+        cache_params: dict[str, Any] = {
+            "backend": backend_config.mode,
+            "prefer_resident": prefer_resident,
+            "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
+            "route_timeout_sec": route_timeout_sec,
+        }
+        if shared_cache_id:
+            cache_params["shared_separator_cache_id"] = shared_cache_id
+        else:
+            cache_params.update(
+                {
+                    "role": role,
+                    "lane": lane,
+                    "output_map": dict(output_map),
+                }
+            )
         cache_key = separator_cache_key(
             route_id=route_id,
             source_audio_path=str(window["mix_path"]),
             command=[str(part) for part in command_template],
             stems=server_required_outputs,
-            params={
-                "role": role,
-                "lane": lane,
-                "output_map": dict(output_map),
-                "backend": backend_config.mode,
-                "prefer_resident": prefer_resident,
-                "route_budget_profile": str(route_budget_profile or ROUTE_BUDGET_PROFILE_FULL),
-                "route_timeout_sec": route_timeout_sec,
-            },
+            params=cache_params,
         )
         route_manifest["route_cache_key"] = cache_key
         route_manifest["separator_backend"]["route_cache_key"] = cache_key
@@ -2087,14 +2205,19 @@ def _full_forbidden_contamination_checks() -> list[dict[str, str]]:
 
 def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[dict[str, str]], bool]:
     required_checks = _full_forbidden_contamination_checks()
-    default_model_manifest = str(candidate.get("contamination_model_manifest") or "").strip()
+    use_default_model_manifest = candidate.get("use_default_contamination_model_manifest", True) is not False
+    default_model_manifest = (
+        str(candidate.get("contamination_model_manifest") or "").strip() if use_default_model_manifest else ""
+    )
     checks = candidate.get("contamination_checks")
     if not isinstance(checks, list):
         if not default_model_manifest:
             return required_checks, False
         return [{**check, "model_manifest": default_model_manifest} for check in required_checks], True
 
+    explicit_only = str(candidate.get("contamination_check_mode") or "").strip() == "explicit_only"
     hints: dict[tuple[str, str], dict[str, str]] = {}
+    explicit_candidates: list[dict[str, str]] = []
     for item in checks:
         if not isinstance(item, dict):
             continue
@@ -2107,6 +2230,14 @@ def _candidate_contamination_checks(candidate: Mapping[str, Any]) -> tuple[list[
         if model_manifest:
             hint["model_manifest"] = model_manifest
         hints[(tested_stem, foreign_source)] = hint
+        explicit_check = {"tested_stem": tested_stem, "foreign_source": foreign_source}
+        if default_model_manifest:
+            explicit_check["model_manifest"] = default_model_manifest
+        explicit_check.update(hint)
+        explicit_candidates.append(explicit_check)
+
+    if explicit_only:
+        return explicit_candidates, True
 
     merged: list[dict[str, str]] = []
     for check in required_checks:
@@ -2843,6 +2974,8 @@ def apply_learned_stem_region_repair(
         result["blockers"].append(f"missing_repair_stem:{stem}")
         return result
     try:
+        from tools.stem_region_repair_model import apply_region_repair_model, load_region_repair_checkpoint
+
         checkpoint_file = Path(checkpoint_path)
         if checkpoint_file.suffix.lower() == ".json":
             checkpoint_probe = json.loads(checkpoint_file.read_text(encoding="utf-8"))
@@ -3797,7 +3930,9 @@ def _score_candidate_contamination(
         "attempted_checks": attempted,
         "blocker_reasons": blocker_reasons,
         "leak_results": leak_results,
-        "check_mode": "full_forbidden_matrix",
+        "check_mode": "explicit_only"
+        if str(candidate.get("contamination_check_mode") or "").strip() == "explicit_only"
+        else "full_forbidden_matrix",
         "candidate_check_hints_used": explicit_checks,
         "required_check_count": len(checks),
     }
@@ -4994,6 +5129,7 @@ def execute_recipe_candidate(
             "profile": _profile_name(candidate),
             "minus_source": _candidate_minus_source(candidate),
             "minus_rebuilt_from_non_vocal_stems": bool(candidate.get("minus_rebuilt_from_non_vocal_stems", False)),
+            "required_stems": list(_candidate_required_stems(candidate)),
         }
     )
     command_template = candidate.get("command_template")
@@ -5202,10 +5338,12 @@ def execute_recipe_candidate(
             {
                 "execution_status": "completed",
                 "verdict": "blocked_missing_stem",
-                "missing_stems": missing_required_stems(stem_paths),
+                "missing_stems": _missing_candidate_required_stems(candidate, stem_paths),
                 "stem_paths": stem_paths,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
             }
         )
         _write_json(candidate_dir / "manifest.json", manifest)
@@ -5218,7 +5356,8 @@ def execute_recipe_candidate(
             },
         )
         return manifest
-    missing = missing_required_stems(stem_paths)
+    candidate_required_stems = _candidate_required_stems(candidate)
+    missing = _missing_candidate_required_stems(candidate, stem_paths)
     if missing:
         next_action = choose_next_action({"verdict": "blocked_missing_stem", "reason": "missing_required_stem"})
         manifest.update(
@@ -5229,6 +5368,9 @@ def execute_recipe_candidate(
                 "stem_paths": stem_paths,
                 "target_specific_composition": target_specific_composition,
                 "next_action": next_action,
+                "required_stems": list(candidate_required_stems),
+                "delivery_allowed": False,
+                "presentation_status": "blocked_from_listen_pack",
             }
         )
         _write_json(candidate_dir / "manifest.json", manifest)
@@ -5452,7 +5594,11 @@ def execute_recipe_candidate(
             config=reconstruction_config if isinstance(reconstruction_config, Mapping) else None,
         )
     else:
-        reconstruction = validate_mix_conservation(mix_path=Path(str(window["mix_path"])), stem_paths=stem_paths)
+        reconstruction = validate_mix_conservation(
+            mix_path=Path(str(window["mix_path"])),
+            stem_paths=stem_paths,
+            required_stems=candidate_required_stems,
+        )
     if not reconstruction["ok"]:
         next_action = choose_next_action({"verdict": "blocked_bad_reconstruction", "reason": "mix_conservation_failed"})
         manifest.update(
@@ -5597,6 +5743,7 @@ def execute_recipe_candidate(
             "verdict": final_verdict,
             "stem_paths": stem_paths,
             "missing_stems": [],
+            "required_stems": list(candidate_required_stems),
             "reconstruction": reconstruction,
             "reconstruction_repair": reconstruction_repair,
             "minus_vocal_debleed": minus_vocal_debleed,
@@ -5610,8 +5757,10 @@ def execute_recipe_candidate(
             "contamination_score": score,
             "cross_stem_forensic_score": cross_stem_forensic_score,
             "next_action": next_action,
-            "delivery_allowed": final_verdict == "auto_accept",
-            "presentation_status": "accepted_for_listen_pack" if final_verdict == "auto_accept" else "blocked_from_listen_pack",
+            "delivery_allowed": final_verdict == "auto_accept" and not bool(candidate.get("diagnostic_only", False)),
+            "presentation_status": "accepted_for_listen_pack"
+            if final_verdict == "auto_accept" and not bool(candidate.get("diagnostic_only", False))
+            else "blocked_from_listen_pack",
             "minus_source": _candidate_minus_source(candidate),
             "minus_rebuilt_from_non_vocal_stems": minus_rebuilt_from_non_vocal_stems,
         }
@@ -5651,6 +5800,9 @@ def select_accepted_candidate(
     *,
     required_window_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    def can_deliver(candidate: Mapping[str, Any]) -> bool:
+        return candidate.get("verdict") == "auto_accept" and candidate.get("delivery_allowed", True) is not False
+
     if required_window_ids is not None:
         if not required_window_ids:
             return {
@@ -5667,7 +5819,7 @@ def select_accepted_candidate(
                 (
                     candidate
                     for candidate in candidates
-                    if str(candidate.get("window_id") or "") == window_id and candidate.get("verdict") == "auto_accept"
+                    if str(candidate.get("window_id") or "") == window_id and can_deliver(candidate)
                 ),
                 None,
             )
@@ -5693,7 +5845,7 @@ def select_accepted_candidate(
         }
 
     for candidate in candidates:
-        if candidate.get("verdict") == "auto_accept":
+        if can_deliver(candidate):
             return {
                 "verdict": "auto_accept",
                 "accepted_candidate_id": str(candidate.get("candidate_id") or ""),
@@ -5760,6 +5912,7 @@ def run_fully_automatic_stem_search(
     route_policy_mode: str = "shadow",
     separator_backend: str = MODE_SUBPROCESS,
     separator_server_url: str = "",
+    separator_device: str = "",
     separator_request_timeout_sec: float = 0.0,
     min_gpu_free_mib: int = 0,
     wait_for_gpu_free_sec: float = 0.0,
@@ -5774,7 +5927,7 @@ def run_fully_automatic_stem_search(
         mode=separator_backend,
         server_url=separator_server_url,
         require_gpu=require_gpu,
-        device="cuda" if require_gpu else "cpu",
+        device=separator_device or ("cuda" if require_gpu else "cpu"),
         request_timeout_sec=separator_request_timeout_sec,
     )
     _append_jsonl(
@@ -5805,7 +5958,11 @@ def run_fully_automatic_stem_search(
     windows: list[dict[str, Any]] = []
     recipe: dict[str, Any] | None = None
     preloaded_root_cause_route_policy = _load_root_cause_route_policy(root_cause_queue_jsonl)
-    cuda_preflight = _collect_cuda_preflight(require_gpu=require_gpu, min_free_mib=min_gpu_free_mib)
+    cuda_preflight = _collect_separator_accelerator_preflight(
+        require_gpu=require_gpu,
+        min_free_mib=min_gpu_free_mib,
+        separator_backend_config=separator_backend_config,
+    )
     wait_deadline = time.monotonic() + float(max(0.0, wait_for_gpu_free_sec))
     poll_sec = float(max(0.1, gpu_preflight_poll_sec))
     while (
@@ -5825,7 +5982,11 @@ def run_fully_automatic_stem_search(
             },
         )
         time.sleep(min(poll_sec, max(0.0, wait_deadline - time.monotonic())))
-        cuda_preflight = _collect_cuda_preflight(require_gpu=require_gpu, min_free_mib=min_gpu_free_mib)
+        cuda_preflight = _collect_separator_accelerator_preflight(
+            require_gpu=require_gpu,
+            min_free_mib=min_gpu_free_mib,
+            separator_backend_config=separator_backend_config,
+        )
     _append_jsonl(
         progress_path,
         {
@@ -5884,6 +6045,10 @@ def run_fully_automatic_stem_search(
                 contamination_model_manifest=model_manifest,
                 stem_region_repair_checkpoints=stem_region_repair_checkpoints,
                 teacher_mask_checkpoints=teacher_mask_checkpoints,
+            )
+        elif separator_backend_config.enabled and separator_backend_config.device == "mps":
+            recipe = build_persistent_mps_minus_pair_recipe(
+                contamination_model_manifest=model_manifest,
             )
         else:
             recipe = build_default_from_scratch_recipe(
@@ -6200,6 +6365,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--route-budget-profile", choices=ROUTE_BUDGET_PROFILES, default=ROUTE_BUDGET_PROFILE_FULL)
     parser.add_argument("--separator-backend", choices=(MODE_SUBPROCESS, MODE_PERSISTENT_SERVER), default=MODE_SUBPROCESS)
     parser.add_argument("--separator-server-url", default="")
+    parser.add_argument("--separator-device", default="")
     parser.add_argument("--separator-request-timeout-sec", type=float, default=0.0)
     parser.add_argument("--min-gpu-free-mib", type=int, default=DEFAULT_MIN_GPU_FREE_MIB)
     parser.add_argument("--wait-for-gpu-free-sec", type=float, default=0.0)
@@ -6337,6 +6503,7 @@ def main() -> None:
         route_policy_mode=args.route_policy_mode,
         separator_backend=args.separator_backend,
         separator_server_url=args.separator_server_url,
+        separator_device=args.separator_device,
         separator_request_timeout_sec=args.separator_request_timeout_sec,
         min_gpu_free_mib=args.min_gpu_free_mib,
         wait_for_gpu_free_sec=args.wait_for_gpu_free_sec,

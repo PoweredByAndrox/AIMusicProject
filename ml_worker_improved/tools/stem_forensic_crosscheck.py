@@ -49,6 +49,21 @@ def _config(config: Mapping[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
+def _explicit_forensic_pairs(config: Mapping[str, Any]) -> list[tuple[str, str]] | None:
+    raw_pairs = config.get("pairs")
+    if not isinstance(raw_pairs, list):
+        return None
+    pairs: list[tuple[str, str]] = []
+    for item in raw_pairs:
+        if not isinstance(item, Mapping):
+            continue
+        tested_stem = str(item.get("tested_stem") or "").strip()
+        source_stem = str(item.get("source_stem") or item.get("foreign_source") or "").strip()
+        if tested_stem and source_stem:
+            pairs.append((tested_stem, source_stem))
+    return pairs
+
+
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:
     audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
     return np.asarray(audio, dtype=np.float32), int(sample_rate)
@@ -459,6 +474,7 @@ def score_cross_stem_forensic_matrix(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = _config(config)
+    explicit_pairs = _explicit_forensic_pairs(cfg)
     if cfg.get("enabled") is False:
         result = {
             "schema": "cross_stem_forensic_matrix.v1",
@@ -466,34 +482,46 @@ def score_cross_stem_forensic_matrix(
             "blocker_reasons": ["cross_stem_forensic_disabled"],
             "pair_results": [],
             "config": cfg,
+            "check_mode": "explicit_pairs" if explicit_pairs is not None else "full_forbidden_matrix",
         }
         (output_dir / "matrix.json").write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
         return result
     blockers: list[str] = []
     pair_results: list[dict[str, Any]] = []
-    for tested_stem, forbidden_sources in FORBIDDEN_SOURCES.items():
+    pair_iter = explicit_pairs
+    if pair_iter is None:
+        pair_iter = [
+            (tested_stem, source_stem)
+            for tested_stem, forbidden_sources in FORBIDDEN_SOURCES.items()
+            for source_stem in forbidden_sources
+        ]
+    elif not pair_iter:
+        blockers.append("missing_forensic_pairs")
+    for tested_stem, source_stem in pair_iter:
+        if tested_stem not in FORBIDDEN_SOURCES or source_stem not in FORBIDDEN_SOURCES[tested_stem]:
+            blockers.append(f"invalid_forensic_pair:{tested_stem}:{source_stem}")
+            continue
         tested_path = stem_paths.get(tested_stem)
         if not tested_path:
             blockers.append(f"missing_forensic_tested_stem:{tested_stem}")
             continue
-        for source_stem in forbidden_sources:
-            source_path = stem_paths.get(source_stem)
-            if not source_path:
-                blockers.append(f"missing_forensic_source_stem:{tested_stem}:{source_stem}")
-                continue
-            pair = score_pair_forensic(
-                tested_stem=tested_stem,
-                source_stem=source_stem,
-                tested_path=Path(str(tested_path)),
-                source_path=Path(str(source_path)),
-                output_dir=output_dir / "pairs",
-                config=cfg,
-            )
-            pair_results.append(pair)
-            if pair["verdict"] == "fail":
-                blockers.extend(str(reason) for reason in pair.get("blocker_reasons") or [])
-            elif pair["verdict"] == "blocked_unknown":
-                blockers.append(f"forensic_unknown:{tested_stem}:{source_stem}")
+        source_path = stem_paths.get(source_stem)
+        if not source_path:
+            blockers.append(f"missing_forensic_source_stem:{tested_stem}:{source_stem}")
+            continue
+        pair = score_pair_forensic(
+            tested_stem=tested_stem,
+            source_stem=source_stem,
+            tested_path=Path(str(tested_path)),
+            source_path=Path(str(source_path)),
+            output_dir=output_dir / "pairs",
+            config=cfg,
+        )
+        pair_results.append(pair)
+        if pair["verdict"] == "fail":
+            blockers.extend(str(reason) for reason in pair.get("blocker_reasons") or [])
+        elif pair["verdict"] == "blocked_unknown":
+            blockers.append(f"forensic_unknown:{tested_stem}:{source_stem}")
     if any(reason.startswith("missing_forensic") or reason.startswith("forensic_unknown") for reason in blockers):
         verdict = "blocked_unknown"
     elif blockers:
@@ -506,6 +534,7 @@ def score_cross_stem_forensic_matrix(
         "blocker_reasons": sorted(set(blockers)),
         "pair_results": pair_results,
         "config": cfg,
+        "check_mode": "explicit_pairs" if explicit_pairs is not None else "full_forbidden_matrix",
     }
     (output_dir / "matrix.json").write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     return result

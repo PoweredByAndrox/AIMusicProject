@@ -15,6 +15,7 @@ import soundfile as sf
 import tools.run_fully_automatic_stem_search as stem_search
 import tools.resident_separator_executor as resident_executor
 import tools.serve_persistent_separator as separator_server
+from tools.stem_forensic_crosscheck import score_cross_stem_forensic_matrix
 from tools.persistent_separator_backend import (
     MODE_PERSISTENT_SERVER,
     PersistentSeparatorClient,
@@ -23,7 +24,11 @@ from tools.persistent_separator_backend import (
     SeparatorBackendConfig,
     separator_cache_key,
 )
-from tools.run_fully_automatic_stem_search import _run_target_specific_commands, execute_recipe_candidate
+from tools.run_fully_automatic_stem_search import (
+    _candidate_contamination_checks,
+    _run_target_specific_commands,
+    execute_recipe_candidate,
+)
 from tools.resident_separator_executor import (
     RESIDENT_FIXTURE_ROUTE_ID,
     AudioSeparatorResidentExecutor,
@@ -68,6 +73,157 @@ def test_persistent_separator_config_forbids_cpu_fallback_when_gpu_required() ->
             require_gpu=True,
             device="cpu",
         ).validated()
+
+
+def test_persistent_separator_config_allows_mps_only_for_persistent_backend() -> None:
+    config = SeparatorBackendConfig(
+        mode=MODE_PERSISTENT_SERVER,
+        server_url="http://127.0.0.1:9",
+        require_gpu=True,
+        device="mps",
+    ).validated()
+
+    assert config.device == "mps"
+    with pytest.raises(ValueError, match="mps_requires_persistent"):
+        SeparatorBackendConfig(mode="subprocess", require_gpu=True, device="mps").validated()
+
+
+def test_mps_persistent_backend_preflight_delegates_without_nvidia_smi(monkeypatch) -> None:
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("nvidia-smi should not be called for mps persistent backend")
+
+    monkeypatch.setattr(stem_search.subprocess, "run", fail_if_called)
+    config = SeparatorBackendConfig(
+        mode=MODE_PERSISTENT_SERVER,
+        server_url="http://127.0.0.1:8793",
+        require_gpu=True,
+        device="mps",
+    ).validated()
+
+    preflight = stem_search._collect_separator_accelerator_preflight(
+        require_gpu=True,
+        min_free_mib=4096,
+        separator_backend_config=config,
+    )
+
+    assert preflight["status"] == "delegated_to_persistent_backend"
+    assert preflight["accelerator"] == "mps"
+
+
+def test_persistent_mps_minus_pair_recipe_uses_dedicated_minus_route_without_stem_sum() -> None:
+    recipe = stem_search.build_persistent_mps_minus_pair_recipe(
+        contamination_model_manifest="artifacts/scd/m001/manifest.json",
+    )
+
+    assert recipe["available"] is True
+    assert recipe["profile"] == stem_search.PERSISTENT_MPS_MINUS_PAIR_PROFILE
+    candidate = recipe["candidates"][0]
+    assert candidate["diagnostic_only"] is True
+    assert candidate["required_stems"] == ["vocals", "minus"]
+    assert candidate["minus_source"] == "minus_lane"
+    assert candidate["minus_rebuilt_from_non_vocal_stems"] is False
+    routes = candidate["target_specific_commands"]
+    assert [route["role"] for route in routes] == ["vocals", "minus"]
+    assert {route["route_id"] for route in routes} == {stem_search.PERSISTENT_MPS_MINUS_PAIR_ROUTE_ID}
+    assert routes[1]["output_map"] == {"minus": "instrumental"}
+    assert all(route["server_stems"] == ["vocals", "instrumental"] for route in routes)
+    assert routes[0]["shared_separator_cache_id"] == routes[1]["shared_separator_cache_id"]
+    checks, hints_used = _candidate_contamination_checks(
+        {
+            **candidate,
+            "contamination_model_manifest": recipe["contamination_model_manifest"],
+        }
+    )
+    assert hints_used is True
+    assert candidate["contamination_check_mode"] == "explicit_only"
+    assert candidate["use_default_contamination_model_manifest"] is False
+    assert checks == [{"tested_stem": "minus", "foreign_source": "vocals"}]
+    assert candidate["cross_stem_forensic_gate"]["pairs"] == [{"tested_stem": "minus", "source_stem": "vocals"}]
+
+
+def test_explicit_forensic_pairs_fail_closed_when_empty(tmp_path: Path) -> None:
+    result = score_cross_stem_forensic_matrix(
+        stem_paths={},
+        output_dir=tmp_path / "forensic",
+        config={"enabled": True, "pairs": []},
+    )
+
+    assert result["check_mode"] == "explicit_pairs"
+    assert result["verdict"] == "blocked_unknown"
+    assert result["blocker_reasons"] == ["missing_forensic_pairs"]
+
+
+def test_persistent_mps_minus_pair_run_bypasses_demucs_availability_and_uses_shared_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mix = tmp_path / "mix.flac"
+    _write_stem(mix, frames=128)
+    calls: list[dict[str, object]] = []
+
+    def fail_if_cuda_preflight_is_called(*_args, **_kwargs):
+        raise AssertionError("cuda/nvidia-smi preflight should not be called for persistent mps route")
+
+    class FakePersistentSeparatorClient:
+        def __init__(self, server_url: str, *, request_timeout_sec: float = 30.0) -> None:
+            self.server_url = server_url
+            self.request_timeout_sec = request_timeout_sec
+
+        def separate(self, **kwargs: object) -> dict[str, object]:
+            calls.append(dict(kwargs))
+            source_audio, sample_rate = sf.read(
+                Path(str(kwargs["source_audio_path"])),
+                dtype="float32",
+                always_2d=False,
+            )
+            out_stems = Path(str(kwargs["output_dir"])) / "stems"
+            out_stems.mkdir(parents=True, exist_ok=True)
+            sf.write(out_stems / "vocals.flac", np.zeros_like(source_audio, dtype=np.float32), sample_rate)
+            sf.write(out_stems / "instrumental.flac", source_audio, sample_rate)
+            return {
+                "status": "ok",
+                "stems_dir": str(out_stems),
+                "cache_hit": False,
+                "actual_device": "mps",
+            }
+
+    monkeypatch.setattr(stem_search, "_collect_cuda_preflight", fail_if_cuda_preflight_is_called)
+    monkeypatch.setattr(stem_search, "PersistentSeparatorClient", FakePersistentSeparatorClient)
+
+    result = stem_search.run_fully_automatic_stem_search(
+        mix_path=mix,
+        output_dir=tmp_path / "run",
+        window_sec=1.0,
+        max_candidates=1,
+        require_gpu=True,
+        no_artifact_rag=True,
+        demucs_available=False,
+        separator_backend=MODE_PERSISTENT_SERVER,
+        separator_server_url="http://127.0.0.1:8793",
+        separator_device="mps",
+    )
+
+    assert result["gpu_preflight"]["status"] == "delegated_to_persistent_backend"
+    assert result["verdict"] != "blocked_no_available_separator"
+    assert result.get("unavailable_reason") != "missing_demucs_cli"
+    assert result["candidate_count"] == 1
+    assert len(calls) == 1
+    assert calls[0]["device"] == "mps"
+    assert calls[0]["stems"] == ["vocals", "instrumental"]
+    candidate = result["candidates"][0]
+    assert candidate["required_stems"] == ["vocals", "minus"]
+    assert candidate["stem_paths"]["minus"].endswith("minus.flac")
+    assert candidate["minus_rebuilt_from_non_vocal_stems"] is False
+    assert candidate["delivery_allowed"] is False
+    assert candidate["contamination_score"]["check_mode"] == "explicit_only"
+    assert candidate["contamination_score"]["required_check_count"] == 1
+    assert candidate["cross_stem_forensic_score"]["check_mode"] == "explicit_pairs"
+    assert candidate["cross_stem_forensic_score"]["verdict"] == "auto_accept"
+    assert not any(
+        str(reason).startswith("missing_forensic_")
+        for reason in candidate["cross_stem_forensic_score"]["blocker_reasons"]
+    )
+    routes = candidate["target_specific_composition"]["routes"]
+    assert routes[1]["separator_backend"]["cache_hit"] is True
 
 
 def test_persistent_separator_client_reports_unavailable() -> None:

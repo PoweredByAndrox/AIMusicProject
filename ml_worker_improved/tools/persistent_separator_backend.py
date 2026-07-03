@@ -49,7 +49,9 @@ class SeparatorBackendConfig:
         if mode not in VALID_BACKEND_MODES:
             raise ValueError(f"unknown_separator_backend:{self.mode}")
         device = str(self.device or ("cuda" if self.require_gpu else "cpu")).strip().lower()
-        if self.require_gpu and device != "cuda":
+        if self.require_gpu and device == "mps" and mode != MODE_PERSISTENT_SERVER:
+            raise ValueError("mps_requires_persistent_separator_backend")
+        if self.require_gpu and device not in {"cuda", "mps"}:
             raise ValueError("cpu_fallback_forbidden:require_gpu_true")
         server_url = str(self.server_url or "").strip().rstrip("/")
         if mode == MODE_PERSISTENT_SERVER and not server_url:

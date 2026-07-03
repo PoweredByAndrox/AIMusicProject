@@ -316,3 +316,102 @@ def test_mac_api_start_job_blocks_without_windows_project_mount(tmp_path):
     assert manifest["delivery_allowed"] is False
     assert manifest["mount_preflight"]["can_write_route_artifacts"] is False
     assert not (artifacts_root / "mac_api").exists()
+
+
+def test_mac_api_separate_adapts_persistent_contract_to_mps_export(tmp_path, monkeypatch):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    artifacts_root = project_root / "artifacts"
+    output_dir = artifacts_root / "rank" / "r001" / "c001"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=artifacts_root,
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+
+    def fake_run(command, **_kwargs):
+        run_dir = output_dir / "run"
+        audio_dir = run_dir / "audio"
+        audio_dir.mkdir(parents=True)
+        vocals_path = audio_dir / "vocals.flac"
+        instrumental_path = audio_dir / "instrumental.flac"
+        vocals_path.write_bytes(b"vocals")
+        instrumental_path.write_bytes(b"instrumental")
+        (run_dir / "stem_manifest.json").write_text(
+            """
+{
+  "stems": {
+    "vocals": {"path": "VOCALS_PATH", "role": "companion"},
+    "instrumental": {"path": "INSTRUMENTAL_PATH", "role": "target"}
+  }
+}
+""".replace("VOCALS_PATH", str(vocals_path).replace("\\", "\\\\")).replace(
+                "INSTRUMENTAL_PATH", str(instrumental_path).replace("\\", "\\\\")
+            ),
+            encoding="utf-8",
+        )
+        return module.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    status_code, response = runner.separate(
+        {
+            "route_id": "becruily_instrumental_vocals",
+            "source_audio_path": str(source_audio),
+            "output_dir": str(output_dir),
+            "device": "cuda",
+            "require_gpu": True,
+            "stems": ["instrumental", "vocals"],
+            "timeout_sec": 30,
+        }
+    )
+
+    assert status_code == 200
+    assert response["status"] == "ok"
+    assert response["actual_device"] == "mps"
+    assert response["requested_device"] == "cuda"
+    assert response["delivery_allowed"] is False
+    assert response["can_accept_delivery"] is False
+    assert response["missing_stems"] == []
+    assert (output_dir / "stems" / "instrumental.flac").read_bytes() == b"instrumental"
+    assert (output_dir / "stems" / "vocals.flac").read_bytes() == b"vocals"
+    assert response["mount_preflight"]["preflight_status"] == "passed"
+
+
+def test_mac_api_separate_blocks_unsupported_route_without_delivery(tmp_path):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    output_dir = project_root / "artifacts" / "rank" / "r001" / "bad"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=project_root / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+
+    status_code, response = runner.separate(
+        {
+            "route_id": "raw_track_title_bad_route",
+            "source_audio_path": str(source_audio),
+            "output_dir": str(output_dir),
+            "device": "cuda",
+            "require_gpu": True,
+            "stems": ["instrumental"],
+        }
+    )
+
+    assert status_code == 400
+    assert response["status"] == "blocked"
+    assert "unsupported Mac MPS route" in response["reason"]
+    assert response["delivery_allowed"] is False

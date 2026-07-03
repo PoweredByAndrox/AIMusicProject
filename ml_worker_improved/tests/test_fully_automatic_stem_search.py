@@ -3010,9 +3010,9 @@ def test_model_split_v2_fast_route_budget_caps_slow_delivery_pair_routes(tmp_pat
     route_timeouts = {route["route_id"]: route["timeout_sec"] for route in routes}
     assert result["route_budget_profile"] == "fast"
     assert timeouts_by_command["fixture-vocal"] == 30
-    assert timeouts_by_command["fixture-minus"] == 30
+    assert timeouts_by_command["fixture-minus"] == 120
     assert route_timeouts["mdx23c_vocals"] == 30
-    assert route_timeouts["becruily_instrumental_vocals"] == 30
+    assert route_timeouts["becruily_instrumental_vocals"] == 120
 
 
 def test_model_split_v2_mandatory_gates_cannot_be_disabled(tmp_path: Path) -> None:
@@ -5432,6 +5432,39 @@ def test_contamination_model_manifest_applies_to_full_matrix() -> None:
     assert next(
         check for check in checks if check["tested_stem"] == "vocals" and check["foreign_source"] == "drums"
     )["model_manifest"] == "artifacts/scd/m001/manifest.json"
+
+
+def test_explicit_only_contamination_checks_can_skip_default_model_manifest() -> None:
+    checks, hints_used = _candidate_contamination_checks(
+        {
+            "contamination_model_manifest": "artifacts/scd/m001/manifest.json",
+            "use_default_contamination_model_manifest": False,
+            "contamination_check_mode": "explicit_only",
+            "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+        }
+    )
+
+    assert hints_used is True
+    assert checks == [{"tested_stem": "minus", "foreign_source": "vocals"}]
+
+
+def test_persistent_mps_pair_recipe_scores_only_minus_vocal_without_neural_manifest() -> None:
+    recipe = stem_search.build_persistent_mps_minus_pair_recipe(
+        contamination_model_manifest="artifacts/scd/m001/manifest.json",
+    )
+
+    candidate = recipe["candidates"][0]
+    checks, hints_used = _candidate_contamination_checks(
+        {
+            **candidate,
+            "contamination_model_manifest": recipe["contamination_model_manifest"],
+        }
+    )
+
+    assert hints_used is True
+    assert candidate["contamination_check_mode"] == "explicit_only"
+    assert candidate["use_default_contamination_model_manifest"] is False
+    assert checks == [{"tested_stem": "minus", "foreign_source": "vocals"}]
 
 
 def test_no_default_separator_blocks_without_old_recipe(tmp_path: Path) -> None:

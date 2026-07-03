@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -332,6 +333,71 @@ def _summarize_stems(run_dir: Path) -> dict[str, Any]:
     return {"stem_manifest_exists": True, "stems": stems}
 
 
+def _persistent_separator_response(
+    *,
+    output_dir: Path,
+    route_id: str,
+    stems: list[str],
+    status: str,
+    returncode: int,
+    reason: str,
+    elapsed_sec: float,
+    requested_device: str,
+    require_gpu: bool,
+    mount_preflight: Optional[dict[str, Any]] = None,
+    missing_stems: Optional[list[str]] = None,
+    copied_stems: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    response = {
+        "schema": "persistent_separator_response.v1",
+        "status": str(status),
+        "cache_hit": False,
+        "cache_key": "",
+        "route_id": str(route_id),
+        "output_dir": str(output_dir),
+        "stems_dir": str(output_dir / "stems"),
+        "returncode": int(returncode),
+        "reason": str(reason or ""),
+        "missing_stems": list(missing_stems or []),
+        "copied_stems": dict(copied_stems or {}),
+        "requested_stems": list(stems),
+        "requested_device": str(requested_device or ""),
+        "actual_device": "mps",
+        "require_gpu": bool(require_gpu),
+        "elapsed_sec": float(elapsed_sec),
+        "mac_mps_backend_used": True,
+        "resident_backend_used": False,
+        "resident_capable": False,
+        "delivery_allowed": False,
+        "can_accept_delivery": False,
+        "presentation_status": "diagnostic_mps_api_only",
+    }
+    if mount_preflight is not None:
+        response["mount_preflight"] = mount_preflight
+        response["mac_windows_project_mount"] = str(mount_preflight.get("mac_windows_project_mount") or "")
+        response["windows_output_path"] = str(mount_preflight.get("windows_output_path") or "")
+    return response
+
+
+def _copy_stems_for_persistent_response(run_dir: Path, output_dir: Path, stems: list[str]) -> tuple[dict[str, str], list[str]]:
+    summary = _summarize_stems(run_dir)
+    available = summary.get("stems") if isinstance(summary.get("stems"), dict) else {}
+    stems_dir = output_dir / "stems"
+    stems_dir.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, str] = {}
+    missing: list[str] = []
+    for stem in stems:
+        info = available.get(stem) if isinstance(available, dict) else None
+        source_path = Path(str(info.get("path") or "")) if isinstance(info, dict) else run_dir / "audio" / f"{stem}.flac"
+        if not source_path.is_file():
+            missing.append(stem)
+            continue
+        target_path = stems_dir / f"{stem}.flac"
+        shutil.copy2(source_path, target_path)
+        copied[stem] = str(target_path)
+    return copied, missing
+
+
 class MacMpsJobRunner:
     def __init__(self, config: MacMpsApiConfig):
         self.config = config
@@ -400,6 +466,141 @@ class MacMpsJobRunner:
             if str(candidate.get("job_id") or "") == str(job_id):
                 return candidate
         return None
+
+    def separate(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        started_at = time.perf_counter()
+        route_id = str(payload.get("route_id") or payload.get("model_name") or DEFAULT_MODEL_NAME)
+        source_audio_path = Path(str(payload.get("source_audio_path") or "")).expanduser().resolve()
+        output_dir_raw = str(payload.get("output_dir") or "").strip()
+        output_dir = Path(output_dir_raw).expanduser().resolve() if output_dir_raw else self.config.artifacts_root / "mac_api" / "missing_output"
+        stems = [str(stem) for stem in payload.get("stems") or []]
+        requested_device = str(payload.get("device") or "").strip().lower()
+        require_gpu = bool(payload.get("require_gpu", True))
+        timeout_sec = int(payload.get("timeout_sec") or 0)
+        if not output_dir_raw:
+            return 400, _persistent_separator_response(
+                output_dir=output_dir,
+                route_id=route_id,
+                stems=stems,
+                status="blocked",
+                returncode=64,
+                reason="missing_output_dir",
+                elapsed_sec=round(time.perf_counter() - started_at, 6),
+                requested_device=requested_device,
+                require_gpu=require_gpu,
+            )
+        mount_preflight = preflight_mac_windows_project_mount(
+            mac_windows_project_mount=self.config.mac_windows_project_mount,
+            output_path=output_dir,
+            windows_project_root=self.config.windows_project_root,
+        )
+        if mount_preflight.get("preflight_status") != "passed":
+            response = _persistent_separator_response(
+                output_dir=output_dir,
+                route_id=route_id,
+                stems=stems,
+                status="blocked",
+                returncode=78,
+                reason=str(mount_preflight.get("blocked_reason") or "mac_windows_project_mount_preflight_failed"),
+                elapsed_sec=round(time.perf_counter() - started_at, 6),
+                requested_device=requested_device,
+                require_gpu=require_gpu,
+                mount_preflight=mount_preflight,
+            )
+            _write_json(output_dir / "persistent_separator.json", response)
+            return 400, response
+        output_dir.mkdir(parents=True, exist_ok=True)
+        progress_path = output_dir / "progress.jsonl"
+        _append_progress(
+            progress_path,
+            "persistent_separate",
+            "start",
+            route_id=route_id,
+            requested_device=requested_device,
+            actual_device="mps",
+            require_gpu=require_gpu,
+            stems=stems,
+        )
+        if not source_audio_path.exists():
+            response = _persistent_separator_response(
+                output_dir=output_dir,
+                route_id=route_id,
+                stems=stems,
+                status="blocked",
+                returncode=20,
+                reason=f"source audio is missing: {source_audio_path}",
+                elapsed_sec=round(time.perf_counter() - started_at, 6),
+                requested_device=requested_device,
+                require_gpu=require_gpu,
+                mount_preflight=mount_preflight,
+            )
+            _write_json(output_dir / "persistent_separator.json", response)
+            _append_progress(progress_path, "persistent_separate", "missing_source", reason=response["reason"])
+            return 400, response
+        run_dir = output_dir / "run"
+        try:
+            command, env = build_separator_export_command(
+                config=self.config,
+                route_id=route_id,
+                source_audio_path=source_audio_path,
+                output_dir=run_dir,
+            )
+        except ValueError as exc:
+            response = _persistent_separator_response(
+                output_dir=output_dir,
+                route_id=route_id,
+                stems=stems,
+                status="blocked",
+                returncode=65,
+                reason=str(exc),
+                elapsed_sec=round(time.perf_counter() - started_at, 6),
+                requested_device=requested_device,
+                require_gpu=require_gpu,
+                mount_preflight=mount_preflight,
+            )
+            _write_json(output_dir / "persistent_separator.json", response)
+            _append_progress(progress_path, "persistent_separate", "unsupported_route", reason=response["reason"])
+            return 400, response
+        run_log_path = output_dir / "run.log"
+        _append_progress(progress_path, "mps_export", "start", command=command, timeout_sec=timeout_sec)
+        with run_log_path.open("w", encoding="utf-8") as log_handle:
+            completed = subprocess.run(
+                command,
+                cwd=str(self.config.project_root / "ml_worker_improved"),
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                timeout=timeout_sec if timeout_sec > 0 else None,
+            )
+        copied, missing = _copy_stems_for_persistent_response(run_dir, output_dir, stems)
+        status = "ok" if completed.returncode == 0 and not missing else "blocked"
+        reason = "" if status == "ok" else ("missing_required_stems" if completed.returncode == 0 else f"export failed rc={completed.returncode}")
+        response = _persistent_separator_response(
+            output_dir=output_dir,
+            route_id=route_id,
+            stems=stems,
+            status=status,
+            returncode=int(completed.returncode),
+            reason=reason,
+            elapsed_sec=round(time.perf_counter() - started_at, 6),
+            requested_device=requested_device,
+            require_gpu=require_gpu,
+            mount_preflight=mount_preflight,
+            missing_stems=missing,
+            copied_stems=copied,
+        )
+        _write_json(output_dir / "persistent_separator.json", response)
+        _append_progress(
+            progress_path,
+            "persistent_separate",
+            f"end_{status}",
+            returncode=int(completed.returncode),
+            missing_stems=missing,
+            elapsed_sec=response["elapsed_sec"],
+        )
+        return (200 if status == "ok" else 500), response
 
     def _run_job(
         self,
@@ -539,12 +740,16 @@ class MacMpsApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib HTTP handler API
         parsed = urlparse(self.path)
-        if parsed.path != "/jobs":
+        if parsed.path not in {"/jobs", "/separate"}:
             self._send_json(404, {"error": "not found"})
             return
         try:
             length = int(self.headers.get("Content-Length") or "0")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if parsed.path == "/separate":
+                status_code, manifest = self.runner.separate(payload)
+                self._send_json(status_code, manifest)
+                return
             manifest = self.runner.start_job(payload)
         except Exception as exc:  # pragma: no cover - exercised through integration/manual API
             self._send_json(400, {"error": str(exc)})
