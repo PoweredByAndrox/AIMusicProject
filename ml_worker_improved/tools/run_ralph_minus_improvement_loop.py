@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -720,8 +721,53 @@ def compare_focus_summaries(candidate_summary: dict[str, Any], base_summary: dic
 
 def write_audio(path: Path, audio: np.ndarray, sample_rate: int) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(path), audio.astype(np.float32, copy=False), sample_rate)
+    sf.write(str(path), audio.astype(np.float32, copy=False), sample_rate, subtype="PCM_24")
     return path
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def audio_fingerprint(audio: np.ndarray) -> str:
+    array = np.ascontiguousarray(audio.astype(np.float32, copy=False))
+    digest = hashlib.sha256()
+    digest.update(str(array.shape).encode("utf-8"))
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def validate_prepared_input_roles(provenance: dict[str, dict[str, Any]]) -> None:
+    collision_pairs = (
+        ("base_product_minus", "guide_product_minus"),
+        ("primary_vocal_reference", "secondary_vocal_reference"),
+    )
+    blockers: list[dict[str, Any]] = []
+    for left_role, right_role in collision_pairs:
+        left = provenance[left_role]
+        right = provenance[right_role]
+        if left["normalized_sha256"] != right["normalized_sha256"]:
+            continue
+        if left["intended_audio_fingerprint"] == right["intended_audio_fingerprint"]:
+            continue
+        blockers.append(
+            {
+                "left_role": left_role,
+                "right_role": right_role,
+                "left_source_path": left["source_path"],
+                "right_source_path": right["source_path"],
+                "normalized_sha256": left["normalized_sha256"],
+                "reason": "distinct_normalized_audio_roles_share_one_output_file_hash",
+            }
+        )
+    if blockers:
+        raise RuntimeError(
+            "normalized_input_role_collision: " + json.dumps(blockers, ensure_ascii=False)
+        )
 
 
 def emit_progress(progress_path: Path, **payload: Any) -> None:
@@ -755,17 +801,81 @@ def prepare_recipe_inputs(
     raw_audio, base_audio, guide_minus, primary_vocals, secondary_vocals = match_length(
         [raw_audio, base_audio, guide_minus, primary_vocals, secondary_vocals]
     )
+    role_inputs = {
+        "raw_mix": {
+            "source_path": raw_audio_path,
+            "normalized_path": output_dir / "raw_mix.flac",
+            "audio": raw_audio,
+            "contract_role": "source_mix",
+        },
+        "base_product_minus": {
+            "source_path": base_minus_path,
+            "normalized_path": output_dir / "base_product_minus.flac",
+            "audio": base_audio,
+            "contract_role": "baseline_product_minus",
+        },
+        "guide_product_minus": {
+            "source_path": guide_minus_path,
+            "normalized_path": output_dir / "guide_product_minus.flac",
+            "audio": guide_minus,
+            "contract_role": "guide_product_minus",
+        },
+        "primary_vocal_reference": {
+            "source_path": primary_vocals_path,
+            "normalized_path": output_dir / "primary_vocal_reference.flac",
+            "audio": primary_vocals,
+            "contract_role": "primary_vocal_reference",
+        },
+        "secondary_vocal_reference": {
+            "source_path": secondary_vocals_path,
+            "normalized_path": output_dir / "secondary_vocal_reference.flac",
+            "audio": secondary_vocals,
+            "contract_role": "secondary_vocal_reference",
+        },
+    }
+    for item in role_inputs.values():
+        write_audio(Path(item["normalized_path"]), item["audio"], sample_rate)
+    provenance: dict[str, dict[str, Any]] = {}
+    for role, item in role_inputs.items():
+        source_path = Path(item["source_path"])
+        normalized_path = Path(item["normalized_path"])
+        normalized_audio, _ = load_audio(normalized_path, sample_rate)
+        provenance[role] = {
+            "role": role,
+            "contract_role": item["contract_role"],
+            "source_path": str(source_path),
+            "source_sha256": sha256_file(source_path),
+            "normalized_path": str(normalized_path),
+            "normalized_filename": normalized_path.name,
+            "normalized_sha256": sha256_file(normalized_path),
+            "intended_audio_fingerprint": audio_fingerprint(item["audio"]),
+            "normalized_audio_fingerprint": audio_fingerprint(normalized_audio),
+            "sample_rate": sample_rate,
+        }
+    validate_prepared_input_roles(provenance)
+    normalized_input_manifest = output_dir / "inputs_manifest.json"
+    normalized_input_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "ralph_normalized_inputs",
+                "sample_rate": sample_rate,
+                "provenance": provenance,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     return {
         "sample_rate": sample_rate,
-        "raw_audio_path": write_audio(output_dir / "raw_audio.flac", raw_audio, sample_rate),
-        "base_minus_path": write_audio(output_dir / "base_minus.flac", base_audio, sample_rate),
-        "guide_minus_path": write_audio(output_dir / "guide_minus.flac", guide_minus, sample_rate),
-        "primary_vocals_path": write_audio(output_dir / "primary_vocals.flac", primary_vocals, sample_rate),
-        "secondary_vocals_path": write_audio(
-            output_dir / "secondary_vocals.flac",
-            secondary_vocals,
-            sample_rate,
-        ),
+        "raw_audio_path": Path(role_inputs["raw_mix"]["normalized_path"]),
+        "base_minus_path": Path(role_inputs["base_product_minus"]["normalized_path"]),
+        "guide_minus_path": Path(role_inputs["guide_product_minus"]["normalized_path"]),
+        "primary_vocals_path": Path(role_inputs["primary_vocal_reference"]["normalized_path"]),
+        "secondary_vocals_path": Path(role_inputs["secondary_vocal_reference"]["normalized_path"]),
+        "normalized_input_manifest": normalized_input_manifest,
+        "provenance": provenance,
     }
 
 
@@ -916,6 +1026,7 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
         guide_minus_path=str(prepared_inputs["guide_minus_path"]),
         primary_vocals_path=str(prepared_inputs["primary_vocals_path"]),
         secondary_vocals_path=str(prepared_inputs["secondary_vocals_path"]),
+        normalized_input_manifest=str(prepared_inputs["normalized_input_manifest"]),
         elapsed_sec=round(time.perf_counter() - started_at, 3),
     )
     raw_audio_path = Path(prepared_inputs["raw_audio_path"])
@@ -1088,6 +1199,8 @@ def run_ralph_minus_improvement_loop(args: argparse.Namespace) -> dict[str, Any]
                 for key, value in prepared_inputs.items()
                 if key.endswith("_path")
             },
+            "normalized_input_manifest": str(prepared_inputs["normalized_input_manifest"]),
+            "normalized_input_provenance": prepared_inputs["provenance"],
             "normalized_sample_rate": prepared_inputs["sample_rate"],
         },
         "focus_window_source": str(args.focus_windows_jsonl or ""),

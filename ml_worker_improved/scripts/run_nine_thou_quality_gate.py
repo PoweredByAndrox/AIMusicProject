@@ -22,7 +22,7 @@ TOOLS_ROOT = SCRIPT_ROOT.parent / "tools"
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
-from docker_runtime import require_docker_runtime  # noqa: E402
+from docker_runtime import cli_runtime_contract, require_docker_runtime  # noqa: E402
 from build_instrumental_from_stem_manifest import (  # noqa: E402
     DEFAULT_EXCLUDED_STEMS,
     build_instrumental,
@@ -141,6 +141,23 @@ def utc_timestamp() -> str:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def runtime_execution_contract(*, step: str = "", requires: Sequence[str] = ()) -> dict[str, Any]:
+    runtime = cli_runtime_contract(allow_native_runtime=False)
+    contract = {
+        "tool": "ml_worker_improved/scripts/run_nine_thou_quality_gate.py",
+        "runtime": str(runtime.get("container_runtime") or ""),
+        "runtime_environment": str(runtime.get("runtime_environment") or ""),
+        "container_runtime": str(runtime.get("container_runtime") or ""),
+        "native_runtime_allowed": bool(runtime.get("native_runtime_allowed")),
+        "intended_runtime": "project-approved container route",
+    }
+    if step:
+        contract["step"] = step
+    if requires:
+        contract["requires"] = list(requires)
+    return contract
 
 
 def finite_db(numerator: float, denominator: float) -> float:
@@ -400,10 +417,10 @@ def build_probe_report(
     return {
         "schema_version": 1,
         "execution": {
-            "tool": "ml_worker_improved/scripts/run_nine_thou_quality_gate.py",
-            "step": "probe_golden_reference_pair",
-            "requires": ["ffprobe", "ffmpeg", "numpy"],
-            "intended_runtime": "docker ml-worker",
+            **runtime_execution_contract(
+                step="probe_golden_reference_pair",
+                requires=("ffprobe", "ffmpeg", "numpy"),
+            ),
         },
         "inputs": {
             "reference_a": probe_audio(full_mix_path),
@@ -443,9 +460,7 @@ def maybe_build_derived_instrumental(candidate: CandidateSpec) -> dict[str, Any]
     report = {
         "schema_version": 1,
         "execution": {
-            "tool": "ml_worker_improved/scripts/run_nine_thou_quality_gate.py",
-            "step": "build_instrumental_from_stem_manifest",
-            "intended_runtime": "docker ml-worker",
+            **runtime_execution_contract(step="build_instrumental_from_stem_manifest"),
         },
         "inputs": {
             "stem_manifest": str(candidate.stem_manifest_path),
@@ -529,8 +544,7 @@ def build_candidate_report(
     return {
         "schema_version": 1,
         "execution": {
-            "tool": "ml_worker_improved/scripts/run_nine_thou_quality_gate.py",
-            "intended_runtime": "docker ml-worker",
+            **runtime_execution_contract(),
             "threshold_exit_gate": "disabled",
             "does_not_call_fail_on_threshold": True,
         },
@@ -657,8 +671,7 @@ def run_quality_gate(
     summary = {
         "schema_version": 1,
         "execution": {
-            "tool": "ml_worker_improved/scripts/run_nine_thou_quality_gate.py",
-            "runtime": "docker compose run --rm --no-deps --entrypoint python ml-worker",
+            **runtime_execution_contract(),
             "generated_at_utc": utc_timestamp(),
             "gate_type": "lossy_reference_minus_proxy_regression_with_pseudo_objective_metrics",
             "threshold_exit_gate": "disabled",
@@ -700,7 +713,7 @@ def run_quality_gate(
             "threshold_failures_do_not_change_exit_code": True,
         },
         "interpretation_limits": [
-            "This script is the repeatable Docker-only gate for the local Nine Thou fixture.",
+            "This script is the repeatable project-container gate for the local Nine Thou fixture.",
             "It records threshold verdicts in JSON and intentionally does not use --fail-on-threshold.",
             "It adds pseudo-objective SDR/SI-SDR/SIR/SAR-like metrics from the available full mix/minus pair.",
             "Verified isolated stem ground truth is still required before claiming true source-separation objective quality.",
@@ -712,7 +725,7 @@ def run_quality_gate(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the repeatable Docker-only Nine Thou instrumental quality gate without --fail-on-threshold."
+        description="Run the repeatable project-container Nine Thou instrumental quality gate without --fail-on-threshold."
     )
     parser.add_argument("--full-mix", type=Path, default=DEFAULT_FULL_MIX_PATH)
     parser.add_argument("--reference-minus", type=Path, default=DEFAULT_REFERENCE_MINUS_PATH)

@@ -193,6 +193,8 @@ class TestRunNineThouQualityGate(unittest.TestCase):
             self.assertEqual(summary["overall"]["status"], "passed")
             self.assertEqual(saved_summary["execution"]["threshold_exit_gate"], "disabled")
             self.assertTrue(saved_summary["execution"]["does_not_call_fail_on_threshold"])
+            self.assertIn(saved_summary["execution"]["container_runtime"], {"apple_container", "docker"})
+            self.assertNotIn("docker compose", saved_summary["execution"]["runtime"])
             self.assertEqual(saved_report["verdict"]["status"], "passed")
             self.assertEqual(
                 saved_report["pseudo_objective_quality"]["ground_truth_mode"],

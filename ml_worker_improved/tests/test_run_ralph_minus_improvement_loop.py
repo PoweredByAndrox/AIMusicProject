@@ -434,8 +434,9 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         frames = 1000
         t = np.linspace(0.0, 1.0, frames, dtype=np.float32)
         vocal = np.stack([np.sin(2.0 * np.pi * 8.0 * t), np.sin(2.0 * np.pi * 8.0 * t)], axis=1).astype(np.float32)
-        base = (0.8 * vocal).astype(np.float32)
-        candidate = (0.6 * vocal).astype(np.float32)
+        backing = np.stack([np.sin(2.0 * np.pi * 21.0 * t), np.sin(2.0 * np.pi * 21.0 * t)], axis=1).astype(np.float32)
+        base = (0.8 * vocal + 0.2 * backing).astype(np.float32)
+        candidate = (0.35 * vocal + 0.2 * backing).astype(np.float32)
         focus_windows = [{"start_sec": 0.0, "end_sec": 2.0, "critic_decision": "blocked_hard_case"}]
 
         base_summary = module.calculate_focus_window_summary(
@@ -484,13 +485,58 @@ class RalphMinusImprovementLoopTests(unittest.TestCase):
         }
         self.assertEqual(set(sample_rates.values()), {8000})
         self.assertEqual(prepared["sample_rate"], 8000)
-        self.assertTrue(str(prepared["raw_audio_path"]).endswith("raw_audio.flac"))
+        self.assertTrue(str(prepared["raw_audio_path"]).endswith("raw_mix.flac"))
+        self.assertTrue(str(prepared["base_minus_path"]).endswith("base_product_minus.flac"))
+        self.assertTrue(str(prepared["guide_minus_path"]).endswith("guide_product_minus.flac"))
+        self.assertTrue(str(prepared["primary_vocals_path"]).endswith("primary_vocal_reference.flac"))
+        self.assertTrue(str(prepared["secondary_vocals_path"]).endswith("secondary_vocal_reference.flac"))
+        self.assertTrue(Path(prepared["normalized_input_manifest"]).is_file())
+        self.assertEqual(
+            prepared["provenance"]["base_product_minus"]["source_path"],
+            str(base_minus_path),
+        )
+        self.assertEqual(
+            prepared["provenance"]["guide_product_minus"]["source_path"],
+            str(guide_minus_path),
+        )
 
-    def _write_audio(self, path: Path, *, sample_rate: int) -> Path:
+    def test_prepared_input_role_collision_is_rejected(self) -> None:
+        module = _load_module()
+        provenance = {
+            "base_product_minus": {
+                "source_path": "/src/base.flac",
+                "normalized_sha256": "same-output",
+                "intended_audio_fingerprint": "base-audio",
+                "normalized_audio_fingerprint": "base-audio",
+            },
+            "guide_product_minus": {
+                "source_path": "/src/guide.flac",
+                "normalized_sha256": "same-output",
+                "intended_audio_fingerprint": "guide-audio",
+                "normalized_audio_fingerprint": "guide-audio",
+            },
+            "primary_vocal_reference": {
+                "source_path": "/src/primary.flac",
+                "normalized_sha256": "primary-output",
+                "intended_audio_fingerprint": "primary-audio",
+                "normalized_audio_fingerprint": "primary-audio",
+            },
+            "secondary_vocal_reference": {
+                "source_path": "/src/secondary.flac",
+                "normalized_sha256": "secondary-output",
+                "intended_audio_fingerprint": "secondary-audio",
+                "normalized_audio_fingerprint": "secondary-audio",
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "normalized_input_role_collision"):
+            module.validate_prepared_input_roles(provenance)
+
+    def _write_audio(self, path: Path, *, sample_rate: int, scale: float = 1.0) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         frames = sample_rate // 2
         audio = np.zeros((frames, 2), dtype=np.float32)
-        audio[:, 0] = np.linspace(-0.1, 0.1, frames, dtype=np.float32)
+        audio[:, 0] = scale * np.linspace(-0.1, 0.1, frames, dtype=np.float32)
         audio[:, 1] = audio[:, 0]
         sf.write(path, audio, sample_rate)
         return path

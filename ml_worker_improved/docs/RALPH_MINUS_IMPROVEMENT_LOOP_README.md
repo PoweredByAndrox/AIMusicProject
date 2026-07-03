@@ -2,7 +2,7 @@
 
 `tools/run_ralph_minus_improvement_loop.py` is a release-capable minus repair attempt. It is not the no-reference listen-preview wrapper.
 
-The route is Docker-only and external-only CPU/DSP scoring:
+The route uses the project-approved container runtime and external-only CPU/DSP scoring:
 
 - `gpu_inference_skipped=true`
 - `acceleration_mode=external_only_cpu_scoring`
@@ -22,6 +22,16 @@ The runner writes `ralph_minus_improvement_progress.jsonl` with flushed phase re
 - `end`
 
 Before running candidate recipes, the runner normalizes raw audio, base minus, guide minus, and vocal guide inputs into `normalized_inputs/` at the base minus sample rate. Candidate recipes consume only those normalized files so child tools do not fail on sample-rate drift.
+
+Normalized input files use role-explicit names so product aliases are not confused with model-output names:
+
+- `raw_mix.flac`
+- `base_product_minus.flac`
+- `guide_product_minus.flac`
+- `primary_vocal_reference.flac`
+- `secondary_vocal_reference.flac`
+
+The same directory must include `inputs_manifest.json`, which records each normalized file's role, source path, source SHA-256, normalized filename, normalized SHA-256, and intended/readback audio fingerprints. If two distinct roles collapse into one normalized file hash while their intended audio fingerprints differ, the runner fails fast with `normalized_input_role_collision` instead of continuing with ambiguous artifacts.
 
 When `--focus-windows-jsonl` is provided, the runner first filters rows by
 track/candidate and blocked-or-low-confidence criteria, then ranks eligible

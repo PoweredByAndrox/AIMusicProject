@@ -99,6 +99,61 @@ def _extract_windows(gate: np.ndarray, times: np.ndarray, *, threshold: float) -
     return windows
 
 
+def _frame_score_gate(
+    frame_score: np.ndarray,
+    *,
+    score_percentile: float,
+    smooth_width: int,
+    apply_threshold: float,
+) -> tuple[np.ndarray, dict[str, float | str]]:
+    positive_scores = frame_score[frame_score > 0.0]
+    if positive_scores.size == 0:
+        return np.zeros_like(frame_score, dtype=np.float32), {
+            "frame_score_threshold": 1.0,
+            "frame_score_max": 0.0,
+            "positive_frame_ratio": 0.0,
+            "gate_mode": "empty_score",
+        }
+
+    score_max = float(np.max(positive_scores))
+    score_threshold = float(np.percentile(positive_scores, float(score_percentile)))
+    gate_mode = "continuous_percentile"
+    if score_threshold >= score_max:
+        score_threshold = max(0.0, score_max * 0.5)
+        gate_mode = "continuous_max_guard"
+
+    soft_gate = np.clip(
+        (frame_score - score_threshold) / max(score_max - score_threshold, 1e-8),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    smoothed_gate = _smooth(soft_gate, width=int(smooth_width))
+    gate = np.clip(
+        (smoothed_gate - float(apply_threshold)) / max(1.0 - float(apply_threshold), 1e-8),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+
+    if not np.any(gate > 0.0):
+        recovered_gate = _smooth(
+            np.clip(frame_score / max(score_max, 1e-8), 0.0, 1.0).astype(np.float32),
+            width=int(smooth_width),
+        )
+        gate = np.clip(
+            (recovered_gate - float(apply_threshold)) / max(1.0 - float(apply_threshold), 1e-8),
+            0.0,
+            1.0,
+        ).astype(np.float32)
+        gate_mode = "continuous_sparse_recovery"
+
+    return gate, {
+        "frame_score_threshold": score_threshold,
+        "frame_score_max": score_max,
+        "positive_frame_ratio": float(np.mean(frame_score > 0.0)),
+        "gate_mode": gate_mode,
+    }
+
+
 def main() -> None:
     require_docker_runtime(
         tool_name="apply_windowed_hybrid_minus_cleanup.py",
@@ -187,11 +242,12 @@ def main() -> None:
         guide_improvement = np.power(np.clip(1.0 - guide_ratio, 0.0, 1.0), float(args.guide_power))
 
         frame_score = time_activity * guide_improvement[voice_band].mean(axis=0)
-        positive_scores = frame_score[frame_score > 0.0]
-        score_threshold = float(np.percentile(positive_scores, float(args.score_percentile))) if positive_scores.size else 1.0
-        gate_binary = (frame_score >= score_threshold).astype(np.float32)
-        gate = _smooth(gate_binary, width=int(args.gate_smooth_width))
-        gate = np.clip((gate - float(args.gate_apply_threshold)) / max(1.0 - float(args.gate_apply_threshold), 1e-8), 0.0, 1.0)
+        gate, gate_metrics = _frame_score_gate(
+            frame_score,
+            score_percentile=float(args.score_percentile),
+            smooth_width=int(args.gate_smooth_width),
+            apply_threshold=float(args.gate_apply_threshold),
+        )
 
         freq_weight, min_gain = _freq_weight(freqs)
         attenuation = (
@@ -228,7 +284,7 @@ def main() -> None:
                 "voice_band_mean_after": _band_mean(np.abs(refined_z), freqs, lo=250.0, hi=4500.0),
                 "air_band_mean_base": _band_mean(base_mag, freqs, lo=4500.0, hi=8000.0),
                 "air_band_mean_after": _band_mean(np.abs(refined_z), freqs, lo=4500.0, hi=8000.0),
-                "frame_score_threshold": score_threshold,
+                **gate_metrics,
                 "gate_mean": float(gate.mean()),
                 "gate_max": float(gate.max()),
                 "selected_windows": windows[:12],
