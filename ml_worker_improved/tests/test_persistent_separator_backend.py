@@ -174,6 +174,8 @@ def test_minus_vocal_debleed_can_target_dedicated_minus_lane(tmp_path: Path) -> 
     assert result["applied"] is True
     assert result["target_stems"] == ["minus"]
     assert result["per_stem"]["minus"]["moved_rms"] > 0.0
+    assert result["per_stem"]["minus"]["removed_band_ratio"] > 0.9
+    assert result["per_stem"]["minus"]["output_band_rms"] < result["per_stem"]["minus"]["input_band_rms"] * 0.05
     assert float(np.sqrt(np.mean(np.square(cleaned_minus.astype(np.float64))))) < float(
         np.sqrt(np.mean(np.square((low_band + vocal_band).astype(np.float64))))
     )
@@ -253,6 +255,7 @@ def test_persistent_mps_minus_pair_run_bypasses_demucs_availability_and_uses_sha
     assert candidate["stem_paths"]["minus"].endswith("minus.flac")
     assert candidate["minus_rebuilt_from_non_vocal_stems"] is False
     assert candidate["delivery_allowed"] is False
+    assert candidate["candidate_untrusted"] is True
     assert candidate["contamination_score"]["check_mode"] == "explicit_only"
     assert candidate["contamination_score"]["required_check_count"] == 1
     assert candidate["cross_stem_forensic_score"]["check_mode"] == "explicit_pairs"

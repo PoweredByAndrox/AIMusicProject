@@ -2599,6 +2599,7 @@ def apply_minus_vocal_debleed(
     stem_audios: dict[str, np.ndarray] = {}
     moved_total = np.zeros_like(vocals_audio, dtype=np.float32)
     moved_by_stem: dict[str, np.ndarray] = {}
+    input_band_rms: dict[str, float] = {}
     per_stem: dict[str, dict[str, float]] = {}
     for stem in target_stems:
         stem_path = stem_paths.get(stem)
@@ -2614,6 +2615,7 @@ def apply_minus_vocal_debleed(
             continue
         stem_audios[stem] = stem_audio.astype(np.float32)
         moved_by_stem[stem] = np.zeros_like(stem_audio, dtype=np.float32)
+        input_band_rms[stem] = _rms(band_limited_audio(stem_audio, sample_rate, low_hz, high_hz))
     if blockers:
         return {
             "applied": False,
@@ -2644,8 +2646,13 @@ def apply_minus_vocal_debleed(
         }
     for stem, stem_audio in stem_audios.items():
         _write_audio(Path(str(stem_paths[stem])), stem_audio.astype(np.float32), sample_rate)
+        before_band = float(input_band_rms.get(stem, 0.0))
+        after_band = _rms(band_limited_audio(stem_audio, sample_rate, low_hz, high_hz))
         per_stem[stem] = {
+            "input_band_rms": round(before_band, 8),
+            "output_band_rms": round(after_band, 8),
             "moved_rms": round(_rms(moved_by_stem[stem]), 8),
+            "removed_band_ratio": round(_rms(moved_by_stem[stem]) / max(before_band, 1.0e-12), 8),
             "passes": passes,
         }
     _write_audio(Path(str(vocals_path)), vocals_audio.astype(np.float32), sample_rate)
@@ -5783,7 +5790,7 @@ def execute_recipe_candidate(
     manifest.update(
         {
             "execution_status": "completed",
-            "candidate_untrusted": final_verdict != "auto_accept",
+            "candidate_untrusted": final_verdict != "auto_accept" or bool(candidate.get("diagnostic_only", False)),
             "verdict": final_verdict,
             "stem_paths": stem_paths,
             "missing_stems": [],
