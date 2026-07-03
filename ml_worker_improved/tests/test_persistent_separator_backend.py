@@ -27,6 +27,7 @@ from tools.persistent_separator_backend import (
 from tools.run_fully_automatic_stem_search import (
     _candidate_contamination_checks,
     _run_target_specific_commands,
+    apply_minus_vocal_debleed,
     execute_recipe_candidate,
 )
 from tools.resident_separator_executor import (
@@ -117,6 +118,7 @@ def test_persistent_mps_minus_pair_recipe_uses_dedicated_minus_route_without_ste
 
     assert recipe["available"] is True
     assert recipe["profile"] == stem_search.PERSISTENT_MPS_MINUS_PAIR_PROFILE
+    assert [candidate["candidate_id"] for candidate in recipe["candidates"]] == ["c001", "c002", "c003", "c004"]
     candidate = recipe["candidates"][0]
     assert candidate["diagnostic_only"] is True
     assert candidate["required_stems"] == ["vocals", "minus"]
@@ -139,6 +141,43 @@ def test_persistent_mps_minus_pair_recipe_uses_dedicated_minus_route_without_ste
     assert candidate["use_default_contamination_model_manifest"] is False
     assert checks == [{"tested_stem": "minus", "foreign_source": "vocals"}]
     assert candidate["cross_stem_forensic_gate"]["pairs"] == [{"tested_stem": "minus", "source_stem": "vocals"}]
+    assert recipe["candidates"][1]["vocal_projection_debleed"]["target_stems"] == ["minus"]
+    assert recipe["candidates"][2]["post_minus_vocal_debleed"]["target_stems"] == ["minus"]
+    assert recipe["candidates"][3]["post_minus_vocal_debleed"]["strength"] == 1.0
+
+
+def test_minus_vocal_debleed_can_target_dedicated_minus_lane(tmp_path: Path) -> None:
+    frames = 512
+    t = np.arange(frames, dtype=np.float32) / float(SAMPLE_RATE)
+    vocal_band = (0.05 * np.sin(2.0 * np.pi * 900.0 * t)).astype(np.float32)
+    low_band = (0.10 * np.sin(2.0 * np.pi * 110.0 * t)).astype(np.float32)
+    paths = {
+        "vocals": str(tmp_path / "vocals.flac"),
+        "minus": str(tmp_path / "minus.flac"),
+    }
+    sf.write(paths["vocals"], np.zeros(frames, dtype=np.float32), SAMPLE_RATE)
+    sf.write(paths["minus"], low_band + vocal_band, SAMPLE_RATE)
+
+    result = apply_minus_vocal_debleed(
+        stem_paths=paths,
+        config={
+            "target_stems": ["minus"],
+            "strength": 1.0,
+            "low_hz": 700.0,
+            "high_hz": 1200.0,
+            "passes": 1,
+        },
+    )
+
+    cleaned_minus, _ = sf.read(paths["minus"], dtype="float32", always_2d=False)
+    repaired_vocals, _ = sf.read(paths["vocals"], dtype="float32", always_2d=False)
+    assert result["applied"] is True
+    assert result["target_stems"] == ["minus"]
+    assert result["per_stem"]["minus"]["moved_rms"] > 0.0
+    assert float(np.sqrt(np.mean(np.square(cleaned_minus.astype(np.float64))))) < float(
+        np.sqrt(np.mean(np.square((low_band + vocal_band).astype(np.float64))))
+    )
+    assert float(np.sqrt(np.mean(np.square(repaired_vocals.astype(np.float64))))) > 0.0
 
 
 def test_explicit_forensic_pairs_fail_closed_when_empty(tmp_path: Path) -> None:

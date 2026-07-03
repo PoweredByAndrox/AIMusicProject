@@ -91,6 +91,7 @@ MODEL_SPLIT_V2_PROFILE = "model_split_v2"
 PERSISTENT_MPS_MINUS_PAIR_PROFILE = "persistent_mps_minus_pair"
 PERSISTENT_MPS_MINUS_PAIR_ROUTE_ID = "becruily_instrumental_vocals"
 MODEL_SPLIT_V2_DELIVERY_PAIR_ROLES = {"vocals", "minus"}
+DEBLEED_TARGET_STEMS = tuple(dict.fromkeys((*NON_VOCAL_STEMS, "minus")))
 MODEL_SPLIT_V2_FAIL_FAST_MUTATION_KEYS = (
     "minus_vocal_debleed",
     "vocal_projection_debleed",
@@ -1088,44 +1089,87 @@ def build_persistent_mps_minus_pair_recipe(
     route_id = PERSISTENT_MPS_MINUS_PAIR_ROUTE_ID
     command_template = _vocal_route_command_template(route_id)
     shared_cache_id = f"{route_id}:vocals_minus_pair"
-    candidate: dict[str, Any] = {
-        "candidate_id": "c001",
-        "profile": PERSISTENT_MPS_MINUS_PAIR_PROFILE,
-        "route_family": "persistent_mps_dedicated_minus_pair",
-        "minus_source": "minus_lane",
-        "minus_rebuilt_from_non_vocal_stems": False,
-        "diagnostic_only": True,
-        "required_stems": ["vocals", "minus"],
-        "contamination_check_mode": "explicit_only",
-        "use_default_contamination_model_manifest": False,
-        "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
-        "cross_stem_forensic_gate": {
-            "enabled": True,
-            "pairs": [{"tested_stem": "minus", "source_stem": "vocals"}],
-        },
-        "target_specific_commands": [
-            {
-                "role": "vocals",
-                "lane": "vocal_lane",
-                "route_id": route_id,
-                "command_template": command_template,
-                "server_stems": ["vocals", "instrumental"],
-                "shared_separator_cache_id": shared_cache_id,
+
+    def build_candidate(candidate_id: str, repair: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        candidate: dict[str, Any] = {
+            "candidate_id": candidate_id,
+            "profile": PERSISTENT_MPS_MINUS_PAIR_PROFILE,
+            "route_family": "persistent_mps_dedicated_minus_pair",
+            "minus_source": "minus_lane",
+            "minus_rebuilt_from_non_vocal_stems": False,
+            "diagnostic_only": True,
+            "required_stems": ["vocals", "minus"],
+            "contamination_check_mode": "explicit_only",
+            "use_default_contamination_model_manifest": False,
+            "contamination_checks": [{"tested_stem": "minus", "foreign_source": "vocals"}],
+            "cross_stem_forensic_gate": {
+                "enabled": True,
+                "pairs": [{"tested_stem": "minus", "source_stem": "vocals"}],
             },
-            {
-                "role": "minus",
-                "lane": "minus_lane",
-                "route_id": route_id,
-                "command_template": command_template,
-                "output_map": {"minus": "instrumental"},
-                "server_stems": ["vocals", "instrumental"],
-                "shared_separator_cache_id": shared_cache_id,
+            "target_specific_commands": [
+                {
+                    "role": "vocals",
+                    "lane": "vocal_lane",
+                    "route_id": route_id,
+                    "command_template": command_template,
+                    "server_stems": ["vocals", "instrumental"],
+                    "shared_separator_cache_id": shared_cache_id,
+                },
+                {
+                    "role": "minus",
+                    "lane": "minus_lane",
+                    "route_id": route_id,
+                    "command_template": command_template,
+                    "output_map": {"minus": "instrumental"},
+                    "server_stems": ["vocals", "instrumental"],
+                    "shared_separator_cache_id": shared_cache_id,
+                },
+            ],
+            "delivery_pair_reconstruction": {
+                "max_delivery_pair_residual_ratio": 0.08,
             },
-        ],
-        "delivery_pair_reconstruction": {
-            "max_delivery_pair_residual_ratio": 0.08,
-        },
-    }
+        }
+        if isinstance(repair, Mapping):
+            candidate.update(dict(repair))
+        return candidate
+
+    candidates = [
+        build_candidate("c001"),
+        build_candidate(
+            "c002",
+            {
+                "vocal_projection_debleed": {
+                    "target_stems": ["minus"],
+                    "strength": 1.0,
+                    "max_projection_coeff": 1.0,
+                },
+            },
+        ),
+        build_candidate(
+            "c003",
+            {
+                "post_minus_vocal_debleed": {
+                    "target_stems": ["minus"],
+                    "strength": 0.85,
+                    "low_hz": 700.0,
+                    "high_hz": 1200.0,
+                    "passes": 1,
+                },
+            },
+        ),
+        build_candidate(
+            "c004",
+            {
+                "post_minus_vocal_debleed": {
+                    "target_stems": ["minus"],
+                    "strength": 1.0,
+                    "low_hz": 700.0,
+                    "high_hz": 1200.0,
+                    "passes": 1,
+                },
+            },
+        ),
+    ]
     recipe: dict[str, Any] = {
         "schema": "stem_search_recipe.v1",
         "profile": PERSISTENT_MPS_MINUS_PAIR_PROFILE,
@@ -1137,7 +1181,7 @@ def build_persistent_mps_minus_pair_recipe(
             "minus_lane": [route_id],
         },
         "timeout_sec": 900,
-        "candidates": [candidate],
+        "candidates": candidates,
     }
     if contamination_model_manifest is not None:
         recipe["contamination_model_manifest"] = str(contamination_model_manifest)
@@ -2537,7 +2581,7 @@ def apply_minus_vocal_debleed(
         blockers.append("invalid_debleed_band")
     if passes < 1 or passes > 4:
         blockers.append("invalid_debleed_passes")
-    invalid_targets = [stem for stem in target_stems if stem not in NON_VOCAL_STEMS]
+    invalid_targets = [stem for stem in target_stems if stem not in DEBLEED_TARGET_STEMS]
     if invalid_targets:
         blockers.extend(f"invalid_debleed_target:{stem}" for stem in invalid_targets)
     vocals_path = stem_paths.get("vocals")
@@ -2639,7 +2683,7 @@ def apply_vocal_projection_debleed(
         blockers.append("invalid_projection_debleed_max_coeff")
     if min_abs_coeff < 0.0:
         blockers.append("invalid_projection_debleed_min_coeff")
-    invalid_targets = [stem for stem in target_stems if stem not in NON_VOCAL_STEMS]
+    invalid_targets = [stem for stem in target_stems if stem not in DEBLEED_TARGET_STEMS]
     if invalid_targets:
         blockers.extend(f"invalid_projection_debleed_target:{stem}" for stem in invalid_targets)
     vocals_path = stem_paths.get("vocals")
