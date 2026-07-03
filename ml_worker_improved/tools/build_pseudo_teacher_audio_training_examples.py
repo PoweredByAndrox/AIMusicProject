@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -14,15 +15,21 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 from docker_runtime import require_docker_runtime  # noqa: E402
-from train_generic_audio_teacher_mask_adapter import PSEUDO_TEACHER_SCHEMA  # noqa: E402
-from train_teacher_mask_separator import validate_stem_name  # noqa: E402
+from pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA  # noqa: E402
 
 
 MANIFEST_NAME = "pseudo_teacher_audio_training_manifest.json"
 EXAMPLES_NAME = "pseudo_teacher_audio_training_examples.jsonl"
 BLOCKED_NAME = "pseudo_teacher_audio_training_blocked_candidates.jsonl"
 PROGRESS_NAME = "pseudo_teacher_audio_training_progress.jsonl"
+SAFE_STEM_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 START_TIME = time.monotonic()
+
+
+def validate_stem_name(name: str) -> str:
+    if not SAFE_STEM_NAME_PATTERN.match(str(name or "")):
+        raise ValueError(f"unsafe stem name: {name!r}")
+    return str(name)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -118,15 +125,31 @@ def selected_candidate_id_for_stem(row: dict[str, Any], stem: str) -> str:
     return ""
 
 
-def find_music_stem(stems: Sequence[dict[str, Any]], *, track_id: str, stem: str, target_path: str) -> dict[str, Any] | None:
+def find_music_stem(
+    stems: Sequence[dict[str, Any]],
+    *,
+    track_id: str,
+    stem: str,
+    target_path: str,
+    selected_candidate_id: str = "",
+) -> dict[str, Any] | None:
     target = str(target_path)
+    candidate_id = str(selected_candidate_id or "").strip()
     for item in stems:
         if str(item.get("track_id") or "") != track_id:
             continue
         if str(item.get("stem_type") or "") != stem:
             continue
         item_paths = {str(item.get("audio_path") or ""), str(item.get("normalized_audio_path") or "")}
-        if target in item_paths:
+        if target and target in item_paths:
+            return item
+        item_candidate_ids = {
+            str(item.get("candidate_id") or ""),
+            str(item.get("stem_id") or ""),
+            str(item.get("selected_candidate_id") or ""),
+            str(item.get(f"selected_{stem}_candidate_id") or ""),
+        }
+        if candidate_id and candidate_id in item_candidate_ids:
             return item
     return None
 
@@ -189,6 +212,7 @@ def inspect_selected_candidate(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     track_id = str(selected_row.get("track_id") or "").strip()
     target_path_raw = selected_path_for_stem(selected_row, stem)
+    selected_candidate_id = selected_candidate_id_for_stem(selected_row, stem)
     reasons: list[str] = []
     if not track_id:
         reasons.append("missing_track_id")
@@ -208,7 +232,13 @@ def inspect_selected_candidate(
     reasons.extend(source_reasons)
     reasons.extend(target_reasons)
 
-    music_stem = find_music_stem(music_stems, track_id=track_id, stem=stem, target_path=target_path_raw)
+    music_stem = find_music_stem(
+        music_stems,
+        track_id=track_id,
+        stem=stem,
+        target_path=target_path_raw,
+        selected_candidate_id=selected_candidate_id,
+    )
     if music_stem is None:
         reasons.append("music_intelligence_stem_not_found")
     else:
@@ -228,9 +258,10 @@ def inspect_selected_candidate(
             "run_root": str(run_root),
             "track_id": track_id,
             "stem_type": stem,
-            "selected_candidate_id": selected_candidate_id_for_stem(selected_row, stem),
+            "selected_candidate_id": selected_candidate_id,
             "source_audio_path": str(run_manifest.get("input_audio") or ""),
-            "target_audio_path": target_path_raw,
+            "target_audio_path": target_path_raw
+            or str((music_stem or {}).get("normalized_audio_path") or (music_stem or {}).get("audio_path") or ""),
             "blocked_reasons": sorted(set(reasons)),
             "release_ready": False,
         }
@@ -250,6 +281,41 @@ def inspect_selected_candidate(
         ),
         None,
     )
+
+
+def blocked_music_stem_without_selection(
+    *,
+    run_root: Path,
+    run_manifest: dict[str, Any],
+    music_stem: dict[str, Any],
+    stem: str,
+) -> dict[str, Any]:
+    target_audio_path = str(music_stem.get("normalized_audio_path") or music_stem.get("audio_path") or "")
+    reasons = ["selected_candidates_empty"]
+    source_path, source_reasons = existing_file_reason(run_manifest.get("input_audio"), "source_audio")
+    target_path, target_reasons = existing_file_reason(target_audio_path, "target_audio")
+    reasons.extend(source_reasons)
+    reasons.extend(target_reasons)
+    if music_stem.get("release_ready") is True:
+        reasons.append("music_intelligence_release_ready_true")
+    if music_stem.get("analysis_allowed") is not True:
+        reasons.append("music_intelligence_analysis_not_allowed")
+    if str(music_stem.get("quality_status") or "") != "accepted":
+        reasons.append("music_intelligence_quality_not_accepted")
+    blockers = music_stem.get("blockers") or []
+    if isinstance(blockers, list) and blockers:
+        reasons.append("music_intelligence_blockers_present")
+    return {
+        "schema": "pseudo_teacher_audio_training_blocked_candidate.v1",
+        "run_root": str(run_root),
+        "track_id": str(music_stem.get("track_id") or ""),
+        "stem_type": stem,
+        "selected_candidate_id": str(music_stem.get("candidate_id") or music_stem.get("stem_id") or ""),
+        "source_audio_path": str(source_path or run_manifest.get("input_audio") or ""),
+        "target_audio_path": str(target_path or target_audio_path),
+        "blocked_reasons": sorted(set(reasons)),
+        "release_ready": False,
+    }
 
 
 def build_pseudo_teacher_audio_training_examples(
@@ -302,6 +368,43 @@ def build_pseudo_teacher_audio_training_examples(
         selected_candidates = read_jsonl(selected_candidates_jsonl)
         music_manifest = read_json(music_intelligence_manifest_json)
         music_stems = list(iter_music_stems(music_manifest))
+        if not selected_candidates:
+            matching_music_stems = [item for item in music_stems if str(item.get("stem_type") or "") == stem]
+            if matching_music_stems:
+                for music_stem in matching_music_stems:
+                    blocked_rows.append(
+                        blocked_music_stem_without_selection(
+                            run_root=run_root,
+                            run_manifest=run_manifest,
+                            music_stem=music_stem,
+                            stem=stem,
+                        )
+                    )
+            else:
+                blocked_rows.append(
+                    {
+                        "schema": "pseudo_teacher_audio_training_blocked_candidate.v1",
+                        "run_root": str(run_root),
+                        "track_id": "",
+                        "stem_type": stem,
+                        "selected_candidate_id": "",
+                        "source_audio_path": str(run_manifest.get("input_audio") or ""),
+                        "target_audio_path": "",
+                        "blocked_reasons": ["selected_candidates_empty", "music_intelligence_stem_not_found"],
+                        "release_ready": False,
+                    }
+                )
+            progress(
+                progress_path,
+                "run_root_finish",
+                stem=stem,
+                run_root=str(run_root),
+                selected_candidate_count=0,
+                matching_music_stem_count=len(matching_music_stems),
+                cumulative_pseudo_teacher_example_count=len(rows),
+                cumulative_blocked_candidate_count=len(blocked_rows),
+            )
+            continue
         for selected_row in selected_candidates:
             row, blocked = inspect_selected_candidate(
                 run_root=run_root,

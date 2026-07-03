@@ -6,6 +6,7 @@ from pathlib import Path
 from tools.build_multi_candidate_conditioned_audio_training_view import (
     build_multi_candidate_conditioned_audio_training_view,
 )
+from tools.pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA
 
 
 def _write_json(path: Path, payload: dict) -> Path:
@@ -124,7 +125,7 @@ def test_builds_candidate_conditioned_pseudo_teacher_rows_for_train_only(tmp_pat
     assert manifest["status"] == "passed"
     assert manifest["output_pseudo_teacher_rows"] is True
     assert manifest["safety"]["pseudo_teacher_rows_not_ground_truth"] is True
-    assert rows[0]["schema"] == "generic_finetuning_pseudo_teacher_audio_training_example.v1"
+    assert rows[0]["schema"] == PSEUDO_TEACHER_SCHEMA
     assert rows[0]["id"] == "pseudo__candidate_conditioned__scnet__accepted-a"
     assert rows[0]["pseudo_teacher"] is True
     assert rows[0]["pseudo_teacher_targets_are_ground_truth"] is False

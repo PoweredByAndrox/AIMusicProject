@@ -30,6 +30,7 @@ from build_candidate_conditioned_audio_training_view import (  # noqa: E402
     write_jsonl,
 )
 from docker_runtime import require_docker_runtime  # noqa: E402
+from pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA  # noqa: E402
 from train_teacher_mask_separator import validate_stem_name  # noqa: E402
 
 
@@ -37,7 +38,6 @@ MANIFEST_NAME = "multi_candidate_conditioned_audio_training_view_manifest.json"
 PROGRESS_NAME = "multi_candidate_conditioned_audio_training_view_progress.jsonl"
 FAMILY_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 START_TIME = time.monotonic()
-PSEUDO_TEACHER_SCHEMA = "generic_finetuning_pseudo_teacher_audio_training_example.v1"
 
 
 def progress(path: Path, event: str, **fields: Any) -> None:

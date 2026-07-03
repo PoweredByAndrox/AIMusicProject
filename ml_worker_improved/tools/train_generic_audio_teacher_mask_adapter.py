@@ -16,6 +16,7 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 from docker_runtime import require_docker_runtime  # noqa: E402
+from pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA  # noqa: E402
 from train_teacher_mask_separator import (  # noqa: E402
     TeacherMaskTrainConfig,
     _require_cuda_memory_available,
@@ -35,7 +36,6 @@ from train_teacher_mask_separator import (  # noqa: E402
 PROGRESS_NAME = "generic_audio_teacher_mask_adapter_progress.jsonl"
 RUN_ROWS_NAME = "generic_audio_finetune_run_rows.jsonl"
 MANIFEST_NAME = "generic_audio_teacher_mask_adapter_manifest.json"
-PSEUDO_TEACHER_SCHEMA = "generic_finetuning_pseudo_teacher_audio_training_example.v1"
 START_TIME = time.monotonic()
 
 

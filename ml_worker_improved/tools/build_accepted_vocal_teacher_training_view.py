@@ -15,6 +15,7 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 from docker_runtime import require_docker_runtime  # noqa: E402
+from pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA  # noqa: E402
 
 
 MANIFEST_NAME = "accepted_vocal_teacher_training_view_manifest.json"
@@ -23,7 +24,6 @@ PSEUDO_EXAMPLES_NAME = "accepted_vocal_pseudo_teacher_training_examples.jsonl"
 BLOCKED_NAME = "accepted_vocal_teacher_blocked_examples.jsonl"
 PROGRESS_NAME = "accepted_vocal_teacher_training_view_progress.jsonl"
 GENERIC_TRAINING_SCHEMA = "generic_finetuning_audio_training_example.v1"
-PSEUDO_TEACHER_SCHEMA = "generic_finetuning_pseudo_teacher_audio_training_example.v1"
 START_TIME = time.monotonic()
 
 

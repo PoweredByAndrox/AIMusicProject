@@ -11,6 +11,7 @@ from tools.train_generic_audio_teacher_mask_adapter import (
     select_training_rows,
     train_generic_audio_teacher_mask_adapter,
 )
+from tools.pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA
 from tools.train_teacher_mask_separator import TeacherMaskTrainConfig
 
 
@@ -270,7 +271,7 @@ def test_trains_with_explicit_pseudo_teacher_rows_without_claiming_ground_truth(
     ]
     pseudo_rows = [
         {
-            "schema": "generic_finetuning_pseudo_teacher_audio_training_example.v1",
+            "schema": PSEUDO_TEACHER_SCHEMA,
             "id": "pseudo-b",
             "track_id": "pseudo-b",
             "stem_type": "vocal",

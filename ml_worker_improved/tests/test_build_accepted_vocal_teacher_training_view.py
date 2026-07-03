@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from tools.build_accepted_vocal_teacher_training_view import build_accepted_vocal_teacher_training_view
+from tools.pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> Path:
@@ -98,7 +99,7 @@ def test_builds_human_verified_teacher_rows_without_ground_truth_claim(tmp_path:
     assert rows[0]["safety"]["canonical_track_id_from_source_plan"] is True
     assert rows[0]["delivery_allowed"] is False
     assert rows[0]["release_ready"] is False
-    assert pseudo_rows[0]["schema"] == "generic_finetuning_pseudo_teacher_audio_training_example.v1"
+    assert pseudo_rows[0]["schema"] == PSEUDO_TEACHER_SCHEMA
     assert pseudo_rows[0]["track_id"] == "song_one"
     assert pseudo_rows[0]["source_plan_track_id"] == "song_one"
     assert pseudo_rows[0]["pseudo_teacher"] is True

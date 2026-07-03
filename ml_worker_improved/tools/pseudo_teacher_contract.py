@@ -1,0 +1,3 @@
+from __future__ import annotations
+
+PSEUDO_TEACHER_SCHEMA = "generic_finetuning_pseudo_teacher_audio_training_example.v1"
