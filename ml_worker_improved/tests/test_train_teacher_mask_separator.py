@@ -47,6 +47,23 @@ def test_select_device_fails_fast_when_cuda_requested_but_unavailable(monkeypatc
     assert module._select_device("cpu").type == "cpu"
 
 
+def test_select_device_fails_fast_when_mps_requested_but_unavailable(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="MPS was requested"):
+        module._select_device("mps")
+
+
+def test_mps_is_recorded_as_gpu_accelerator() -> None:
+    module = _load_module()
+
+    assert module.is_accelerator_device("mps") is True
+    assert module.is_accelerator_device(module.torch.device("mps")) is True
+    assert module.acceleration_mode("mps", phase="training") == "mps_gpu_training"
+    assert module.is_accelerator_device("cpu") is False
+
+
 def test_cuda_memory_guard_fails_fast_with_progress_when_gpu_memory_is_too_low(tmp_path: Path, monkeypatch) -> None:
     module = _load_module()
     progress_path = tmp_path / "progress.jsonl"
@@ -193,6 +210,19 @@ def test_config_payload_records_source_preservation_weight() -> None:
     )
 
     assert payload["source_preservation_weight"] == 2.5
+
+
+def test_source_preservation_loss_only_uses_declared_identity_scope() -> None:
+    module = _load_module()
+    delta = module.torch.tensor([[1.0, 1.0], [2.0, 2.0]])
+    weights = module.torch.ones_like(delta)
+    identity_scope = module.torch.tensor([[1.0, 1.0], [0.0, 0.0]])
+
+    scoped_loss = module._scoped_source_preservation_loss(delta, weights, identity_scope)
+    empty_loss = module._scoped_source_preservation_loss(delta, weights, module.torch.zeros_like(delta))
+
+    assert float(scoped_loss) == 1.0
+    assert float(empty_loss) == 0.0
 
 
 def test_source_feature_memory_projection_accepts_half_feature_storage() -> None:
@@ -1357,6 +1387,64 @@ def test_local_context_features_preserve_frame_count_when_radius_exceeds_input()
     assert context_features.shape == (2, 27)
     assert torch.equal(context_features[0, :3], frame_features[0])
     assert torch.equal(context_features[-1, -3:], frame_features[-1])
+
+
+def test_conditioned_features_are_permutation_stable() -> None:
+    module = _load_module()
+    source = module.torch.tensor([[1.0, 2.0], [2.0, 1.0]])
+    proxy_one = module.torch.tensor([[0.5, 0.25], [0.75, 0.5]])
+    proxy_two = module.torch.tensor([[0.25, 0.5], [0.5, 0.75]])
+
+    forward = module._conditioned_local_context_features(source, [proxy_one, proxy_two], 0)
+    reversed_order = module._conditioned_local_context_features(source, [proxy_two, proxy_one], 0)
+
+    assert forward.shape == (2, 6)
+    assert module.torch.allclose(forward, reversed_order)
+
+
+def test_conditioned_checkpoint_requires_exact_proxy_count() -> None:
+    module = _load_module()
+    sample_rate = 8_000
+    time = np.arange(sample_rate // 4, dtype=np.float64) / sample_rate
+    source = _stereo(0.2 * np.sin(2.0 * np.pi * 220.0 * time))
+    proxy_one = _stereo(0.05 * np.sin(2.0 * np.pi * 660.0 * time))
+    proxy_two = _stereo(0.04 * np.sin(2.0 * np.pi * 700.0 * time))
+    config = module.TeacherMaskTrainConfig(
+        n_fft=256,
+        hop_length=64,
+        hidden_size=16,
+        mask_output_mode=module.MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL,
+        mask_ceiling=1.1,
+        device="cpu",
+    )
+    frequency_bins = config.n_fft // 2 + 1
+    input_features = frequency_bins * 3
+    model = module.TeacherMaskNetwork(
+        input_features=input_features,
+        frequency_bins=frequency_bins,
+        hidden_size=config.hidden_size,
+        mask_output_mode=config.mask_output_mode,
+        mask_ceiling=config.mask_ceiling,
+    )
+    metadata = {
+        "feature_mean": np.zeros((1, input_features), dtype=np.float32),
+        "feature_std": np.ones((1, input_features), dtype=np.float32),
+        "conditioning_audio_count": 2,
+        "conditioning_feature_schema": module.CONDITIONING_FEATURE_SCHEMA,
+    }
+
+    with pytest.raises(ValueError, match="conditioning audio count mismatch"):
+        module.apply_teacher_mask(source, model=model, metadata=metadata, config=config, conditioning_audio=[proxy_one])
+
+    _, diagnostics = module.apply_teacher_mask(
+        source,
+        model=model,
+        metadata=metadata,
+        config=config,
+        conditioning_audio=[proxy_one, proxy_two],
+    )
+    assert diagnostics["conditioning_audio_count"] == 2
+    assert diagnostics["conditioning_feature_schema"] == module.CONDITIONING_FEATURE_SCHEMA
 
 
 def test_teacher_mask_separator_cli_smoke(tmp_path: Path) -> None:

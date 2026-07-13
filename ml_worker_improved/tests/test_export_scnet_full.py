@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import soundfile as sf
+import yaml
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
 MODULE_PATH = TOOLS_ROOT / "export_scnet_full.py"
@@ -43,9 +44,13 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
         output_dir = root / "out"
         repo_path.mkdir()
         (repo_path / "inference.py").write_text("# fake", encoding="utf-8")
-        config_path.write_text("inference:\n  num_overlap: 4\n", encoding="utf-8")
+        config_path.write_text(
+            "audio:\n  chunk_size: 485100\ninference:\n  batch_size: 4\n  num_overlap: 4\n",
+            encoding="utf-8",
+        )
         model_path.write_bytes(b"fake checkpoint")
         sf.write(source_path, source_audio, sample_rate)
+        source_sha256 = module._sha256_file(source_path)
 
         executed_commands: list[list[str]] = []
         executed_timeouts: list[int] = []
@@ -67,7 +72,19 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
 
             return Completed()
 
-        with patch.object(module.subprocess, "run", side_effect=fake_run):
+        def fake_save_window(source, target, *, start_sec, end_sec):
+            sf.write(target, source_audio, sample_rate)
+            return sample_rate, source_audio.shape[0]
+
+        with patch.object(module, "require_docker_runtime", return_value=None), patch.object(
+            module,
+            "verify_cuda_inference_device",
+            return_value={"device_id": 0, "device_count": 1, "device_name": "test-gpu"},
+        ), patch.object(
+            module,
+            "save_audio_window_as_wav",
+            side_effect=fake_save_window,
+        ), patch.object(module.subprocess, "run", side_effect=fake_run):
             exit_code = module.main(
                 [
                     str(source_path),
@@ -82,6 +99,10 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
                     "0",
                     "--num-overlap",
                     "2",
+                    "--chunk-size",
+                    "485100",
+                    "--batch-size",
+                    "1",
                     "--timeout-sec",
                     "11",
                 ]
@@ -97,6 +118,13 @@ def test_scnet_full_exporter_writes_multistem_no_reference_manifest() -> None:
     assert command[command.index("--model_type") + 1] == "scnet"
     assert command[command.index("--filename_template") + 1] == "{file_name}/{instr}"
     assert manifest["model_id"] == "scnet_xl_ihf_musdb18"
+    assert manifest["model"]["chunk_size"] == 485100
+    assert manifest["model"]["batch_size"] == 1
+    assert manifest["model"]["num_overlap"] == 2
+    assert manifest["source_reference"]["sha256"] == source_sha256
+    assert manifest["source_reference"]["exact_byte_copy"] is True
+    assert Path(manifest["source_reference"]["path"]).name == "source_ref.flac"
+    assert Path(manifest["raw_reference"]["path"]).suffix == ".wav"
     assert manifest["contract"]["target_reference_assisted"] is False
     assert manifest["contract"]["target_reference_used_at_application"] is False
     assert manifest["contract"]["application_reference_free"] is True
@@ -176,6 +204,7 @@ def test_scnet_manifest_records_cuda_preflight(tmp_path: Path) -> None:
 
     manifest = module.build_full_track_stem_manifest(
         source_audio_path=source_audio_path,
+        source_reference_path=source_audio_path,
         stem_flac_paths=stem_paths,
         raw_ref_flac_path=raw_ref_path,
         repo_path=Path("/repo"),
@@ -183,14 +212,22 @@ def test_scnet_manifest_records_cuda_preflight(tmp_path: Path) -> None:
         config_template_path=Path("/config.yaml"),
         runtime_config_path=Path("/runtime.yaml"),
         device_id=0,
+        chunk_size=485100,
+        batch_size=1,
         num_overlap=4,
         sample_rate=44100,
         frames=64,
         elapsed_sec=1.0,
-        cuda_preflight={"device_name": "NVIDIA GeForce RTX 4080 Laptop GPU"},
+        cuda_preflight={
+            "cuda_available": True,
+            "resolved_device": "cuda:0",
+            "device_name": "NVIDIA GeForce RTX 4080 Laptop GPU",
+        },
     )
 
     assert manifest["execution_contract"]["cuda_preflight"]["device_name"] == "NVIDIA GeForce RTX 4080 Laptop GPU"
+    assert manifest["execution_contract"]["runtime_mode"] == "container_cuda"
+    assert manifest["execution_contract"]["docker_runtime_required"] is True
 
 
 def test_scnet_subprocess_timeout_reports_explicit_blocker(tmp_path: Path, monkeypatch) -> None:
@@ -201,7 +238,10 @@ def test_scnet_subprocess_timeout_reports_explicit_blocker(tmp_path: Path, monke
     source_path = tmp_path / "source.flac"
     output_dir = tmp_path / "out"
     repo_path.mkdir()
-    config_path.write_text("inference:\n  num_overlap: 4\n", encoding="utf-8")
+    config_path.write_text(
+        "audio:\n  chunk_size: 485100\ninference:\n  batch_size: 4\n  num_overlap: 4\n",
+        encoding="utf-8",
+    )
     model_path.write_bytes(b"fake checkpoint")
     sf.write(source_path, np.zeros((64, 2), dtype=np.float32), 44100)
 
@@ -239,3 +279,50 @@ def test_scnet_subprocess_timeout_reports_explicit_blocker(tmp_path: Path, monke
                 "5",
             ]
         )
+
+
+def test_scnet_runtime_config_applies_memory_profile_without_changing_template(tmp_path: Path) -> None:
+    module = _load_module()
+    template_path = tmp_path / "config.yaml"
+    runtime_path = tmp_path / "runtime.yaml"
+    template_text = "audio:\n  chunk_size: 485100\ninference:\n  batch_size: 4\n  num_overlap: 4\n"
+    template_path.write_text(template_text, encoding="utf-8")
+
+    effective = module.write_runtime_config(
+        template_path,
+        runtime_path,
+        chunk_size=485100,
+        batch_size=1,
+        num_overlap=4,
+    )
+    runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+
+    assert template_path.read_text(encoding="utf-8") == template_text
+    assert effective == {"chunk_size": 485100, "batch_size": 1, "num_overlap": 4}
+    assert runtime["audio"]["chunk_size"] == 485100
+    assert runtime["inference"]["batch_size"] == 1
+    assert runtime["inference"]["num_overlap"] == 4
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"chunk_size": 0, "batch_size": 1, "num_overlap": 4}, "chunk_size"),
+        ({"chunk_size": 485100, "batch_size": 0, "num_overlap": 4}, "batch_size"),
+        ({"chunk_size": 485100, "batch_size": 1, "num_overlap": 0}, "num_overlap"),
+    ],
+)
+def test_scnet_runtime_config_rejects_non_positive_values(
+    tmp_path: Path,
+    overrides: dict[str, int],
+    message: str,
+) -> None:
+    module = _load_module()
+    template_path = tmp_path / "config.yaml"
+    template_path.write_text(
+        "audio:\n  chunk_size: 485100\ninference:\n  batch_size: 4\n  num_overlap: 4\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        module.write_runtime_config(template_path, tmp_path / "runtime.yaml", **overrides)

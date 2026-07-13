@@ -20,6 +20,13 @@ the base candidate.
   existing dense delivery pipeline accepts it in `vocal`, `minus`, and `both`
   modes.
 
+Use `--prefer-base-when-safe` for repair overlays. The router then keeps the
+base candidate in every window where it already passes the same score,
+decision, and severe-reason checks, and selects an alternate only where the
+base is blocked. This minimizes processing and preserves as much of the
+dedicated-minus source as possible. The manifest records
+`selection_prefers_safe_base=true`.
+
 ## Run
 
 ```bash

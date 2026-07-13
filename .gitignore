@@ -64,3 +64,6 @@ __pycache__/
 *.safetensors
 *.th
 *.wav
+
+# Generated Apple-container image archives are local build cache.
+/tmp_scripts/*oci.tar

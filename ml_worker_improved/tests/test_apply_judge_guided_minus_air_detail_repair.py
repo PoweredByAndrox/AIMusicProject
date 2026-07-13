@@ -212,6 +212,168 @@ class JudgeGuidedMinusAirDetailRepairTests(unittest.TestCase):
 
         self.assertLess(after, before * 0.25)
         self.assertGreater(metrics["vocal_projection_gain_removed"], 0.0)
+        self.assertEqual(metrics["vocal_suppression_mode"], "global")
+
+    def test_segment_local_vocal_suppression_cleans_each_selected_window_only(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        times = np.arange(sample_rate * 3, dtype=np.float32) / float(sample_rate)
+        vocal_like_air = np.sin(2.0 * np.pi * 3000.0 * times).astype(np.float32)
+        source = np.zeros_like(vocal_like_air)
+        source[:sample_rate] = 0.20 * vocal_like_air[:sample_rate]
+        source[sample_rate : sample_rate * 2] = -0.16 * vocal_like_air[sample_rate : sample_rate * 2]
+        source[sample_rate * 2 :] = 0.10 * vocal_like_air[sample_rate * 2 :]
+        base_minus = np.zeros_like(source)
+        stereo_source = np.column_stack([source, source])
+        stereo_base = np.column_stack([base_minus, base_minus])
+        stereo_vocal = np.column_stack([vocal_like_air, vocal_like_air])
+        windows = [
+            {"start_sec": 0.0, "duration_sec": 1.0, "metrics": {"rms_ratio": 0.0}},
+            {"start_sec": 1.0, "duration_sec": 1.0, "metrics": {"rms_ratio": 0.0}},
+        ]
+
+        unsuppressed, _ = module.apply_air_detail_repair(
+            source_audio=stereo_source,
+            base_minus=stereo_base,
+            vocal_audio=stereo_vocal,
+            sample_rate=sample_rate,
+            windows=windows,
+            margin_sec=0.0,
+            smoothing_sec=0.0,
+            presence_delta_strength=0.0,
+            air_delta_strength=1.0,
+            body_delta_strength=0.0,
+            base_gain_strength=0.0,
+            low_rms_target_ratio=0.52,
+            max_base_gain=1.0,
+            vocal_suppression_strength=0.0,
+            max_vocal_projection_gain=2.0,
+            presence_low_hz=1200.0,
+            presence_high_hz=2200.0,
+            air_low_hz=2500.0,
+            air_high_hz=3600.0,
+            body_low_hz=120.0,
+            body_high_hz=900.0,
+            vocal_suppression_mode="segment_local",
+        )
+        suppressed, metrics = module.apply_air_detail_repair(
+            source_audio=stereo_source,
+            base_minus=stereo_base,
+            vocal_audio=stereo_vocal,
+            sample_rate=sample_rate,
+            windows=windows,
+            margin_sec=0.0,
+            smoothing_sec=0.0,
+            presence_delta_strength=0.0,
+            air_delta_strength=1.0,
+            body_delta_strength=0.0,
+            base_gain_strength=0.0,
+            low_rms_target_ratio=0.52,
+            max_base_gain=1.0,
+            vocal_suppression_strength=1.0,
+            max_vocal_projection_gain=2.0,
+            presence_low_hz=1200.0,
+            presence_high_hz=2200.0,
+            air_low_hz=2500.0,
+            air_high_hz=3600.0,
+            body_low_hz=120.0,
+            body_high_hz=900.0,
+            vocal_suppression_mode="segment_local",
+        )
+
+        first_signed_before = module.signed_projection_gain(
+            unsuppressed[:sample_rate, 0],
+            stereo_vocal[:sample_rate, 0],
+            max_projection_gain=4.0,
+        )
+        first_signed_after = module.signed_projection_gain(
+            suppressed[:sample_rate, 0],
+            stereo_vocal[:sample_rate, 0],
+            max_projection_gain=4.0,
+        )
+        second_signed_before = module.signed_projection_gain(
+            unsuppressed[sample_rate : sample_rate * 2, 0],
+            stereo_vocal[sample_rate : sample_rate * 2, 0],
+            max_projection_gain=4.0,
+        )
+        second_signed_after = module.signed_projection_gain(
+            suppressed[sample_rate : sample_rate * 2, 0],
+            stereo_vocal[sample_rate : sample_rate * 2, 0],
+            max_projection_gain=4.0,
+        )
+        untouched_delta = np.max(np.abs(suppressed[sample_rate * 2 :] - stereo_base[sample_rate * 2 :]))
+
+        self.assertGreater(first_signed_before, 0.0)
+        self.assertLess(second_signed_before, 0.0)
+        self.assertLess(abs(first_signed_after), abs(first_signed_before) * 0.25)
+        self.assertLess(abs(second_signed_after), abs(second_signed_before) * 0.25)
+        self.assertLess(untouched_delta, 1.0e-5)
+        self.assertEqual(metrics["vocal_suppression_mode"], "segment_local")
+        self.assertEqual(metrics["window_vocal_projection_count"], 2)
+        self.assertEqual(len(metrics["window_vocal_projection_metrics"]), 2)
+        self.assertTrue(
+            all(
+                item["vocal_projection_gain_removed"] > 0.0
+                for item in metrics["window_vocal_projection_metrics"]
+            )
+        )
+
+    def test_default_global_vocal_suppression_mode_matches_explicit_global(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        times = np.arange(sample_rate, dtype=np.float32) / float(sample_rate)
+        vocal_like_air = np.sin(2.0 * np.pi * 3000.0 * times).astype(np.float32)
+        source = 0.20 * vocal_like_air
+        base_minus = np.zeros_like(source)
+        stereo_source = np.column_stack([source, source])
+        stereo_base = np.column_stack([base_minus, base_minus])
+        stereo_vocal = np.column_stack([vocal_like_air, vocal_like_air])
+        common_kwargs = dict(
+            source_audio=stereo_source,
+            base_minus=stereo_base,
+            vocal_audio=stereo_vocal,
+            sample_rate=sample_rate,
+            windows=[{"start_sec": 0.0, "duration_sec": 1.0, "metrics": {"rms_ratio": 0.0}}],
+            margin_sec=0.0,
+            smoothing_sec=0.0,
+            presence_delta_strength=0.0,
+            air_delta_strength=1.0,
+            body_delta_strength=0.0,
+            base_gain_strength=0.0,
+            low_rms_target_ratio=0.52,
+            max_base_gain=1.0,
+            vocal_suppression_strength=1.0,
+            max_vocal_projection_gain=2.0,
+            presence_low_hz=1200.0,
+            presence_high_hz=2200.0,
+            air_low_hz=2500.0,
+            air_high_hz=3600.0,
+            body_low_hz=120.0,
+            body_high_hz=900.0,
+        )
+
+        default_repaired, default_metrics = module.apply_air_detail_repair(**common_kwargs)
+        explicit_repaired, explicit_metrics = module.apply_air_detail_repair(
+            **common_kwargs,
+            vocal_suppression_mode="global",
+        )
+        default_args = module.parse_args(
+            [
+                "/tmp/raw.flac",
+                "/tmp/base.flac",
+                "/tmp/rows.jsonl",
+                "/tmp/out",
+            ]
+        )
+
+        self.assertTrue(np.allclose(default_repaired, explicit_repaired, atol=1.0e-6))
+        self.assertEqual(default_metrics["vocal_suppression_mode"], "global")
+        self.assertEqual(explicit_metrics["vocal_suppression_mode"], "global")
+        self.assertEqual(
+            default_metrics["vocal_projection_gain_removed"],
+            explicit_metrics["vocal_projection_gain_removed"],
+        )
+        self.assertEqual(default_args.vocal_suppression_mode, "global")
 
     def test_manifest_is_candidate_only_and_requires_post_judge(self) -> None:
         module = _load_module()
@@ -251,8 +413,46 @@ class JudgeGuidedMinusAirDetailRepairTests(unittest.TestCase):
             manifest["candidate_row"]["candidate_family"],
             "judge_guided_minus_air_detail_repair",
         )
+        self.assertEqual(manifest["repair"]["vocal_suppression_mode"], "global")
         self.assertEqual(manifest["execution_contract"]["runtime_environment"], "docker")
         self.assertFalse(manifest["execution_contract"]["native_runtime_allowed"])
+
+    def test_manifest_records_explicit_vocal_suppression_mode(self) -> None:
+        module = _load_module()
+        cli_args = module.parse_args(
+            [
+                "/tmp/raw.flac",
+                "/tmp/base.flac",
+                "/tmp/rows.jsonl",
+                "/tmp/out",
+                "--vocal-suppression-mode",
+                "segment_local",
+            ]
+        )
+        manifest = module.build_manifest(
+            track_id="track-a",
+            candidate_id="minus-a__air_detail_repair",
+            raw_audio_path=Path("/app/raw.flac"),
+            base_minus_path=Path("/app/base.flac"),
+            vocal_guide_path=Path("/app/vocal.flac"),
+            judge_jsonl_path=Path("/app/self_judge_segments.jsonl"),
+            output_path=Path("/app/out/minus_air_detail_repair.flac"),
+            candidate_row_jsonl=Path("/app/out/candidate_pair.jsonl"),
+            sample_rate=44100,
+            frames=44100,
+            selected_windows=[{"start_sec": 0.0, "duration_sec": 1.0}],
+            repair_metrics={
+                "status": "air_detail_repair_applied",
+                "vocal_suppression_mode": "segment_local",
+            },
+        )
+
+        self.assertEqual(cli_args.vocal_suppression_mode, "segment_local")
+        self.assertEqual(manifest["repair"]["vocal_suppression_mode"], "segment_local")
+        self.assertEqual(
+            manifest["repair"]["metrics"]["vocal_suppression_mode"],
+            "segment_local",
+        )
 
     def test_cli_allows_explicit_native_runtime_and_records_contract(self) -> None:
         module = _load_module()
@@ -354,6 +554,8 @@ class JudgeGuidedMinusAirDetailRepairTests(unittest.TestCase):
                     "short_minus",
                     "--track-id",
                     "t001",
+                    "--vocal-suppression-mode",
+                    "segment_local",
                     "--short-output-names",
                 ],
                 cwd=Path(__file__).resolve().parents[1],
@@ -374,6 +576,11 @@ class JudgeGuidedMinusAirDetailRepairTests(unittest.TestCase):
             self.assertFalse(manifest["artifact_name_policy"]["raw_track_or_candidate_ids_in_path"])
             self.assertFalse(manifest["delivery_allowed"])
             self.assertTrue(manifest["requires_post_judge"])
+            self.assertEqual(manifest["repair"]["vocal_suppression_mode"], "segment_local")
+            self.assertEqual(
+                manifest["repair"]["metrics"]["vocal_suppression_mode"],
+                "segment_local",
+            )
             self.assertTrue(all(len(path.name) <= 32 for path in output_dir.rglob("*") if path.is_file()))
 
 

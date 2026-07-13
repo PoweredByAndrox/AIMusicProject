@@ -20,7 +20,12 @@ from tools.train_generic_audio_teacher_mask_adapter import (
     RUN_ROWS_NAME,
     train_generic_audio_teacher_mask_adapter,
 )
-from tools.train_teacher_mask_separator import DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS, TeacherMaskTrainConfig
+from tools.train_teacher_mask_separator import (
+    DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
+    TeacherMaskTrainConfig,
+    acceleration_mode,
+    is_accelerator_device,
+)
 from tools.validate_generic_audio_finetune_holdout import (
     validate_generic_audio_finetune_holdout,
 )
@@ -99,18 +104,18 @@ def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
 
 
 def progress(path: Path, event: str, *, device: str, require_gpu: bool, **fields: Any) -> None:
-    uses_gpu = str(device) == "cuda"
+    uses_gpu = is_accelerator_device(device)
     payload = {
         "event": event,
         "elapsed_sec": round(time.monotonic() - START_TIME, 3),
-        "expected_acceleration_mode": "gpu_training_and_holdout" if uses_gpu else "cpu_diagnostic_training_and_holdout",
+        "expected_acceleration_mode": acceleration_mode(device, phase="training_and_holdout"),
         "gpu_training_required": bool(require_gpu),
         "gpu_inference_required": bool(require_gpu),
         "gpu_training_skipped": not uses_gpu,
         "gpu_inference_skipped": not uses_gpu,
     }
     if not uses_gpu:
-        payload["gpu_skip_reason"] = "matrix_runner_device_not_cuda"
+        payload["gpu_skip_reason"] = "matrix_runner_device_not_accelerated"
     payload.update(fields)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -136,7 +141,8 @@ def _release_cuda_between_matrix_phases(
         config_index=config_index,
         config_id=config_id,
     )
-    if str(device) != "cuda":
+    normalized_device = str(device).strip().lower()
+    if normalized_device not in {"cuda", "mps"}:
         progress(
             progress_path,
             "cuda_phase_cleanup_finish",
@@ -147,14 +153,16 @@ def _release_cuda_between_matrix_phases(
             config_id=config_id,
             cleanup_performed=False,
             cuda_available=False,
-            skip_reason="device_not_cuda",
+            skip_reason="device_not_accelerated",
         )
         return
     try:
         import torch
 
         gc.collect()
-        cuda_available = bool(torch.cuda.is_available())
+        cuda_available = normalized_device == "cuda" and bool(torch.cuda.is_available())
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        mps_available = normalized_device == "mps" and mps_backend is not None and bool(mps_backend.is_available())
         if cuda_available:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
@@ -164,6 +172,12 @@ def _release_cuda_between_matrix_phases(
             free_memory, total_memory = torch.cuda.mem_get_info()
             free_memory_mb = int(free_memory // (1024 * 1024))
             total_memory_mb = int(total_memory // (1024 * 1024))
+        elif mps_available:
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
+            free_memory_mb = None
+            total_memory_mb = None
         else:
             free_memory_mb = None
             total_memory_mb = None
@@ -176,8 +190,9 @@ def _release_cuda_between_matrix_phases(
             cleanup_phase=cleanup_phase,
             config_index=config_index,
             config_id=config_id,
-            cleanup_performed=cuda_available,
+            cleanup_performed=cuda_available or mps_available,
             cuda_available=cuda_available,
+            mps_available=mps_available,
             free_memory_mb=free_memory_mb,
             total_memory_mb=total_memory_mb,
         )
@@ -458,8 +473,8 @@ def run_generic_audio_finetune_matrix(
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     stem = validate_stem_name(stem)
-    if require_gpu and str(device) != "cuda":
-        raise ValueError("require_gpu=true requires --device cuda for production matrix runs")
+    if require_gpu and not is_accelerator_device(device):
+        raise ValueError("require_gpu=true requires --device cuda or --device mps for production matrix runs")
     audio_training_examples_jsonl = resolve_existing_file(audio_training_examples_jsonl, label="audio_training_examples_jsonl")
     if pseudo_teacher_examples_jsonl is not None:
         pseudo_teacher_examples_jsonl = resolve_existing_file(

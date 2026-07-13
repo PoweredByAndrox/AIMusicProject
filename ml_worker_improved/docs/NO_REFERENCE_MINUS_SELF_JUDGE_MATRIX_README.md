@@ -43,6 +43,13 @@ source mix with too little source-minus delta is blocked as
 This prevents a contaminated full-mix-like minus from being accepted as a clean
 instrumental.
 
+For a dedicated minus candidate with two or more independent vocal-model runs,
+prefer `tools/audit_minus_quality_ensemble.py`. It validates model/output/source
+independence, requires cross-model consensus for vocal-leak claims, integrates
+the pitch-shift guard, and keeps source-conservation defects as independent
+blockers. The single-proxy matrix remains useful for corpus triage but cannot
+establish cross-model consensus.
+
 ## Safety Contract
 
 - `reference_required=false`

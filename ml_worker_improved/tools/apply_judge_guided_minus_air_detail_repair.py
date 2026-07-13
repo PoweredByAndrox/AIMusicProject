@@ -137,11 +137,12 @@ def _window_rms_gain(
 def _suppress_vocal_projection(
     layer: np.ndarray,
     vocal_audio: np.ndarray,
-    active: np.ndarray,
+    gate: np.ndarray,
     *,
     strength: float,
     max_projection_gain: float,
 ) -> tuple[np.ndarray, dict[str, float]]:
+    active = gate > 1.0e-6
     if strength <= 0.0 or not np.any(active):
         return layer, {
             "vocal_projection_gain_before": 0.0,
@@ -160,7 +161,9 @@ def _suppress_vocal_projection(
             max_projection_gain=max_projection_gain,
         )
         removed_gains.append(abs(gain))
-        suppressed[:, channel_index] -= float(strength) * gain * vocal_audio[:, channel_index]
+        suppressed[:, channel_index] -= (
+            float(strength) * gain * vocal_audio[:, channel_index] * gate
+        )
     after = projection_gain(suppressed[active], vocal_audio[active])
     return suppressed, {
         "vocal_projection_gain_before": round(before, 9),
@@ -192,11 +195,14 @@ def apply_air_detail_repair(
     air_high_hz: float,
     body_low_hz: float,
     body_high_hz: float,
+    vocal_suppression_mode: str = "global",
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if source_audio.shape != base_minus.shape:
         raise ValueError("source_audio and base_minus must have the same shape")
     if vocal_audio is not None and vocal_audio.shape != base_minus.shape:
         raise ValueError("vocal_audio must match base_minus shape")
+    if vocal_suppression_mode not in {"global", "segment_local"}:
+        raise ValueError("vocal_suppression_mode must be 'global' or 'segment_local'")
     if not windows:
         return base_minus.copy(), {
             "status": "skipped_no_target_windows",
@@ -214,9 +220,19 @@ def apply_air_detail_repair(
         * bandpass_audio(source_delta, sample_rate, low_hz=body_low_hz, high_hz=body_high_hz)
     )
     added_layer = np.zeros_like(base_minus, dtype=np.float64)
+    unsuppressed_added_layer = np.zeros_like(base_minus, dtype=np.float64)
     gain_envelope = np.ones(base_minus.shape[0], dtype=np.float64)
     combined_gate = np.zeros(base_minus.shape[0], dtype=np.float64)
     window_metrics: list[dict[str, Any]] = []
+    window_vocal_metrics: list[dict[str, Any]] = []
+    vocal_detail = None
+    if vocal_audio is not None:
+        vocal_detail = bandpass_audio(
+            vocal_audio,
+            sample_rate,
+            low_hz=min(body_low_hz, presence_low_hz, air_low_hz),
+            high_hz=max(body_high_hz, presence_high_hz, air_high_hz),
+        )
 
     for window_index, window in enumerate(windows):
         window_gate = build_time_gate(
@@ -230,7 +246,25 @@ def apply_air_detail_repair(
         if not np.any(active):
             continue
         combined_gate = np.maximum(combined_gate, window_gate)
-        added_layer += detail_basis * window_gate.reshape(-1, 1)
+        window_layer = detail_basis * window_gate.reshape(-1, 1)
+        unsuppressed_added_layer += window_layer
+        if vocal_detail is not None and vocal_suppression_mode == "segment_local":
+            window_layer, local_vocal_metrics = _suppress_vocal_projection(
+                window_layer,
+                vocal_detail,
+                window_gate,
+                strength=vocal_suppression_strength,
+                max_projection_gain=max_vocal_projection_gain,
+            )
+            window_vocal_metrics.append(
+                {
+                    "window_index": int(window_index),
+                    "start_sec": round(float(window.get("start_sec") or 0.0), 6),
+                    "duration_sec": round(float(window.get("duration_sec") or 0.0), 6),
+                    **local_vocal_metrics,
+                }
+            )
+        added_layer += window_layer
         base_gain = _window_rms_gain(
             window,
             base_gain_strength=base_gain_strength,
@@ -254,20 +288,33 @@ def apply_air_detail_repair(
         "vocal_projection_gain_after": 0.0,
         "vocal_projection_gain_removed": 0.0,
     }
-    if vocal_audio is not None:
-        vocal_detail = bandpass_audio(
-            vocal_audio,
-            sample_rate,
-            low_hz=min(body_low_hz, presence_low_hz, air_low_hz),
-            high_hz=max(body_high_hz, presence_high_hz, air_high_hz),
-        )
+    if vocal_detail is not None and vocal_suppression_mode == "global":
         added_layer, vocal_metrics = _suppress_vocal_projection(
             added_layer,
             vocal_detail,
-            active,
+            combined_gate,
             strength=vocal_suppression_strength,
             max_projection_gain=max_vocal_projection_gain,
         )
+    elif vocal_detail is not None and vocal_suppression_mode == "segment_local":
+        vocal_metrics = {
+            "vocal_projection_gain_before": round(
+                projection_gain(unsuppressed_added_layer[active], vocal_detail[active]), 9
+            ),
+            "vocal_projection_gain_after": round(
+                projection_gain(added_layer[active], vocal_detail[active]), 9
+            ),
+            "vocal_projection_gain_removed": round(
+                max(
+                    (
+                        float(item.get("vocal_projection_gain_removed") or 0.0)
+                        for item in window_vocal_metrics
+                    ),
+                    default=0.0,
+                ),
+                9,
+            ),
+        }
 
     repaired = (base_minus.astype(np.float64) * gain_envelope.reshape(-1, 1)) + added_layer
     repaired = np.nan_to_num(repaired, nan=0.0, posinf=0.0, neginf=0.0)
@@ -286,6 +333,9 @@ def apply_air_detail_repair(
         "air_delta_strength": round(float(air_delta_strength), 6),
         "body_delta_strength": round(float(body_delta_strength), 6),
         "base_gain_strength": round(float(base_gain_strength), 6),
+        "vocal_suppression_mode": str(vocal_suppression_mode),
+        "window_vocal_projection_count": len(window_vocal_metrics),
+        "window_vocal_projection_metrics": window_vocal_metrics,
         **vocal_metrics,
     }
     return repaired.astype(np.float32), metrics
@@ -369,6 +419,7 @@ def build_manifest(
         "repair": {
             "selected_window_count": len(selected_windows),
             "selected_windows": list(selected_windows),
+            "vocal_suppression_mode": str(repair_metrics.get("vocal_suppression_mode") or "global"),
             "metrics": dict(repair_metrics),
         },
         "execution_contract": {
@@ -433,6 +484,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-base-gain", type=float, default=1.18)
     parser.add_argument("--vocal-suppression-strength", type=float, default=0.75)
     parser.add_argument("--max-vocal-projection-gain", type=float, default=8.0)
+    parser.add_argument(
+        "--vocal-suppression-mode",
+        choices=("global", "segment_local"),
+        default="global",
+    )
     parser.add_argument("--presence-low-hz", type=float, default=1800.0)
     parser.add_argument("--presence-high-hz", type=float, default=6000.0)
     parser.add_argument("--air-low-hz", type=float, default=6000.0)
@@ -509,6 +565,7 @@ def build_judge_guided_minus_air_detail_repair(args: argparse.Namespace) -> dict
         air_high_hz=float(args.air_high_hz),
         body_low_hz=float(args.body_low_hz),
         body_high_hz=float(args.body_high_hz),
+        vocal_suppression_mode=str(args.vocal_suppression_mode),
     )
     sf.write(str(output_path), repaired, raw_rate, subtype="PCM_24")
     progress("output_written", output_audio_path=str(output_path), repair_metrics=repair_metrics)

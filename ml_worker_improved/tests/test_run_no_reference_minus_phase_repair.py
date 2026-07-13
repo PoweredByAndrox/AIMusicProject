@@ -29,6 +29,16 @@ def _write_stereo(path: Path, audio: np.ndarray, sample_rate: int = 44100) -> No
     sf.write(path, audio.astype(np.float32), sample_rate, subtype="FLOAT")
 
 
+def _rms_delta(source: np.ndarray, candidate: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(candidate - source))))
+
+
+def _correlation(source: np.ndarray, candidate: np.ndarray) -> float:
+    source_flat = source.reshape(-1)
+    candidate_flat = candidate.reshape(-1)
+    return float(np.corrcoef(source_flat, candidate_flat)[0, 1])
+
+
 def test_build_minus_phase_repair_writes_variants_and_candidate_pool(tmp_path: Path) -> None:
     module = _load_module()
     sample_rate = 44100
@@ -60,20 +70,63 @@ def test_build_minus_phase_repair_writes_variants_and_candidate_pool(tmp_path: P
         for line in Path(manifest["candidate_pair_jsonl"]).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert manifest["variant_count"] == 3
+    expected_variants = [
+        ("minus_mid_mono", 0.0),
+        ("minus_side_attenuate_25", 0.25),
+        ("minus_side_attenuate_45", 0.45),
+        ("minus_side_attenuate_46", 0.46),
+        ("minus_side_attenuate_47", 0.47),
+        ("minus_side_attenuate_50", 0.50),
+    ]
+    assert manifest["variant_count"] == len(expected_variants)
+    assert len(rows) == len(expected_variants)
+    assert manifest["track_id"] == "track-a"
+    assert manifest["source_candidate_id"] == "candidate-a"
+    assert manifest["source_minus_route_id"] == "source-minus"
+    assert manifest["source_mix_path"] == str(mix_path)
+    assert manifest["source_vocal_path"] == str(vocal_path)
+    assert manifest["source_minus_path"] == str(minus_path)
     assert manifest["delivery_allowed"] is False
+    assert manifest["delivery_status"] == "diagnostic_only"
+    assert manifest["presentation_status"] == "phase_repair_candidate_not_listen_pack"
     assert manifest["release_status"] == "not_release_ready"
+    assert manifest["release_ready"] is False
     assert manifest["gpu_inference_skipped"] is True
-    assert {row["minus_phase_repair_variant"] for row in rows} == {
-        "minus_mid_mono",
-        "minus_side_attenuate_25",
-        "minus_side_attenuate_50",
-    }
+    assert [(item["variant"], item["side_gain"]) for item in manifest["variants"]] == expected_variants
+    assert [row["minus_phase_repair_variant"] for row in rows] == [name for name, _ in expected_variants]
     assert all(row["route_contract"] == "no_reference_minus_phase_repair_candidate" for row in rows)
+    assert all(row["delivery_status"] == "diagnostic_only" for row in rows)
     assert all(row["delivery_allowed"] is False for row in rows)
+    assert all(row["presentation_status"] == "phase_repair_candidate_not_listen_pack" for row in rows)
+    assert all(row["release_status"] == "not_release_ready" for row in rows)
     assert all(row["release_ready"] is False for row in rows)
-    attenuated = sf.read(rows[1]["minus_path"], always_2d=True, dtype="float32")[0]
-    assert module.phase_consistency(attenuated) > module.phase_consistency(minus)
+    assert all(row["can_publish_as_release"] is False for row in rows)
+    assert all(row["can_mark_release_ready"] is False for row in rows)
+    assert all(row["track_id"] == "track-a" for row in rows)
+    assert all(row["mix_path"] == str(mix_path) for row in rows)
+    assert all(row["vocal_path"] == str(vocal_path) for row in rows)
+    assert all(row["candidate_id"] == f"candidate-a__{row['minus_phase_repair_variant']}" for row in rows)
+    assert all(row["instrumental_path"] == row["minus_path"] for row in rows)
+    assert all(row["minus_route_id"] == f"source-minus__{row['minus_phase_repair_variant']}" for row in rows)
+
+    rendered = []
+    for manifest_variant, row, (variant_name, side_gain) in zip(manifest["variants"], rows, expected_variants):
+        assert manifest_variant["variant"] == variant_name
+        assert manifest_variant["side_gain"] == side_gain
+        assert manifest_variant["path"] == row["minus_path"]
+        assert Path(row["minus_path"]).exists()
+        audio, rendered_rate = sf.read(row["minus_path"], always_2d=True, dtype="float32")
+        assert rendered_rate == sample_rate
+        rendered.append((side_gain, audio))
+
+    phase_values = [module.phase_consistency(audio) for _, audio in rendered]
+    assert np.all(np.diff(phase_values) < -1e-6)
+    assert phase_values[0] > module.phase_consistency(minus)
+
+    integrity_rms_deltas = [_rms_delta(minus, audio) for _, audio in rendered]
+    integrity_correlations = [_correlation(minus, audio) for _, audio in rendered]
+    assert np.all(np.diff(integrity_rms_deltas) <= 1e-5)
+    assert np.all(np.diff(integrity_correlations) >= -1e-5)
 
 
 def test_build_minus_phase_repair_aligns_mismatched_sample_rates(tmp_path: Path) -> None:
@@ -108,7 +161,8 @@ def test_build_minus_phase_repair_aligns_mismatched_sample_rates(tmp_path: Path)
         if line.strip()
     ]
     repaired, repaired_rate = sf.read(rows[0]["minus_path"], always_2d=True, dtype="float32")
-    assert manifest["variant_count"] == 3
+    assert manifest["variant_count"] == 6
+    assert len(rows) == 6
     assert repaired_rate == stem_rate
     assert repaired.shape[0] == stem_rate
     assert manifest["sample_rate_alignment"] == {

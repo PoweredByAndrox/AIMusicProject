@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -68,6 +69,38 @@ def _gap_plan(tmp_path: Path, *, delivery_allowed: bool = False) -> Path:
     )
 
 
+def _minus_gap_plan(tmp_path: Path) -> Path:
+    rows = _write_jsonl(
+        tmp_path / "minus_gap" / "rows.jsonl",
+        [
+            {
+                "schema": "full_pack_reference_corpus_gap.v1",
+                "gap_id": "gm01",
+                "queue_item_id": "qm01",
+                "stem_type": "minus",
+                "missing_unique_track_count": 1,
+                "required_reference_stem_count": 1,
+                "release_ready": False,
+                "can_publish_as_result": False,
+            }
+        ],
+    )
+    return _write_json(
+        tmp_path / "minus_gap" / "gap.json",
+        {
+            "schema": "full_pack_reference_corpus_gap_plan.v1",
+            "gap_status": "blocked_waiting_for_verified_reference_corpus",
+            "gap_count": 1,
+            "rows_jsonl": str(rows),
+            "outputs": {"rows_jsonl": str(rows)},
+            "failed_checks": [],
+            "delivery_allowed": False,
+            "release_ready": False,
+            "training_started": False,
+        },
+    )
+
+
 def _existing_examples(tmp_path: Path) -> Path:
     return _write_jsonl(
         tmp_path / "existing.jsonl",
@@ -126,6 +159,50 @@ def _read_json(path: Path) -> dict:
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _minus_semantic_audit(
+    manifest_path: Path,
+    *,
+    decision: str = "accepted",
+    training_allowed: bool = True,
+    source_sha256: str | None = None,
+    target_sha256: str | None = None,
+) -> Path:
+    payload = _read_json(manifest_path)
+    source_path = manifest_path.parent / payload["mix"]["path"]
+    target_path = manifest_path.parent / payload["stems"]["minus"]["path"]
+    return _write_json(
+        manifest_path.parent / "sem.json",
+        {
+            "schema": "minus_reference_semantic_audit.v1",
+            "decision": decision,
+            "training_allowed": training_allowed,
+            "delivery_allowed": False,
+            "detector_count": 2,
+            "detectors": [
+                {"detector_id": "detector_a"},
+                {"detector_id": "detector_b"},
+            ],
+            "evidence": {},
+            "thresholds": {
+                "min_gap_db": 6.0,
+                "max_reference_vocal_share_db": -20.0,
+            },
+            "source_mix": {
+                "path": str(source_path),
+                "sha256": source_sha256 or _sha256(source_path),
+            },
+            "minus_reference": {
+                "path": str(target_path),
+                "sha256": target_sha256 or _sha256(target_path),
+            },
+        },
+    )
 
 
 def test_intake_accepts_only_new_verified_required_reference_stems(tmp_path: Path) -> None:
@@ -198,6 +275,100 @@ def test_intake_rejects_rejected_full_mix_reconstruction(tmp_path: Path) -> None
     assert rows[0]["intake_status"] == "rejected"
     assert "ground_truth_reconstruction_not_trainable" in rows[0]["rejection_reasons"]
     assert rows[0]["source_gate"]["trainable_ground_truth"] is False
+
+
+def test_intake_accepts_minus_only_with_matching_semantic_audit(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates"
+    manifest_path = _ground_truth_bundle(candidates, "minus_ok", track_id="track-minus", stems=["minus"])
+    _minus_semantic_audit(manifest_path)
+
+    manifest = build_full_pack_reference_corpus_intake(
+        gap_plan_json=_minus_gap_plan(tmp_path),
+        existing_audio_training_examples_jsonl=_write_jsonl(tmp_path / "empty.jsonl", []),
+        candidate_roots=[candidates],
+        output_dir=tmp_path / "out",
+    )
+
+    assert manifest["intake_status"] == "accepted_reference_corpus_complete"
+    assert manifest["accepted_reference_rows"] == 1
+    row = _read_jsonl(tmp_path / "out" / "rows.jsonl")[0]
+    assert row["semantic_audit"]["status"] == "accepted"
+    assert row["source_gate"]["trainable_ground_truth"] is True
+    example = _read_jsonl(tmp_path / "out" / "audio.jsonl")[0]
+    assert example["semantic_audit"]["decision"] == "accepted"
+
+
+def test_intake_rejects_minus_when_semantic_audit_is_missing(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates"
+    _ground_truth_bundle(candidates, "minus_missing", track_id="track-minus", stems=["minus"])
+
+    manifest = build_full_pack_reference_corpus_intake(
+        gap_plan_json=_minus_gap_plan(tmp_path),
+        existing_audio_training_examples_jsonl=_write_jsonl(tmp_path / "empty.jsonl", []),
+        candidate_roots=[candidates],
+        output_dir=tmp_path / "out",
+    )
+
+    assert manifest["accepted_reference_rows"] == 0
+    assert manifest["rejection_reason_counts"]["minus_reference_semantic_audit_missing"] == 1
+
+
+def test_intake_rejects_minus_when_semantic_roles_are_reversed(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates"
+    manifest_path = _ground_truth_bundle(candidates, "minus_rev", track_id="track-minus", stems=["minus"])
+    _minus_semantic_audit(manifest_path, decision="roles_reversed", training_allowed=False)
+
+    manifest = build_full_pack_reference_corpus_intake(
+        gap_plan_json=_minus_gap_plan(tmp_path),
+        existing_audio_training_examples_jsonl=_write_jsonl(tmp_path / "empty.jsonl", []),
+        candidate_roots=[candidates],
+        output_dir=tmp_path / "out",
+    )
+
+    assert manifest["accepted_reference_rows"] == 0
+    assert manifest["rejection_reason_counts"]["minus_reference_semantic_audit_roles_reversed"] == 1
+    row = _read_jsonl(tmp_path / "out" / "rows.jsonl")[0]
+    assert row["source_gate"]["trainable_ground_truth"] is False
+
+
+def test_intake_rejects_minus_when_semantic_audit_hashes_do_not_match(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates"
+    manifest_path = _ground_truth_bundle(candidates, "minus_hash", track_id="track-minus", stems=["minus"])
+    _minus_semantic_audit(manifest_path, target_sha256="not-the-target-hash")
+
+    manifest = build_full_pack_reference_corpus_intake(
+        gap_plan_json=_minus_gap_plan(tmp_path),
+        existing_audio_training_examples_jsonl=_write_jsonl(tmp_path / "empty.jsonl", []),
+        candidate_roots=[candidates],
+        output_dir=tmp_path / "out",
+    )
+
+    assert manifest["accepted_reference_rows"] == 0
+    assert manifest["rejection_reason_counts"]["minus_reference_semantic_audit_target_sha256_mismatch"] == 1
+
+
+def test_intake_rejects_minus_when_detector_count_is_not_backed_by_unique_rows(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates"
+    manifest_path = _ground_truth_bundle(candidates, "minus_det", track_id="track-minus", stems=["minus"])
+    audit_path = _minus_semantic_audit(manifest_path)
+    audit = _read_json(audit_path)
+    audit["detectors"] = [
+        {"detector_id": "detector_a"},
+        {"detector_id": "detector_a"},
+    ]
+    _write_json(audit_path, audit)
+
+    manifest = build_full_pack_reference_corpus_intake(
+        gap_plan_json=_minus_gap_plan(tmp_path),
+        existing_audio_training_examples_jsonl=_write_jsonl(tmp_path / "empty.jsonl", []),
+        candidate_roots=[candidates],
+        output_dir=tmp_path / "out",
+    )
+
+    assert manifest["accepted_reference_rows"] == 0
+    reasons = manifest["rejection_reason_counts"]
+    assert reasons["minus_reference_semantic_audit_detector_count_mismatch"] == 1
+    assert reasons["minus_reference_semantic_audit_insufficient_detectors"] == 1
 
 
 def test_intake_rejects_debug_test_artifact_ground_truth_bundles(tmp_path: Path) -> None:

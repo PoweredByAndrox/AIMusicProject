@@ -316,6 +316,136 @@ class JudgeGuidedMinusVocalLeakageRepairTests(unittest.TestCase):
         self.assertEqual(metrics["projection_mode"], "segment_local")
         self.assertEqual(metrics["window_projection_count"], 2)
         self.assertEqual(metrics["status"], "segment_local_projection_repair_applied")
+        self.assertEqual(metrics["memory_strategy"], "window_sliced_float32")
+        self.assertFalse(metrics["full_track_gate_per_window"])
+        self.assertLess(metrics["max_local_working_frames"], stereo_base.shape[0])
+
+    def test_window_gate_slice_matches_full_track_gate(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        frame_count = sample_rate * 5
+        window = {"start_sec": 2.0, "duration_sec": 1.0}
+
+        full_gate = module.build_time_gate(
+            frame_count=frame_count,
+            sample_rate=sample_rate,
+            windows=[window],
+            margin_sec=0.04,
+            smoothing_sec=0.03,
+        )
+        window_slice, local_gate = module.build_window_gate_slice(
+            frame_count=frame_count,
+            sample_rate=sample_rate,
+            window=window,
+            margin_sec=0.04,
+            smoothing_sec=0.03,
+        )
+        reconstructed = np.zeros(frame_count, dtype=np.float32)
+        reconstructed[window_slice] = local_gate
+
+        np.testing.assert_allclose(reconstructed, full_gate, rtol=0.0, atol=1.0e-7)
+
+    def test_segment_local_projection_bounds_filter_work_to_local_slice(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        times = np.arange(sample_rate * 20, dtype=np.float32) / float(sample_rate)
+        vocal = np.sin(2.0 * np.pi * 440.0 * times).astype(np.float32)
+        music = 0.25 * np.sin(2.0 * np.pi * 110.0 * times).astype(np.float32)
+        stereo_base = np.column_stack([music + (0.25 * vocal), music + (0.25 * vocal)])
+        stereo_vocal = np.column_stack([vocal, vocal])
+
+        _repaired, metrics = module.apply_segment_local_projection_repair(
+            base_minus=stereo_base,
+            vocal_audio=stereo_vocal,
+            sample_rate=sample_rate,
+            windows=[
+                {"start_sec": 2.0, "duration_sec": 1.0},
+                {"start_sec": 15.0, "duration_sec": 1.0},
+            ],
+            margin_sec=0.04,
+            smoothing_sec=0.03,
+            strength=0.85,
+            max_projection_gain=0.75,
+            low_hz=160.0,
+            high_hz=2000.0,
+        )
+
+        self.assertLess(metrics["max_local_working_frames"], sample_rate * 2)
+        self.assertLess(metrics["max_local_working_frames"], stereo_base.shape[0] // 5)
+
+    def test_local_bandpass_and_segment_repair_match_full_track_reference(self) -> None:
+        module = _load_module()
+        sample_rate = 8000
+        times = np.arange(sample_rate * 6, dtype=np.float32) / float(sample_rate)
+        envelope = (0.55 + (0.35 * np.sin(2.0 * np.pi * 0.7 * times))).astype(np.float32)
+        vocal = envelope * (
+            np.sin(2.0 * np.pi * 440.0 * times)
+            + (0.25 * np.sin(2.0 * np.pi * 920.0 * times))
+        ).astype(np.float32)
+        music = (
+            0.25 * np.sin(2.0 * np.pi * 110.0 * times)
+            + 0.12 * np.sin(2.0 * np.pi * 1850.0 * times)
+        ).astype(np.float32)
+        stereo_vocal = np.column_stack([vocal, vocal * 0.92])
+        stereo_base = np.column_stack([music, music * 0.96]) + (0.32 * stereo_vocal)
+        windows = [
+            {"start_sec": 0.02, "duration_sec": 0.72},
+            {"start_sec": 2.00, "duration_sec": 0.90},
+            {"start_sec": 2.45, "duration_sec": 0.85},
+            {"start_sec": 5.15, "duration_sec": 0.80},
+        ]
+
+        full_guide = module.bandpass_audio(
+            stereo_vocal,
+            sample_rate,
+            low_hz=160.0,
+            high_hz=2000.0,
+        )
+        reference = stereo_base.astype(np.float32, copy=True)
+        combined_gate = np.zeros(reference.shape[0], dtype=np.float32)
+        for window in windows:
+            gate = module.build_time_gate(
+                frame_count=reference.shape[0],
+                sample_rate=sample_rate,
+                windows=[window],
+                margin_sec=0.04,
+                smoothing_sec=0.03,
+            )
+            active = gate > 1.0e-6
+            np.maximum(combined_gate, gate, out=combined_gate)
+            for channel_index in range(reference.shape[1]):
+                gain = module.signed_projection_gain(
+                    reference[active, channel_index],
+                    full_guide[active, channel_index],
+                    max_projection_gain=0.75,
+                )
+                reference[:, channel_index] -= (
+                    0.85 * gain * full_guide[:, channel_index] * gate
+                ).astype(np.float32)
+        reference, _peak = module.limit_active_region_peaks(
+            reference,
+            combined_gate > 1.0e-6,
+            copy=False,
+        )
+
+        repaired, _metrics = module.apply_segment_local_projection_repair(
+            base_minus=stereo_base,
+            vocal_audio=stereo_vocal,
+            sample_rate=sample_rate,
+            windows=windows,
+            margin_sec=0.04,
+            smoothing_sec=0.03,
+            strength=0.85,
+            max_projection_gain=0.75,
+            low_hz=160.0,
+            high_hz=2000.0,
+        )
+
+        error = np.asarray(repaired - reference, dtype=np.float64)
+        signal_energy = float(np.sum(np.square(np.asarray(reference, dtype=np.float64))))
+        error_energy = float(np.sum(np.square(error)))
+        snr_db = 10.0 * np.log10(signal_energy / max(error_energy, 1.0e-20))
+        self.assertGreater(snr_db, 55.0)
 
     def test_segment_local_projection_repair_allows_high_gain_for_low_energy_guide(self) -> None:
         module = _load_module()
@@ -454,28 +584,37 @@ class JudgeGuidedMinusVocalLeakageRepairTests(unittest.TestCase):
             )
             output_dir = root / "out"
 
-            manifest = module.build_judge_guided_minus_vocal_leakage_repair(
-                Namespace(
-                    raw_audio_path=raw_path,
-                    base_minus_path=base_path,
-                    primary_vocals_path=vocal_path,
-                    windowed_judge_jsonl=judge_path,
-                    output_dir=output_dir,
-                    candidate_id="base",
-                    track_id="track-a",
-                    listen_dir=None,
-                    listen_label="m001.flac",
-                    leak_threshold=0.60,
-                    strength=0.85,
-                    max_projection_gain=0.75,
-                    gate_smoothing_sec=0.0,
-                    window_margin_sec=0.0,
-                    band_low_hz=160.0,
-                    band_high_hz=2000.0,
-                    projection_mode="segment_local",
-                    short_output_names=True,
+            original_build_time_gate = module.build_time_gate
+
+            def fail_full_track_gate(**_kwargs):
+                raise AssertionError("segment_local orchestration must not allocate a full-track gate")
+
+            module.build_time_gate = fail_full_track_gate
+            try:
+                manifest = module.build_judge_guided_minus_vocal_leakage_repair(
+                    Namespace(
+                        raw_audio_path=raw_path,
+                        base_minus_path=base_path,
+                        primary_vocals_path=vocal_path,
+                        windowed_judge_jsonl=judge_path,
+                        output_dir=output_dir,
+                        candidate_id="base",
+                        track_id="track-a",
+                        listen_dir=None,
+                        listen_label="m001.flac",
+                        leak_threshold=0.60,
+                        strength=0.85,
+                        max_projection_gain=0.75,
+                        gate_smoothing_sec=0.0,
+                        window_margin_sec=0.0,
+                        band_low_hz=160.0,
+                        band_high_hz=2000.0,
+                        projection_mode="segment_local",
+                        short_output_names=True,
+                    )
                 )
-            )
+            finally:
+                module.build_time_gate = original_build_time_gate
 
             self.assertTrue((output_dir / "manifest.json").exists())
             self.assertTrue((output_dir / "rows.jsonl").exists())

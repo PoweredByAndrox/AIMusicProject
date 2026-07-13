@@ -18,8 +18,10 @@ if str(TOOLS_ROOT) not in sys.path:
 from docker_runtime import require_docker_runtime  # noqa: E402
 from train_teacher_mask_separator import (  # noqa: E402
     DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
+    acceleration_mode,
     apply_teacher_mask_checkpoint_to_source,
     fit_audio_pair,
+    is_accelerator_device,
     read_audio,
     resample_audio,
     validate_stem_name,
@@ -57,11 +59,11 @@ def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
 
 
 def progress(path: Path, event: str, *, device: str, **fields: Any) -> None:
-    uses_gpu = str(device) == "cuda"
+    uses_gpu = is_accelerator_device(device)
     payload = {
         "event": event,
         "elapsed_sec": round(time.monotonic() - START_TIME, 3),
-        "expected_acceleration_mode": "gpu_inference_holdout" if uses_gpu else "cpu_diagnostic_holdout",
+        "expected_acceleration_mode": acceleration_mode(device, phase="inference_holdout"),
         "gpu_inference_required": uses_gpu,
         "gpu_inference_skipped": not uses_gpu,
     }

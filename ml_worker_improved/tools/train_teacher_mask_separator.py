@@ -44,7 +44,22 @@ MASK_OUTPUT_MODE_MAGNITUDE = "magnitude"
 MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL = "magnitude_residual"
 MASK_OUTPUT_MODE_COMPLEX = "complex"
 MASK_OUTPUT_MODES = {MASK_OUTPUT_MODE_MAGNITUDE, MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL, MASK_OUTPUT_MODE_COMPLEX}
+CONDITIONING_FEATURE_SCHEMA = "symmetric_vocal_proxy_log_consensus_v1"
 ProgressCallback = Callable[[str, dict[str, Any]], None]
+ACCELERATOR_DEVICE_TYPES = {"cuda", "mps"}
+
+
+def is_accelerator_device(device: torch.device | str) -> bool:
+    return str(device).split(":", 1)[0].strip().lower() in ACCELERATOR_DEVICE_TYPES
+
+
+def acceleration_mode(device: torch.device | str, *, phase: str) -> str:
+    device_type = str(device).split(":", 1)[0].strip().lower()
+    if device_type == "cuda":
+        return f"gpu_{phase}"
+    if device_type == "mps":
+        return f"mps_gpu_{phase}"
+    return f"cpu_diagnostic_{phase}"
 
 
 def validate_mask_output_mode(value: str) -> str:
@@ -223,6 +238,16 @@ def fit_audio_pair(source_audio: np.ndarray, target_audio: np.ndarray) -> tuple[
     return source_audio[:length, :channels], target_audio[:length, :channels]
 
 
+def fit_audio_frames(audio: np.ndarray, frame_count: int) -> np.ndarray:
+    target_frames = int(frame_count)
+    if target_frames <= 0:
+        raise ValueError("frame_count must be positive")
+    if audio.shape[0] >= target_frames:
+        return audio[:target_frames]
+    padding = np.zeros((target_frames - audio.shape[0], audio.shape[1]), dtype=audio.dtype)
+    return np.concatenate([audio, padding], axis=0)
+
+
 def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
     if int(source_rate) == int(target_rate):
         return audio.astype(np.float64, copy=False)
@@ -239,11 +264,17 @@ def mono(audio: np.ndarray) -> np.ndarray:
 
 
 def _select_device(requested_device: str) -> torch.device:
-    if requested_device == "cuda":
+    normalized = str(requested_device or "").strip().lower()
+    if normalized == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA was requested for teacher-mask training but torch.cuda.is_available() is false")
         return torch.device("cuda")
-    if requested_device != "cpu":
+    if normalized == "mps":
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        if mps_backend is None or not bool(mps_backend.is_available()):
+            raise RuntimeError("MPS was requested for teacher-mask training but torch.backends.mps.is_available() is false")
+        return torch.device("mps")
+    if normalized != "cpu":
         raise ValueError(f"Unsupported device: {requested_device}")
     return torch.device("cpu")
 
@@ -349,19 +380,23 @@ def _synchronize_cuda_phase(
     device: torch.device,
     **fields: Any,
 ) -> None:
-    if progress_path is None or device.type != "cuda":
+    if progress_path is None or not is_accelerator_device(device):
         return
+    accelerator = str(device.type)
     progress(
         progress_path,
-        f"{event_prefix}_cuda_sync_start",
+        f"{event_prefix}_{accelerator}_sync_start",
         **dict(progress_context or {}),
         device=str(device),
         **fields,
     )
-    torch.cuda.synchronize(device)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    else:
+        torch.mps.synchronize()
     progress(
         progress_path,
-        f"{event_prefix}_cuda_sync_finish",
+        f"{event_prefix}_{accelerator}_sync_finish",
         **dict(progress_context or {}),
         device=str(device),
         **fields,
@@ -442,6 +477,16 @@ def _complex_prediction_frames(prediction: torch.Tensor, frequency_bins: int) ->
 
 def _weighted_complex_mse(delta: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     return ((delta.real.square() + delta.imag.square()) * weights).sum() / weights.sum().clamp_min(EPSILON)
+
+
+def _scoped_source_preservation_loss(
+    delta: torch.Tensor,
+    weights: torch.Tensor,
+    scope: torch.Tensor,
+) -> torch.Tensor:
+    scoped_weights = weights * scope
+    squared_error = delta.real.square() + delta.imag.square() if delta.is_complex() else delta.square()
+    return (squared_error * scoped_weights).sum() / scoped_weights.sum().clamp_min(EPSILON)
 
 
 def _normalize_features(features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -533,6 +578,30 @@ def _local_context_features(frame_features: torch.Tensor, context_frame_radius: 
         shifted_indices = (base_indices + int(offset)).clamp(0, frame_count - 1)
         context_columns.append(frame_features[shifted_indices])
     return torch.cat(context_columns, dim=1)
+
+
+def _conditioned_local_context_features(
+    source_magnitude_frames: torch.Tensor,
+    conditioning_magnitude_frames: Sequence[torch.Tensor],
+    context_frame_radius: int,
+) -> torch.Tensor:
+    source_log = torch.log1p(source_magnitude_frames * 64.0)
+    if not conditioning_magnitude_frames:
+        return _local_context_features(source_log, context_frame_radius)
+    for conditioning_magnitude in conditioning_magnitude_frames:
+        if conditioning_magnitude.shape != source_magnitude_frames.shape:
+            raise ValueError(
+                "conditioning magnitude shape mismatch: "
+                f"source={tuple(source_magnitude_frames.shape)}, conditioning={tuple(conditioning_magnitude.shape)}"
+            )
+    conditioning_logs = torch.stack(
+        [torch.log1p(conditioning_magnitude.clamp_min(EPSILON) * 64.0) for conditioning_magnitude in conditioning_magnitude_frames],
+        dim=0,
+    )
+    consensus_log = conditioning_logs.mean(dim=0)
+    disagreement_log = conditioning_logs.amax(dim=0) - conditioning_logs.amin(dim=0)
+    frame_features = torch.cat([source_log, consensus_log, disagreement_log], dim=1)
+    return _local_context_features(frame_features, context_frame_radius)
 
 
 def _config_payload(config: TeacherMaskTrainConfig) -> dict[str, Any]:
@@ -755,6 +824,13 @@ def train_teacher_mask(
     torch.manual_seed(int(config.seed))
     np.random.seed(int(config.seed))
     device = _select_device(config.device)
+    if device.type == "mps":
+        return train_teacher_mask_dataset(
+            [(source_audio, target_audio)],
+            config=config,
+            progress_path=progress_path,
+            progress_context=progress_context,
+        )
     _require_cuda_memory_available(
         device,
         min_free_memory_mb=int(config.min_cuda_free_memory_mb),
@@ -1239,6 +1315,8 @@ def train_teacher_mask_dataset(
     progress_path: Path | None = None,
     progress_context: dict[str, Any] | None = None,
     max_frames_per_pair: int = 0,
+    identity_pair_flags: Sequence[bool] | None = None,
+    conditioning_audio_groups: Sequence[Sequence[np.ndarray]] | None = None,
 ) -> tuple[TeacherMaskNetwork, dict[str, Any], dict[str, float]]:
     if not training_pairs:
         raise ValueError("training_pairs must contain at least one source/target pair")
@@ -1247,10 +1325,30 @@ def train_teacher_mask_dataset(
         raise ValueError("dataset training forbids temporal priors because they do not generalize across tracks")
     if bool(config.source_feature_memory_store_complex_masks):
         raise ValueError("dataset training forbids complex source-feature memory because it is reconstructive per-source state")
+    if identity_pair_flags is None:
+        resolved_identity_pair_flags = [True] * len(training_pairs)
+        source_preservation_scope = "all_pairs_backward_compatible"
+    else:
+        if len(identity_pair_flags) != len(training_pairs):
+            raise ValueError("identity_pair_flags must match training_pairs length")
+        resolved_identity_pair_flags = [bool(flag) for flag in identity_pair_flags]
+        source_preservation_scope = "declared_identity_pairs_only"
+    if conditioning_audio_groups is None:
+        resolved_conditioning_groups: list[list[np.ndarray]] = [[] for _ in training_pairs]
+    else:
+        if len(conditioning_audio_groups) != len(training_pairs):
+            raise ValueError("conditioning_audio_groups must match training_pairs length")
+        resolved_conditioning_groups = [list(group) for group in conditioning_audio_groups]
+    conditioning_audio_count = len(resolved_conditioning_groups[0]) if resolved_conditioning_groups else 0
+    if any(len(group) != conditioning_audio_count for group in resolved_conditioning_groups):
+        raise ValueError("all training pairs must use the same conditioning audio count")
     torch.manual_seed(int(config.seed))
     np.random.seed(int(config.seed))
     device = _select_device(config.device)
-    cpu_storage_dtype = torch.float16 if device.type == "cuda" else torch.float32
+    if device.type == "mps" and mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+        raise RuntimeError("MPS complex-mask training is unsupported; use magnitude or magnitude_residual mode")
+    dsp_device = torch.device("cpu") if device.type == "mps" else device
+    cpu_storage_dtype = torch.float16 if is_accelerator_device(device) else torch.float32
     needs_complex_training_tensors = mask_output_mode == MASK_OUTPUT_MODE_COMPLEX
     _require_cuda_memory_available(
         device,
@@ -1267,6 +1365,7 @@ def train_teacher_mask_dataset(
     oracle_mask_chunks: list[torch.Tensor] = []
     complex_mask_chunks: list[torch.Tensor] = []
     weight_chunks: list[torch.Tensor] = []
+    preservation_scope_chunks: list[torch.Tensor] = []
     active_index_chunks: list[torch.Tensor] = []
     frame_counts: list[int] = []
     frequency_bins: int | None = None
@@ -1274,18 +1373,41 @@ def train_teacher_mask_dataset(
 
     for pair_index, (source_audio, target_audio) in enumerate(training_pairs, start=1):
         source_audio, target_audio = fit_audio_pair(source_audio, target_audio)
-        source_stft = _stft_mono(mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
-        target_stft = _stft_mono(mono(target_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
+        conditioning_group = [
+            fit_audio_frames(conditioning_audio, int(source_audio.shape[0]))
+            for conditioning_audio in resolved_conditioning_groups[pair_index - 1]
+        ]
+        source_stft = _stft_mono(
+            mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=dsp_device
+        )
+        target_stft = _stft_mono(
+            mono(target_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=dsp_device
+        )
         source_stft_frames = source_stft.transpose(0, 1)
         target_stft_frames = target_stft.transpose(0, 1)
         source_mag = source_stft.abs().transpose(0, 1).clamp_min(EPSILON)
         target_mag = target_stft.abs().transpose(0, 1)
+        conditioning_magnitudes = [
+            _stft_mono(
+                mono(conditioning_audio),
+                n_fft=config.n_fft,
+                hop_length=config.hop_length,
+                device=dsp_device,
+            )
+            .abs()
+            .transpose(0, 1)
+            .clamp_min(EPSILON)
+            for conditioning_audio in conditioning_group
+        ]
         if frequency_bins is None:
             frequency_bins = int(source_mag.shape[1])
         elif int(source_mag.shape[1]) != frequency_bins:
             raise ValueError("all training pairs must produce the same frequency-bin count")
-        raw_frame_features = torch.log1p(source_mag * 64.0)
-        raw_features = _local_context_features(raw_frame_features, int(config.context_frame_radius))
+        raw_features = _conditioned_local_context_features(
+            source_mag,
+            conditioning_magnitudes,
+            int(config.context_frame_radius),
+        )
         if mask_output_mode == MASK_OUTPUT_MODE_MAGNITUDE_RESIDUAL:
             residual_deviation = magnitude_residual_deviation(config.mask_ceiling)
             oracle_mask = (target_mag / source_mag).clamp(1.0 - residual_deviation, 1.0 + residual_deviation)
@@ -1315,7 +1437,7 @@ def train_teacher_mask_dataset(
             selected_indices = _evenly_spaced_long_indices(
                 length=frame_count,
                 count=int(max_frames_per_pair),
-                device=device,
+                device=source_mag.device,
             )
             source_mag = source_mag[selected_indices]
             target_mag = target_mag[selected_indices]
@@ -1348,6 +1470,15 @@ def train_teacher_mask_dataset(
         target_mag_chunks.append(target_mag.detach().cpu().to(cpu_storage_dtype))
         oracle_mask_chunks.append(oracle_mask.detach().cpu().to(cpu_storage_dtype))
         weight_chunks.append(time_frequency_weights.detach().cpu().to(cpu_storage_dtype))
+        preservation_scope_chunks.append(
+            torch.full_like(
+                time_frequency_weights,
+                1.0 if resolved_identity_pair_flags[pair_index - 1] else 0.0,
+            )
+            .detach()
+            .cpu()
+            .to(cpu_storage_dtype)
+        )
         if progress_path is not None:
             progress(
                 progress_path,
@@ -1368,11 +1499,12 @@ def train_teacher_mask_dataset(
             target_stft_frames,
             source_mag,
             target_mag,
-            raw_frame_features,
             raw_features,
             oracle_mask,
             complex_oracle_mask,
             time_frequency_weights,
+            conditioning_magnitudes,
+            conditioning_group,
         )
         active_indices = torch.nonzero(active_mask.detach().cpu(), as_tuple=False).flatten()
         if active_indices.numel() > 0:
@@ -1388,6 +1520,7 @@ def train_teacher_mask_dataset(
                 pair_count=len(training_pairs),
                 frame_count=frame_count,
                 active_frame_count=int(active_indices.numel()),
+                conditioning_audio_count=conditioning_audio_count,
                 device=str(device),
             )
 
@@ -1608,6 +1741,7 @@ def train_teacher_mask_dataset(
     target_mag_all = torch.cat(target_mag_chunks, dim=0).to(cpu_storage_dtype)
     oracle_mask_all = torch.cat(oracle_mask_chunks, dim=0).to(cpu_storage_dtype)
     weights_all = torch.cat(weight_chunks, dim=0).to(cpu_storage_dtype)
+    preservation_scope_all = torch.cat(preservation_scope_chunks, dim=0).to(cpu_storage_dtype)
     source_mag_mean_scale = float(source_mag_all.float().mean().clamp_min(EPSILON))
     released_training_chunk_count = (
         len(source_stft_chunks)
@@ -1617,6 +1751,7 @@ def train_teacher_mask_dataset(
         + len(oracle_mask_chunks)
         + len(complex_mask_chunks)
         + len(weight_chunks)
+        + len(preservation_scope_chunks)
     )
     del (
         source_stft_chunks,
@@ -1626,6 +1761,7 @@ def train_teacher_mask_dataset(
         oracle_mask_chunks,
         complex_mask_chunks,
         weight_chunks,
+        preservation_scope_chunks,
     )
     if progress_path is not None:
         progress(
@@ -1814,6 +1950,7 @@ def train_teacher_mask_dataset(
             )
             batch_model_features_cpu = model_features[batch_indices]
             batch_weights_cpu = weights_all[batch_indices]
+            batch_preservation_scope_cpu = preservation_scope_all[batch_indices]
             if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
                 batch_complex_mask_cpu = complex_mask_all[batch_indices]
                 batch_source_stft_cpu = source_stft_all[batch_indices]
@@ -1856,6 +1993,7 @@ def train_teacher_mask_dataset(
             )
             batch_model_features = batch_model_features_cpu.to(device=device, dtype=torch.float32)
             batch_weights = batch_weights_cpu.to(device=device, dtype=torch.float32)
+            batch_preservation_scope = batch_preservation_scope_cpu.to(device=device, dtype=torch.float32)
             if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
                 batch_complex_mask = batch_complex_mask_cpu.to(device)
                 batch_source_stft = batch_source_stft_cpu.to(device)
@@ -1930,7 +2068,11 @@ def train_teacher_mask_dataset(
                 estimated_stft = prediction_complex * batch_source_stft
                 stft_loss = _weighted_complex_mse(estimated_stft - batch_target_stft, batch_weights)
                 identity_complex = torch.ones_like(prediction_complex)
-                source_preservation_loss = _weighted_complex_mse(prediction_complex - identity_complex, batch_weights)
+                source_preservation_loss = _scoped_source_preservation_loss(
+                    prediction_complex - identity_complex,
+                    batch_weights,
+                    batch_preservation_scope,
+                )
                 loss = (
                     mask_loss
                     + float(config.magnitude_loss_weight) * stft_loss / max(source_mag_mean_scale, EPSILON)
@@ -1940,7 +2082,11 @@ def train_teacher_mask_dataset(
                 mask_loss = ((prediction - batch_oracle_mask) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
                 estimated_mag = prediction * batch_source_mag
                 magnitude_loss = ((estimated_mag - batch_target_mag) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
-                source_preservation_loss = ((prediction - 1.0) ** 2 * batch_weights).sum() / batch_weights.sum().clamp_min(EPSILON)
+                source_preservation_loss = _scoped_source_preservation_loss(
+                    prediction - 1.0,
+                    batch_weights,
+                    batch_preservation_scope,
+                )
                 loss = (
                     mask_loss
                     + float(config.magnitude_loss_weight) * magnitude_loss / max(source_mag_mean_scale, EPSILON)
@@ -2054,6 +2200,8 @@ def train_teacher_mask_dataset(
         "input_features": int(model_features.shape[1]),
         "mask_output_mode": mask_output_mode,
         "complex_mask_ceiling": float(config.complex_mask_ceiling),
+        "conditioning_audio_count": int(conditioning_audio_count),
+        "conditioning_feature_schema": CONDITIONING_FEATURE_SCHEMA if conditioning_audio_count else "none",
         "feature_mean": feature_mean.detach().cpu().numpy().astype(np.float32),
         "feature_std": feature_std.detach().cpu().numpy().astype(np.float32),
     }
@@ -2108,7 +2256,9 @@ def train_teacher_mask_dataset(
         "frequency_bins": float(frequency_bins),
         "mask_output_mode": mask_output_mode,
         "complex_mask_ceiling": float(config.complex_mask_ceiling),
-        "device_used": 1.0 if device.type == "cuda" else 0.0,
+        "device_used": 1.0 if is_accelerator_device(device) else 0.0,
+        "neural_training_device": str(device.type),
+        "dsp_feature_device": str(dsp_device.type),
         "max_frames_per_pair": float(max(0, int(max_frames_per_pair))),
         "source_feature_memory_frame_count": float(source_feature_memory_stored_frame_count)
         if int(config.source_feature_memory_neighbors) > 0
@@ -2118,6 +2268,10 @@ def train_teacher_mask_dataset(
         else 0.0,
         "source_feature_memory_projection_dim": float(source_feature_memory_projection_dim_used),
         "source_feature_memory_max_frames": float(int(config.source_feature_memory_max_frames)),
+        "source_preservation_scope": source_preservation_scope,
+        "identity_preservation_pair_count": float(sum(resolved_identity_pair_flags)),
+        "conditioning_audio_count": float(conditioning_audio_count),
+        "conditioning_feature_schema": CONDITIONING_FEATURE_SCHEMA if conditioning_audio_count else "none",
     }
     return model, metadata, diagnostics
 
@@ -2128,31 +2282,63 @@ def apply_teacher_mask(
     model: TeacherMaskNetwork,
     metadata: dict[str, Any],
     config: TeacherMaskTrainConfig,
+    conditioning_audio: Sequence[np.ndarray] | None = None,
     progress_callback: ProgressCallback | None = None,
     max_source_feature_memory_distance_ops: int = DEFAULT_MAX_SOURCE_FEATURE_MEMORY_DISTANCE_OPS,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     device = next(model.parameters()).device
     mask_output_mode = validate_mask_output_mode(config.mask_output_mode)
+    if device.type == "mps" and mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
+        raise RuntimeError("MPS complex-mask application is unsupported; use magnitude or magnitude_residual mode")
+    expected_conditioning_count = int(metadata.get("conditioning_audio_count", 0))
+    resolved_conditioning_audio = list(conditioning_audio or [])
+    if len(resolved_conditioning_audio) != expected_conditioning_count:
+        raise ValueError(
+            "conditioning audio count mismatch: "
+            f"checkpoint={expected_conditioning_count}, application={len(resolved_conditioning_audio)}"
+        )
+    expected_conditioning_schema = str(metadata.get("conditioning_feature_schema") or "none")
+    if expected_conditioning_count > 0 and expected_conditioning_schema != CONDITIONING_FEATURE_SCHEMA:
+        raise ValueError(f"unsupported conditioning feature schema: {expected_conditioning_schema}")
+    dsp_device = torch.device("cpu") if device.type == "mps" else device
     emit_progress(
         progress_callback,
         "apply_feature_extraction_start",
         device=str(device.type),
         source_frames=int(source_audio.shape[0]),
         source_channels=int(source_audio.shape[1]) if source_audio.ndim == 2 else 0,
+        conditioning_audio_count=expected_conditioning_count,
         n_fft=int(config.n_fft),
         hop_length=int(config.hop_length),
     )
-    source_stft_mono = _stft_mono(mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=device)
+    source_stft_mono = _stft_mono(
+        mono(source_audio), n_fft=config.n_fft, hop_length=config.hop_length, device=dsp_device
+    )
     source_mag = source_stft_mono.abs().transpose(0, 1).clamp_min(EPSILON)
-    raw_frame_features = torch.log1p(source_mag * 64.0)
-    raw_features = _local_context_features(raw_frame_features, int(config.context_frame_radius))
-    feature_mean = torch.as_tensor(metadata["feature_mean"], dtype=torch.float32, device=device)
-    feature_std = torch.as_tensor(metadata["feature_std"], dtype=torch.float32, device=device).clamp_min(1.0e-4)
+    conditioning_magnitudes = [
+        _stft_mono(
+            mono(fit_audio_frames(audio, int(source_audio.shape[0]))),
+            n_fft=config.n_fft,
+            hop_length=config.hop_length,
+            device=dsp_device,
+        )
+        .abs()
+        .transpose(0, 1)
+        .clamp_min(EPSILON)
+        for audio in resolved_conditioning_audio
+    ]
+    raw_features = _conditioned_local_context_features(
+        source_mag,
+        conditioning_magnitudes,
+        int(config.context_frame_radius),
+    )
+    feature_mean = torch.as_tensor(metadata["feature_mean"], dtype=torch.float32, device=dsp_device)
+    feature_std = torch.as_tensor(metadata["feature_std"], dtype=torch.float32, device=dsp_device).clamp_min(1.0e-4)
     features = (raw_features - feature_mean) / feature_std
     temporal_features = _temporal_position_features(
         int(features.shape[0]),
         int(config.time_feature_count),
-        device=device,
+        device=dsp_device,
     )
     model_features = torch.cat([features, temporal_features], dim=1)
     emit_progress(
@@ -2162,9 +2348,11 @@ def apply_teacher_mask(
         query_frame_count=int(model_features.shape[0]),
         feature_width=int(model_features.shape[1]),
         frequency_bins=int(source_mag.shape[1]),
+        conditioning_audio_count=expected_conditioning_count,
+        conditioning_feature_schema=expected_conditioning_schema,
     )
     with torch.no_grad():
-        prediction = model(model_features)
+        prediction = model(model_features.to(device=device, dtype=torch.float32)).to(dsp_device)
         if mask_output_mode == MASK_OUTPUT_MODE_COMPLEX:
             learned_complex_mask = _complex_prediction_frames(prediction, int(source_mag.shape[1])).transpose(0, 1).to(torch.complex64)
             mask = learned_complex_mask.abs().clamp(0.0, max(float(config.mask_ceiling), float(config.complex_mask_ceiling)))
@@ -2196,7 +2384,7 @@ def apply_teacher_mask(
             projection_matrix = torch.as_tensor(
                 np.asarray(metadata["source_feature_memory_projection_matrix"], dtype=np.float32),
                 dtype=torch.float32,
-                device=device,
+                device=dsp_device,
             )
             if projection_matrix.ndim == 2 and projection_matrix.shape[0] == model_features.shape[1]:
                 memory_query_features = _project_source_feature_memory_features(model_features, projection_matrix)
@@ -2206,12 +2394,12 @@ def apply_teacher_mask(
         memory_features = torch.as_tensor(
             np.asarray(metadata["source_feature_memory_features"], dtype=np.float32),
             dtype=torch.float32,
-            device=device,
+            device=dsp_device,
         )
         memory_masks = torch.as_tensor(
             np.asarray(metadata["source_feature_memory_masks"], dtype=np.float32),
             dtype=torch.float32,
-            device=device,
+            device=dsp_device,
         )
         memory_complex_frame_masks: torch.Tensor | None = None
         if (
@@ -2222,7 +2410,9 @@ def apply_teacher_mask(
                 np.asarray(metadata["source_feature_memory_complex_frame_mask_real"], dtype=np.float32)
                 + 1j * np.asarray(metadata["source_feature_memory_complex_frame_mask_imag"], dtype=np.float32)
             ).astype(np.complex64, copy=False)
-            memory_complex_frame_masks = torch.as_tensor(raw_complex_frame_masks, dtype=torch.complex64, device=device)
+            memory_complex_frame_masks = torch.as_tensor(
+                raw_complex_frame_masks, dtype=torch.complex64, device=dsp_device
+            )
             if memory_complex_frame_masks.ndim == 2 and memory_complex_frame_masks.shape[1] == source_mag.shape[1]:
                 source_feature_memory_complex_frame_mask_available = True
             else:
@@ -2272,7 +2462,7 @@ def apply_teacher_mask(
                     raw_channel_masks = torch.as_tensor(
                         np.asarray(metadata["source_feature_memory_channel_masks"], dtype=np.float32),
                         dtype=torch.float32,
-                        device=device,
+                        device=dsp_device,
                     )
                     if raw_channel_masks.ndim == 3 and raw_channel_masks.shape[-1] == source_mag.shape[1]:
                         source_feature_memory_channel_masks = raw_channel_masks
@@ -2354,7 +2544,7 @@ def apply_teacher_mask(
                     source_feature_memory_complex_mask_skipped_reason = "non_matching_source_features"
     temporal_mask_prior_used = False
     if "temporal_mask_prior" in metadata:
-        prior = torch.as_tensor(metadata["temporal_mask_prior"], dtype=torch.float32, device=device)
+        prior = torch.as_tensor(metadata["temporal_mask_prior"], dtype=torch.float32, device=dsp_device)
         if prior.shape == source_mag.shape:
             mask = prior.transpose(0, 1).clamp(0.0, float(config.mask_ceiling))
             temporal_mask_prior_used = True
@@ -2372,14 +2562,16 @@ def apply_teacher_mask(
             source_audio[:, channel_index],
             n_fft=config.n_fft,
             hop_length=config.hop_length,
-            device=device,
+            device=dsp_device,
         )
         if (
             complex_mask_prior is not None
             and channel_index < complex_mask_prior.shape[0]
             and complex_mask_prior.shape[1:] == tuple(channel_stft.shape)
         ):
-            channel_mask = torch.as_tensor(complex_mask_prior[channel_index], dtype=torch.complex64, device=device)
+            channel_mask = torch.as_tensor(
+                complex_mask_prior[channel_index], dtype=torch.complex64, device=dsp_device
+            )
             output_channels.append(
                 _istft_channel(
                     channel_stft * channel_mask,
@@ -2398,7 +2590,7 @@ def apply_teacher_mask(
             channel_complex_mask = torch.as_tensor(
                 source_feature_memory_complex_masks[channel_index],
                 dtype=torch.complex64,
-                device=device,
+                device=dsp_device,
             )
             output_channels.append(
                 _istft_channel(
@@ -2455,10 +2647,14 @@ def apply_teacher_mask(
         peak_limited = True
     diagnostics = {
         "device": str(device.type),
-        "device_used": 1.0 if device.type == "cuda" else 0.0,
+        "device_used": 1.0 if is_accelerator_device(device) else 0.0,
+        "neural_inference_device": str(device.type),
+        "dsp_feature_device": str(dsp_device.type),
         "mask_output_mode": mask_output_mode,
         "complex_mask_ceiling": float(config.complex_mask_ceiling),
         "complex_mask_used": learned_complex_mask_used,
+        "conditioning_audio_count": expected_conditioning_count,
+        "conditioning_feature_schema": expected_conditioning_schema,
         "predicted_mask_mean": round(float(mask.mean().detach().cpu()), 9),
         "predicted_mask_max": round(float(mask.max().detach().cpu()), 9),
         "source_feature_memory_available": source_feature_memory_available,
@@ -2558,6 +2754,7 @@ def apply_teacher_mask_checkpoint_to_source(
     output_dir: Path,
     stem_name: str,
     device: str,
+    conditioning_audio_paths: Sequence[Path] = (),
     listen_dir: Path | None = None,
     command_args: list[str] | None = None,
     progress_path: Path | None = None,
@@ -2569,17 +2766,18 @@ def apply_teacher_mask_checkpoint_to_source(
     def application_progress(event: str, fields: dict[str, Any]) -> None:
         if progress_path is None:
             return
-        uses_gpu = str(device) == "cuda"
+        uses_gpu = is_accelerator_device(device)
         payload = dict(progress_context or {})
         payload.update(
             {
-                "expected_acceleration_mode": "gpu_checkpoint_application" if uses_gpu else "cpu_checkpoint_application",
+                "expected_acceleration_mode": acceleration_mode(device, phase="checkpoint_application"),
                 "gpu_inference_required": uses_gpu,
                 "gpu_inference_skipped": not uses_gpu,
                 "device_requested": str(device),
                 "stem_name": stem_name,
                 "source_mix_path": str(source_mix_path),
                 "checkpoint_path": str(checkpoint_path),
+                "conditioning_audio_count": len(conditioning_audio_paths),
             }
         )
         payload.update(fields)
@@ -2610,15 +2808,35 @@ def apply_teacher_mask_checkpoint_to_source(
         checkpoint_complex_mask_ceiling=float(checkpoint_config.complex_mask_ceiling),
         checkpoint_source_feature_memory_neighbors=int(checkpoint_config.source_feature_memory_neighbors),
         checkpoint_source_feature_memory_chunk_size=int(checkpoint_config.source_feature_memory_chunk_size),
+        checkpoint_conditioning_audio_count=int(metadata.get("conditioning_audio_count", 0)),
+        checkpoint_conditioning_feature_schema=str(metadata.get("conditioning_feature_schema") or "none"),
     )
     if validate_stem_name(checkpoint_stem_name) != stem_name:
         raise ValueError(f"checkpoint stem mismatch: checkpoint={checkpoint_stem_name}, requested={stem_name}")
+    conditioning_audio: list[np.ndarray] = []
+    conditioning_inputs: list[dict[str, Any]] = []
+    for conditioning_path in conditioning_audio_paths:
+        audio, sample_rate = read_audio(conditioning_path)
+        resampled = int(sample_rate) != int(source_sample_rate)
+        if resampled:
+            audio = resample_audio(audio, sample_rate, source_sample_rate)
+        audio = fit_audio_frames(audio, int(source_audio.shape[0]))
+        conditioning_audio.append(audio)
+        conditioning_inputs.append(
+            {
+                **audio_summary(conditioning_path),
+                "original_sample_rate": int(sample_rate),
+                "resampled_to_source": resampled,
+                "aligned_frame_count": int(audio.shape[0]),
+            }
+        )
     emit_progress(application_progress, "checkpoint_application_mask_start")
     output_audio, apply_diagnostics = apply_teacher_mask(
         source_audio,
         model=model,
         metadata=metadata,
         config=checkpoint_config,
+        conditioning_audio=conditioning_audio,
         progress_callback=application_progress,
         max_source_feature_memory_distance_ops=int(max_source_feature_memory_distance_ops),
     )
@@ -2636,6 +2854,9 @@ def apply_teacher_mask_checkpoint_to_source(
         "target_reference_used_at_training": True,
         "target_reference_used_at_application": False,
         "application_reference_free": True,
+        "conditioning_audio_required": int(metadata.get("conditioning_audio_count", 0)) > 0,
+        "conditioning_audio_count": int(metadata.get("conditioning_audio_count", 0)),
+        "conditioning_feature_schema": str(metadata.get("conditioning_feature_schema") or "none"),
         "quality_gate_required": True,
         "requires_holdout_validation": True,
         "holdout_validation_status": "missing",
@@ -2665,6 +2886,7 @@ def apply_teacher_mask_checkpoint_to_source(
         "presentation": presentation,
         "inputs": {
             "source_mix": audio_summary(source_mix_path),
+            "conditioning_audio": conditioning_inputs,
             "checkpoint": {
                 "path": str(checkpoint_path),
                 "sha256": sha256_file(checkpoint_path),
@@ -2712,12 +2934,15 @@ def train_and_apply_teacher_mask_separator(
     stem_name = validate_stem_name(stem_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
-    acceleration_mode = "gpu_training" if str(train_config.device).lower() == "cuda" else "cpu_test_training"
+    accelerated = is_accelerator_device(train_config.device)
+    requested_acceleration_mode = (
+        acceleration_mode(train_config.device, phase="training") if accelerated else "cpu_test_training"
+    )
     progress_context = {
         "stem_name": stem_name,
-        "expected_acceleration_mode": acceleration_mode,
-        "gpu_training_required": str(train_config.device).lower() == "cuda",
-        "gpu_training_skipped": str(train_config.device).lower() != "cuda",
+        "expected_acceleration_mode": requested_acceleration_mode,
+        "gpu_training_required": accelerated,
+        "gpu_training_skipped": not accelerated,
         "device_requested": str(train_config.device),
     }
     progress(
@@ -2881,6 +3106,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-mix", type=Path, required=True)
     parser.add_argument("--teacher-target", type=Path)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--conditioning-audio-path", action="append", type=Path, default=[])
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--stem", required=True)
     parser.add_argument("--listen-dir", type=Path)
@@ -2979,10 +3205,13 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             stem_name=args.stem,
             device=str(args.device),
+            conditioning_audio_paths=list(args.conditioning_audio_path),
             listen_dir=args.listen_dir,
             command_args=command_args,
         )
     else:
+        if args.conditioning_audio_path:
+            raise ValueError("conditioning audio is currently supported only in checkpoint application mode")
         if args.teacher_target is None:
             raise ValueError("--teacher-target is required when --checkpoint is not supplied")
         manifest = train_and_apply_teacher_mask_separator(

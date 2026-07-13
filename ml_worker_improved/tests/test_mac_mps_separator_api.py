@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import http.client
+import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,18 @@ def test_mac_api_job_id_is_short_and_windows_safe():
     assert len(job_id) <= 16
     assert "karak" not in job_id
     assert all(ch.isalnum() or ch == "_" for ch in job_id)
+
+
+def test_request_timeout_defaults_and_rejects_unbounded_values():
+    module = _load_module()
+
+    assert module.resolve_request_timeout_sec({}, maximum_sec=600) == 600
+    assert module.resolve_request_timeout_sec({"timeout_sec": 0}, maximum_sec=600) == 600
+    assert module.resolve_request_timeout_sec({"timeout_sec": 30}, maximum_sec=600) == 30
+    with pytest.raises(ValueError, match="must be positive"):
+        module.resolve_request_timeout_sec({"timeout_sec": -1}, maximum_sec=600)
+    with pytest.raises(ValueError, match="exceeds configured maximum"):
+        module.resolve_request_timeout_sec({"timeout_sec": 601}, maximum_sec=600)
 
 
 def test_mac_api_rejects_output_outside_artifacts_root(tmp_path):
@@ -91,6 +106,7 @@ def test_mac_api_mdx23c_route_uses_local_vendor_paths(tmp_path):
         route_id="mdx23c_vocals",
         source_audio_path=tmp_path / "mix.flac",
         output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+        timeout_sec=321,
     )
 
     assert env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] == "1"
@@ -101,7 +117,8 @@ def test_mac_api_mdx23c_route_uses_local_vendor_paths(tmp_path):
     assert str(tmp_path / "project" / "ml_worker_improved" / "vendor" / "mdx23c_vocals_official" / "config_vocals_mdx23c.yaml") in command
     assert "--model-path" in command
     assert str(tmp_path / "project" / "ml_worker_improved" / "vendor" / "mdx23c_vocals_official" / "model_vocals_mdx23c_sdr_10.17.ckpt") in command
-    assert "--timeout-sec" not in command
+    assert "--timeout-sec" in command
+    assert command[command.index("--timeout-sec") + 1] == "321"
 
 
 def test_mac_api_becruily_instrumental_route_uses_dedicated_minus_checkpoint(tmp_path):
@@ -130,7 +147,88 @@ def test_mac_api_becruily_instrumental_route_uses_dedicated_minus_checkpoint(tmp
     assert command[command.index("--manifest-model-id") + 1] == "becruily_instrumental_vocals"
 
 
-def test_mac_api_scnet_route_uses_extended_mps_timeout(tmp_path):
+def test_mac_api_fv7z_route_uses_verified_dedicated_instrumental_checkpoint(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="melband_inst_fv7z",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    model_root = tmp_path / "project" / "ml_worker_improved" / "vendor" / "melband_inst_fv7z_diag"
+    assert env["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+    assert "tools/export_melband_vocal_full.py" in command[1].replace("\\", "/")
+    assert command[command.index("--config-path") + 1] == str(model_root / "config.yaml")
+    assert command[command.index("--model-path") + 1] == str(
+        model_root / "mel_band_roformer_instrumental_fv7z_gabox.ckpt"
+    )
+    assert command[command.index("--model-source-metadata-path") + 1] == str(model_root / "source.json")
+    assert command[command.index("--manifest-model-id") + 1] == module.FV7Z_INSTRUMENTAL_ROUTE_ID
+    assert command[command.index("--inference-chunk-size") + 1] == "485100"
+    assert command[command.index("--inference-batch-size") + 1] == "1"
+    assert command[command.index("--num-overlap") + 1] == "2"
+
+
+def test_mac_api_becruily_karaoke_route_uses_registered_vocal_checkpoint(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="becruily_karaoke_vocals",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    vendor_root = tmp_path / "project" / "ml_worker_improved" / "vendor"
+    assert env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] == "1"
+    assert env["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+    assert "tools/export_melband_vocal_full.py" in command[1].replace("\\", "/")
+    assert str(vendor_root / "becruily_karaoke" / "config_karaoke_becruily.yaml") in command
+    assert str(vendor_root / "becruily_karaoke" / "mel_band_roformer_karaoke_becruily.ckpt") in command
+    assert command[command.index("--manifest-model-id") + 1] == "becruily_karaoke_vocals"
+
+
+def test_mac_api_viperx_melband_route_uses_memory_safe_registered_checkpoint(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="audio_separator_melband_roformer_viperx_vocals",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    vendor_root = tmp_path / "project" / "ml_worker_improved" / "vendor"
+    assert env["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+    assert "tools/export_melband_vocal_full.py" in command[1].replace("\\", "/")
+    assert str(
+        vendor_root / "melband_roformer_viperx_11436" / "model_mel_band_roformer_ep_3005_sdr_11.4360.yaml"
+    ) in command
+    assert str(
+        vendor_root / "melband_roformer_viperx_11436" / "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt"
+    ) in command
+    assert command[command.index("--manifest-model-id") + 1] == module.VIPERX_MELBAND_ROUTE_ID
+    assert command[command.index("--inference-batch-size") + 1] == "1"
+
+
+def test_mac_api_scnet_route_uses_memory_safe_mps_profile(tmp_path):
     module = _load_module()
     config = module.MacMpsApiConfig(
         project_root=tmp_path / "project",
@@ -149,6 +247,138 @@ def test_mac_api_scnet_route_uses_extended_mps_timeout(tmp_path):
     assert "tools/export_scnet_full.py" in command[1].replace("\\", "/")
     assert "--timeout-sec" in command
     assert command[command.index("--timeout-sec") + 1] == module.SCNET_MPS_TIMEOUT_SEC
+    assert command[command.index("--chunk-size") + 1] == module.SCNET_MPS_CHUNK_SIZE
+    assert command[command.index("--batch-size") + 1] == module.SCNET_MPS_BATCH_SIZE
+    assert command[command.index("--num-overlap") + 1] == module.SCNET_MPS_NUM_OVERLAP
+
+
+def test_mac_api_large_inst_route_uses_exact_architecture_and_no_mps_fallback(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="bs_roformer_large_inst",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    model_root = tmp_path / "project" / "ml_worker_improved" / "vendor" / "bs_roformer_large_inst_diag"
+    assert env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] == "1"
+    assert env["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+    assert "tools/export_instrumental_resurrection_minus.py" in command[1].replace("\\", "/")
+    assert command[command.index("--model-implementation-path") + 1] == str(model_root / "bs_roformer.py")
+    assert command[command.index("--model-path") + 1] == str(model_root / "bs_large_v2_inst.ckpt")
+    assert command[command.index("--model-source-metadata-path") + 1] == str(model_root / "source.json")
+    assert command[command.index("--target-instrument") + 1] == "instrument"
+    assert command[command.index("--device") + 1] == "mps"
+    assert command[command.index("--inference-chunk-size") + 1] == "529200"
+    assert command[command.index("--inference-batch-size") + 1] == "1"
+    assert command[command.index("--inference-num-overlap") + 1] == "1"
+
+
+def test_mac_api_resurrection_route_uses_official_dedicated_instrumental_checkpoint(tmp_path):
+    module = _load_module()
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="bs_roformer_inst_res",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    model_root = (
+        tmp_path / "project" / "ml_worker_improved" / "vendor" / "bs_roformer_instrumental_resurrection_manual"
+    )
+    assert env["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+    assert "tools/export_instrumental_resurrection_minus.py" in command[1].replace("\\", "/")
+    assert command[command.index("--config-path") + 1] == str(
+        model_root / "config_bs_roformer_instrumental_resurrection_unwa.yaml"
+    )
+    assert command[command.index("--model-path") + 1] == str(
+        model_root / "bs_roformer_instrumental_resurrection_unwa.ckpt"
+    )
+    assert command[command.index("--target-instrument") + 1] == "other"
+    assert command[command.index("--device") + 1] == "mps"
+    assert command[command.index("--inference-chunk-size") + 1] == "176400"
+    assert command[command.index("--inference-batch-size") + 1] == "1"
+    assert command[command.index("--inference-num-overlap") + 1] == "2"
+
+
+def test_mac_api_large_inst_route_uses_configured_resident_worker_without_fallback(tmp_path):
+    module = _load_module()
+    socket_path = tmp_path / "li.sock"
+    config = module.MacMpsApiConfig(
+        project_root=tmp_path / "project",
+        artifacts_root=tmp_path / "artifacts",
+        python_bin=tmp_path / "venv" / "bin" / "python",
+        large_inst_worker_socket=socket_path,
+        large_inst_worker_timeout_sec=321,
+    )
+
+    command, env = module.build_separator_export_command(
+        config=config,
+        route_id="bs_roformer_large_inst",
+        source_audio_path=tmp_path / "mix.flac",
+        output_dir=tmp_path / "artifacts" / "mac_api" / "t001" / "run",
+    )
+
+    assert env["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+    assert command[command.index("--resident-worker-socket") + 1] == str(socket_path)
+    assert command[command.index("--resident-worker-timeout-sec") + 1] == "321"
+
+
+def test_large_inst_minus_manifest_can_satisfy_instrumental_alias_without_stem_sum(tmp_path):
+    module = _load_module()
+    minus_path = tmp_path / "instrumental.flac"
+    minus_path.write_bytes(b"dedicated minus")
+    summary = {
+        "target_stem": "minus",
+        "stems": {
+            "minus": {
+                "path": str(minus_path),
+                "source": "instrumental_resurrection_model_output",
+                "source_stems": ["instrument"],
+            }
+        },
+    }
+
+    resolved = module._source_info_for_requested_stem(summary, "instrumental")
+
+    assert resolved is not None
+    assert resolved["path"] == str(minus_path)
+    assert resolved["source"] == "instrumental_resurrection_model_output"
+
+
+def test_official_resurrection_minus_manifest_can_satisfy_instrumental_alias(tmp_path):
+    module = _load_module()
+    minus_path = tmp_path / "instrumental.flac"
+    minus_path.write_bytes(b"official dedicated minus")
+    summary = {
+        "target_stem": "minus",
+        "stems": {
+            "minus": {
+                "path": str(minus_path),
+                "source": "instrumental_resurrection_model_output",
+                "source_stems": ["other"],
+            }
+        },
+    }
+
+    resolved = module._source_info_for_requested_stem(summary, "instrumental")
+
+    assert resolved is not None
+    assert resolved["path"] == str(minus_path)
+    assert resolved["source_stems"] == ["other"]
 
 
 def test_mac_api_rejects_unknown_route(tmp_path):
@@ -561,3 +791,368 @@ def test_mac_api_separate_blocks_unsupported_route_without_delivery(tmp_path):
     assert response["status"] == "blocked"
     assert "unsupported Mac MPS route" in response["reason"]
     assert response["delivery_allowed"] is False
+
+
+def test_api_health_reports_resident_worker_state(tmp_path, monkeypatch):
+    module = _load_module()
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=tmp_path / "project",
+            artifacts_root=tmp_path / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            large_inst_worker_socket=tmp_path / "li.sock",
+        )
+    )
+    monkeypatch.setattr(
+        module,
+        "send_request",
+        lambda *_args, **_kwargs: {
+            "status": "ready",
+            "model_load_count": 1,
+            "model_fingerprint": {"model_id": "bs_roformer_large_inst"},
+        },
+    )
+
+    health = runner.health()
+
+    assert health["status"] == "ok"
+    assert health["large_inst_worker_configured"] is True
+    assert health["large_inst_worker"]["model_load_count"] == 1
+
+
+def test_async_job_manifest_preserves_resident_worker_evidence(tmp_path):
+    module = _load_module()
+    output_dir = tmp_path / "artifacts" / "mac_api" / "t001"
+    run_dir = output_dir / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "stem_manifest.json").write_text(
+        json.dumps(
+            {
+                "target_stem": "minus",
+                "stems": {},
+                "execution_contract": {
+                    "resident_worker_evidence": {
+                        "model_load_count": 1,
+                        "request_count": 7,
+                        "scratch_cleanup_verified": True,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=tmp_path / "project",
+            artifacts_root=tmp_path / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            large_inst_worker_socket=tmp_path / "li.sock",
+        )
+    )
+
+    runner._finish(
+        "m123",
+        tmp_path / "source.flac",
+        output_dir,
+        "bs_roformer_large_inst",
+        "bs_roformer_large_inst",
+        status="ok",
+        returncode=0,
+        error=None,
+    )
+
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["resident_capable"] is True
+    assert manifest["resident_backend_used"] is True
+    assert manifest["resident_worker_evidence"]["request_count"] == 7
+
+
+def test_instrumental_alias_rejects_untrusted_minus_manifest_source(tmp_path):
+    module = _load_module()
+    minus_path = tmp_path / "minus.flac"
+    minus_path.write_bytes(b"untrusted")
+    summary = {
+        "target_stem": "minus",
+        "stems": {
+            "minus": {
+                "path": str(minus_path),
+                "source": "stem_model_non_vocal_sum",
+                "source_stems": ["drums", "bass", "other"],
+            }
+        },
+    }
+
+    assert module._source_info_for_requested_stem(summary, "instrumental") is None
+
+
+def test_separate_mount_block_does_not_write_rejected_output_path(tmp_path):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    output_dir = tmp_path / "forbidden_local_output"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=project_root / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+
+    status_code, response = runner.separate(
+        {
+            "route_id": "bs_roformer_large_inst",
+            "source_audio_path": str(source_audio),
+            "output_dir": str(output_dir),
+            "device": "mps",
+            "require_gpu": True,
+            "stems": ["instrumental"],
+        }
+    )
+
+    assert status_code == 400
+    assert response["status"] == "blocked"
+    assert not output_dir.exists()
+
+
+def test_separate_rejects_existing_output_without_running_or_reusing_stale_stems(tmp_path, monkeypatch):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    output_dir = project_root / "artifacts" / "mac_api" / "stale"
+    stale_run = output_dir / "run"
+    stale_run.mkdir(parents=True)
+    stale_manifest = stale_run / "stem_manifest.json"
+    stale_manifest.write_text('{"target_stem":"minus"}', encoding="utf-8")
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=project_root / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("subprocess must not run")),
+    )
+
+    status_code, response = runner.separate(
+        {
+            "route_id": "bs_roformer_large_inst",
+            "source_audio_path": str(source_audio),
+            "output_dir": str(output_dir),
+            "device": "mps",
+            "require_gpu": True,
+            "stems": ["instrumental"],
+        }
+    )
+
+    assert status_code == 409
+    assert response["reason"] == "output_dir_already_exists"
+    assert stale_manifest.read_text(encoding="utf-8") == '{"target_stem":"minus"}'
+    assert not (output_dir / "persistent_separator.json").exists()
+
+
+def test_concurrent_separate_requests_cannot_share_output_dir(tmp_path, monkeypatch):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    output_dir = project_root / "artifacts" / "mac_api" / "race"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=project_root / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+    inference_started = threading.Event()
+    allow_inference_finish = threading.Event()
+    call_count = 0
+
+    def fake_run(command, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        inference_started.set()
+        assert allow_inference_finish.wait(timeout=2.0)
+        return module.subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    payload = {
+        "route_id": "bs_roformer_large_inst",
+        "source_audio_path": str(source_audio),
+        "output_dir": str(output_dir),
+        "device": "mps",
+        "require_gpu": True,
+        "stems": ["instrumental"],
+        "timeout_sec": 30,
+    }
+    first_result = []
+    first_thread = threading.Thread(target=lambda: first_result.append(runner.separate(payload)))
+    first_thread.start()
+    assert inference_started.wait(timeout=2.0)
+
+    second_status, second_response = runner.separate(payload)
+    allow_inference_finish.set()
+    first_thread.join(timeout=2.0)
+
+    assert second_status == 409
+    assert second_response["reason"] == "output_dir_already_exists"
+    assert call_count == 1
+    assert len(first_result) == 1
+
+
+def test_separate_timeout_is_persisted_as_fail_closed_response(tmp_path, monkeypatch):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    output_dir = project_root / "artifacts" / "mac_api" / "timeout"
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=project_root / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+
+    def fake_run(command, **_kwargs):
+        raise module.subprocess.TimeoutExpired(command, 30)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    status_code, response = runner.separate(
+        {
+            "route_id": "bs_roformer_large_inst",
+            "source_audio_path": str(source_audio),
+            "output_dir": str(output_dir),
+            "device": "mps",
+            "require_gpu": True,
+            "stems": ["instrumental"],
+            "timeout_sec": 30,
+        }
+    )
+
+    persisted = json.loads((output_dir / "persistent_separator.json").read_text(encoding="utf-8"))
+    assert status_code == 504
+    assert response["status"] == "blocked"
+    assert response["reason"] == "export_timeout:30s"
+    assert response["returncode"] == 124
+    assert persisted["reason"] == "export_timeout:30s"
+    assert response["delivery_allowed"] is False
+
+
+def test_async_job_timeout_finishes_manifest_instead_of_running_forever(tmp_path, monkeypatch):
+    module = _load_module()
+    project_root = tmp_path / "AIMusicProject_win"
+    source_audio = project_root / "testing_stuff_music" / "mix.flac"
+    source_audio.parent.mkdir(parents=True)
+    source_audio.write_bytes(b"mix")
+    output_dir = project_root / "artifacts" / "mac_api" / "async_timeout"
+    output_dir.mkdir(parents=True)
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=project_root,
+            artifacts_root=project_root / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+            mac_windows_project_mount=project_root,
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        assert kwargs["timeout"] == 45
+        timeout_index = command.index("--timeout-sec")
+        assert command[timeout_index + 1] == "45"
+        raise module.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    runner._run_job(
+        "m123",
+        source_audio,
+        output_dir,
+        "mdx23c_vocals",
+        "mdx23c_vocals",
+        {"preflight_status": "passed"},
+        45,
+    )
+
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["returncode"] == 124
+    assert manifest["error"] == "export_timeout:45s"
+    assert manifest["delivery_allowed"] is False
+
+
+def test_http_health_survives_revoked_stderr_and_records_access_log(tmp_path, monkeypatch):
+    module = _load_module()
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=tmp_path / "project",
+            artifacts_root=tmp_path / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+        )
+    )
+
+    class BoundHandler(module.MacMpsApiHandler):
+        pass
+
+    class RevokedStream:
+        def write(self, _value):
+            raise OSError("revoked")
+
+        def flush(self):
+            raise OSError("revoked")
+
+    BoundHandler.runner = runner
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), BoundHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    monkeypatch.setattr(module.sys, "stderr", RevokedStream())
+    server_thread.start()
+
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    assert response.status == 200
+    assert payload["status"] == "ok"
+    access_log = tmp_path / "artifacts" / "mac_api" / "server.log"
+    assert '"GET /health HTTP/1.1" 200' in access_log.read_text(encoding="utf-8")
+
+
+def test_access_log_write_failure_is_exposed_by_health(tmp_path, monkeypatch):
+    module = _load_module()
+    runner = module.MacMpsJobRunner(
+        module.MacMpsApiConfig(
+            project_root=tmp_path / "project",
+            artifacts_root=tmp_path / "artifacts",
+            python_bin=tmp_path / "venv" / "bin" / "python",
+        )
+    )
+
+    def fail_open(*_args, **_kwargs):
+        raise OSError("access log unavailable")
+
+    monkeypatch.setattr(module.Path, "open", fail_open)
+    runner.record_access_log("request")
+    health = runner.health()
+
+    assert health["status"] == "degraded"
+    assert health["access_log"]["status"] == "degraded"
+    assert health["access_log"]["write_failure_count"] == 1
+    assert health["access_log"]["last_error"] == "OSError: access log unavailable"

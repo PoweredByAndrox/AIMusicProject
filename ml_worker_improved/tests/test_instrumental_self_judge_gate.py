@@ -325,6 +325,80 @@ class TestInstrumentalSelfJudgeGate(unittest.TestCase):
             self.assertIn("vocal_projection_proxy", first_segment["issues"])
             self.assertEqual(manifest["overall"]["status"], "proxy_blocked")
 
+    def test_non_vocal_support_can_explain_presence_loss_without_delivery_claim(self) -> None:
+        module = _load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sample_rate = 16000
+            t = np.arange(sample_rate, dtype=np.float32) / sample_rate
+            instrumental = (
+                0.60 * np.sin(2.0 * np.pi * 400.0 * t)
+                + 0.025 * np.sin(2.0 * np.pi * 2500.0 * t)
+            )
+            vocal = 0.32 * np.sin(2.0 * np.pi * 3000.0 * t)
+            source = instrumental + vocal
+            source_path = temp_path / "source.wav"
+            candidate_path = temp_path / "candidate.flac"
+            vocal_path = temp_path / "vocals.flac"
+            support_path = temp_path / "support.wav"
+            _write_audio(source_path, source, sample_rate)
+            _write_audio(candidate_path, instrumental, sample_rate)
+            _write_audio(vocal_path, vocal, sample_rate)
+            _write_audio(support_path, instrumental, sample_rate)
+
+            without_support = module.judge_instrumental(
+                source_audio_path=source_path,
+                candidate_instrumental_path=candidate_path,
+                output_dir=temp_path / "without_support",
+                candidate_vocal_path=vocal_path,
+                candidate_label="candidate",
+                segment_sec=1.0,
+            )
+            with_support = module.judge_instrumental(
+                source_audio_path=source_path,
+                candidate_instrumental_path=candidate_path,
+                output_dir=temp_path / "with_support",
+                candidate_vocal_path=vocal_path,
+                diagnostic_non_vocal_support_path=support_path,
+                candidate_label="candidate",
+                segment_sec=1.0,
+            )
+
+            self.assertIn("presence_loss_proxy", without_support["segments"][0]["issues"])
+            self.assertEqual(with_support["overall"]["status"], "proxy_pass")
+            self.assertEqual(
+                with_support["segments"][0]["metrics"]["presence_loss_explained_by_non_vocal_support"],
+                1.0,
+            )
+            self.assertFalse(with_support["delivery_contract"]["delivery_allowed"])
+            self.assertFalse(with_support["candidate"]["diagnostic_non_vocal_support_is_production_minus"])
+
+    def test_non_vocal_support_cannot_hide_unsafe_vocal_evidence(self) -> None:
+        module = _load_module()
+
+        metrics = {
+            "rms_ratio": 0.75,
+            "presence_ratio_db_vs_source": -12.0,
+            "air_ratio_db_vs_source": -3.0,
+            "source_candidate_corr_abs": 0.75,
+            "source_candidate_delta_rms_ratio": 0.65,
+            "vocal_stem_corr_abs": 0.20,
+            "vocal_projection_db_vs_instrumental": -18.0,
+            "non_vocal_support_corr_abs": 0.99,
+            "non_vocal_support_delta_rms_ratio": 0.10,
+            "rms_ratio_db_vs_non_vocal_support": 0.0,
+            "presence_ratio_db_vs_non_vocal_support": 0.0,
+        }
+
+        issues, severities = module.classify_issues(metrics)
+
+        self.assertIn("presence_loss_proxy", issues)
+        self.assertIn("vocal_stem_corr_proxy", issues)
+        self.assertIn("vocal_projection_proxy", issues)
+        self.assertGreater(severities["presence_loss"], 0.0)
+        self.assertEqual(metrics["presence_loss_explained_by_non_vocal_support"], 0.0)
+
     def test_cli_writes_manifest(self) -> None:
         module = _load_module()
 

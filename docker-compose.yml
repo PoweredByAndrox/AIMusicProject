@@ -50,6 +50,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./ml_worker_improved:/app
+      - ./scripts:/scripts:ro
       - ./lab_artifacts:/app/lab_artifacts
       - ./artifact_rag:/app/artifact_rag
       - ./testing_stuff_music:/host_testing_stuff_music:ro

@@ -26,6 +26,8 @@ ROWS_NAME = "rows.jsonl"
 AUDIO_NAME = "audio.jsonl"
 SUMMARY_NAME = "summary.md"
 PROGRESS_NAME = "progress.jsonl"
+SEMANTIC_AUDIT_NAME = "sem.json"
+MINUS_SEMANTIC_AUDIT_SCHEMA = "minus_reference_semantic_audit.v1"
 TRAINABLE_PERMISSION_STATUSES = {"owned", "licensed", "cleared", "project_owned"}
 GROUND_TRUTH_PERMISSION_STATUSES = {"owned", "licensed", "cleared", "project_owned", "user_owned"}
 ALLOWED_SOURCE_DOMAINS = {"user_supplied_flstudio_music"}
@@ -147,6 +149,111 @@ def stable_unique(values: Iterable[str]) -> list[str]:
     return result
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def minus_reference_semantic_audit(
+    *,
+    manifest_path: Path,
+    source_audio_path: str,
+    target_audio_path: str,
+    stem: str,
+) -> tuple[dict[str, Any], list[str]]:
+    audit_path = manifest_path.parent / SEMANTIC_AUDIT_NAME
+    if stem != "minus":
+        return {
+            "required": False,
+            "status": "not_required_for_stem",
+            "path": str(audit_path),
+            "training_allowed": True,
+        }, []
+
+    summary: dict[str, Any] = {
+        "required": True,
+        "status": "missing",
+        "path": str(audit_path),
+        "schema": "",
+        "decision": "",
+        "detector_count": 0,
+        "training_allowed": False,
+        "source_mix_sha256": "",
+        "minus_reference_sha256": "",
+    }
+    if not audit_path.is_file():
+        return summary, ["minus_reference_semantic_audit_missing"]
+
+    try:
+        payload = read_json(audit_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        summary["status"] = "invalid"
+        return summary, ["minus_reference_semantic_audit_invalid"]
+
+    source = payload.get("source_mix") if isinstance(payload.get("source_mix"), dict) else {}
+    reference = payload.get("minus_reference") if isinstance(payload.get("minus_reference"), dict) else {}
+    detector_rows = payload.get("detectors") if isinstance(payload.get("detectors"), list) else []
+    detector_ids = stable_unique(
+        str(row.get("detector_id") or "")
+        for row in detector_rows
+        if isinstance(row, dict)
+    )
+    try:
+        detector_count = int(payload.get("detector_count") or 0)
+    except (TypeError, ValueError):
+        detector_count = 0
+    summary.update(
+        {
+            "status": "loaded",
+            "schema": str(payload.get("schema") or ""),
+            "decision": str(payload.get("decision") or ""),
+            "detector_count": detector_count,
+            "detector_ids": detector_ids,
+            "training_allowed": payload.get("training_allowed") is True,
+            "source_mix_sha256": str(source.get("sha256") or ""),
+            "minus_reference_sha256": str(reference.get("sha256") or ""),
+        }
+    )
+
+    blockers: list[str] = []
+    if summary["schema"] != MINUS_SEMANTIC_AUDIT_SCHEMA:
+        blockers.append("minus_reference_semantic_audit_schema_unexpected")
+    decision = summary["decision"]
+    if decision != "accepted":
+        blockers.append(f"minus_reference_semantic_audit_{decision or 'decision_missing'}")
+    if summary["training_allowed"] is not True:
+        blockers.append("minus_reference_semantic_audit_training_not_allowed")
+    if not isinstance(payload.get("detectors"), list):
+        blockers.append("minus_reference_semantic_audit_detectors_missing")
+    if summary["detector_count"] != len(detector_ids):
+        blockers.append("minus_reference_semantic_audit_detector_count_mismatch")
+    if len(detector_ids) < 2:
+        blockers.append("minus_reference_semantic_audit_insufficient_detectors")
+    if not isinstance(payload.get("evidence"), dict):
+        blockers.append("minus_reference_semantic_audit_evidence_missing")
+    if not isinstance(payload.get("thresholds"), dict):
+        blockers.append("minus_reference_semantic_audit_thresholds_missing")
+    if payload.get("delivery_allowed") is not False:
+        blockers.append("minus_reference_semantic_audit_delivery_flag_unsafe")
+
+    source_path = Path(source_audio_path) if source_audio_path else None
+    target_path = Path(target_audio_path) if target_audio_path else None
+    if source_path is not None and source_path.is_file():
+        if summary["source_mix_sha256"] != sha256_file(source_path):
+            blockers.append("minus_reference_semantic_audit_source_sha256_mismatch")
+    if target_path is not None and target_path.is_file():
+        if summary["minus_reference_sha256"] != sha256_file(target_path):
+            blockers.append("minus_reference_semantic_audit_target_sha256_mismatch")
+
+    blockers = stable_unique(blockers)
+    summary["status"] = "accepted" if not blockers else "blocked"
+    summary["training_allowed"] = not blockers
+    return summary, blockers
+
+
 def source_domain_for_ground_truth(payload: dict[str, Any]) -> str:
     contract = payload.get("ground_truth_contract")
     if not isinstance(contract, dict):
@@ -264,11 +371,22 @@ def candidate_row(
     source_audio_path = resolved_path((payload.get("mix") or {}).get("path") if isinstance(payload.get("mix"), dict) else "", base_dir=manifest_path.parent)
     target_audio_path = resolved_path(stem_payload.get("path"), base_dir=manifest_path.parent)
     source_gate = ground_truth_source_gate(payload)
+    reconstruction_trainable = source_gate["trainable_ground_truth"] is True
+    semantic_audit, semantic_blockers = minus_reference_semantic_audit(
+        manifest_path=manifest_path,
+        source_audio_path=source_audio_path,
+        target_audio_path=target_audio_path,
+        stem=stem,
+    )
+    source_gate["minus_reference_semantic_audit"] = semantic_audit
+    if semantic_blockers:
+        source_gate["trainable_ground_truth"] = False
     reasons: list[str] = []
     if contract.get("verified") is not True:
         reasons.append("not_reference_verified")
-    if source_gate["trainable_ground_truth"] is not True:
+    if not reconstruction_trainable:
         reasons.append("ground_truth_reconstruction_not_trainable")
+    reasons.extend(semantic_blockers)
     if source_domain not in ALLOWED_SOURCE_DOMAINS:
         reasons.append("source_domain_not_allowed")
     if source_domain == "synthetic_fixture":
@@ -303,6 +421,7 @@ def candidate_row(
         "target_audio_sha256": str(stem_payload.get("sha256") or ""),
         "reference_verified": contract.get("verified") is True,
         "source_gate": source_gate,
+        "semantic_audit": semantic_audit,
         "required_reference_stem_count": int(gap.get("required_reference_stem_count") or 0),
         "release_ready": False,
         "can_publish_as_result": False,
@@ -331,6 +450,7 @@ def audio_training_example(row: dict[str, Any]) -> dict[str, Any]:
         "trainable": True,
         "training_target": "audio_separator_or_stem_adapter",
         "source_gate": row["source_gate"],
+        "semantic_audit": row["semantic_audit"],
         "safety": {
             "not_release_artifact": True,
             "requires_eval_before_promotion": True,
@@ -452,6 +572,7 @@ def build_full_pack_reference_corpus_intake(
             "audio_read": False,
             "audio_copied": False,
             "accepts_only_verified_ground_truth": True,
+            "minus_reference_semantic_audit_required": True,
             "synthetic_fixtures_not_allowed": True,
             "not_release_artifact": True,
         },

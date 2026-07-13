@@ -24,6 +24,9 @@ STARTED_AT = time.monotonic()
 VARIANTS = (
     ("minus_mid_mono", 0.0),
     ("minus_side_attenuate_25", 0.25),
+    ("minus_side_attenuate_45", 0.45),
+    ("minus_side_attenuate_46", 0.46),
+    ("minus_side_attenuate_47", 0.47),
     ("minus_side_attenuate_50", 0.50),
 )
 SAFETY_FLAGS = {

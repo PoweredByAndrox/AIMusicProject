@@ -218,7 +218,7 @@ def read_audio(path: Path) -> tuple[np.ndarray, int]:
     audio, sample_rate = sf.read(str(path), always_2d=True, dtype="float32")
     if audio.size == 0:
         raise ValueError(f"Empty audio file: {path}")
-    return audio.astype(np.float64), int(sample_rate)
+    return audio.astype(np.float32, copy=False), int(sample_rate)
 
 
 def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
@@ -227,11 +227,16 @@ def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.
     gcd = math.gcd(source_rate, target_rate)
     up = target_rate // gcd
     down = source_rate // gcd
-    return signal.resample_poly(audio, up, down, axis=0).astype(np.float64)
+    return signal.resample_poly(audio, up, down, axis=0).astype(np.float32)
 
 
-def align_channels_and_length(arrays: Sequence[np.ndarray]) -> list[np.ndarray]:
-    channels = max(array.shape[1] for array in arrays)
+def align_channels_and_length(
+    arrays: Sequence[np.ndarray],
+    *,
+    target_channels: int | None = None,
+    target_frame_count: int | None = None,
+) -> list[np.ndarray]:
+    channels = max(int(target_channels or 0), *(array.shape[1] for array in arrays))
     expanded: list[np.ndarray] = []
     for array in arrays:
         if array.shape[1] == channels:
@@ -241,7 +246,9 @@ def align_channels_and_length(arrays: Sequence[np.ndarray]) -> list[np.ndarray]:
         else:
             expanded.append(array[:, :channels])
     frame_count = min(array.shape[0] for array in expanded)
-    return [array[:frame_count].astype(np.float64, copy=False) for array in expanded]
+    if target_frame_count is not None:
+        frame_count = min(frame_count, int(target_frame_count))
+    return [array[:frame_count].astype(np.float32, copy=False) for array in expanded]
 
 
 def build_time_gate(
@@ -252,7 +259,7 @@ def build_time_gate(
     margin_sec: float,
     smoothing_sec: float,
 ) -> np.ndarray:
-    gate = np.zeros(frame_count, dtype=np.float64)
+    gate = np.zeros(frame_count, dtype=np.float32)
     for window in windows:
         start_sec = max(0.0, float(window.get("start_sec") or 0.0) - margin_sec)
         duration_sec = max(0.0, float(window.get("duration_sec") or 0.0) + (2.0 * margin_sec))
@@ -262,10 +269,37 @@ def build_time_gate(
             gate[start_frame:end_frame] = 1.0
     smoothing_frames = int(round(max(0.0, smoothing_sec) * sample_rate))
     if smoothing_frames > 1 and np.any(gate > 0.0):
-        kernel = signal.windows.hann((smoothing_frames * 2) + 1)
+        kernel = signal.windows.hann((smoothing_frames * 2) + 1).astype(np.float32)
         kernel /= float(np.sum(kernel))
         gate = np.convolve(gate, kernel, mode="same")
-    return np.clip(gate, 0.0, 1.0)
+    return np.clip(gate, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+def build_window_gate_slice(
+    *,
+    frame_count: int,
+    sample_rate: int,
+    window: dict[str, Any],
+    margin_sec: float,
+    smoothing_sec: float,
+) -> tuple[slice, np.ndarray]:
+    start_sec = max(0.0, float(window.get("start_sec") or 0.0) - margin_sec)
+    duration_sec = max(0.0, float(window.get("duration_sec") or 0.0) + (2.0 * margin_sec))
+    start_frame = max(0, int(round(start_sec * sample_rate)))
+    end_frame = min(frame_count, int(round((start_sec + duration_sec) * sample_rate)))
+    if end_frame <= start_frame:
+        return slice(0, 0), np.zeros(0, dtype=np.float32)
+
+    smoothing_frames = int(round(max(0.0, smoothing_sec) * sample_rate))
+    slice_start = max(0, start_frame - smoothing_frames)
+    slice_end = min(frame_count, end_frame + smoothing_frames)
+    gate = np.zeros(slice_end - slice_start, dtype=np.float32)
+    gate[start_frame - slice_start : end_frame - slice_start] = 1.0
+    if smoothing_frames > 1:
+        kernel = signal.windows.hann((smoothing_frames * 2) + 1).astype(np.float32)
+        kernel /= float(np.sum(kernel))
+        gate = np.convolve(gate, kernel, mode="same")
+    return slice(slice_start, slice_end), np.clip(gate, 0.0, 1.0).astype(np.float32, copy=False)
 
 
 def bandpass_audio(audio: np.ndarray, sample_rate: int, *, low_hz: float, high_hz: float) -> np.ndarray:
@@ -273,12 +307,35 @@ def bandpass_audio(audio: np.ndarray, sample_rate: int, *, low_hz: float, high_h
     low = max(0.0, min(float(low_hz), nyquist - 1.0))
     high = max(low + 1.0, min(float(high_hz), nyquist - 1.0))
     if low <= 0.0 and high >= nyquist - 1.0:
-        return audio.astype(np.float64, copy=True)
+        return audio.astype(np.float32, copy=True)
     if low <= 0.0:
         sos = signal.butter(4, high / nyquist, btype="lowpass", output="sos")
     else:
         sos = signal.butter(4, [low / nyquist, high / nyquist], btype="bandpass", output="sos")
-    return signal.sosfiltfilt(sos, audio, axis=0).astype(np.float64)
+    return signal.sosfiltfilt(sos, audio, axis=0).astype(np.float32)
+
+
+def bandpass_audio_slice(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    target_slice: slice,
+    low_hz: float,
+    high_hz: float,
+) -> tuple[np.ndarray, int]:
+    context_sec = max(0.10, min(0.50, 16.0 / max(float(low_hz), 32.0)))
+    context_frames = int(round(context_sec * sample_rate))
+    filter_start = max(0, int(target_slice.start or 0) - context_frames)
+    filter_end = min(audio.shape[0], int(target_slice.stop or audio.shape[0]) + context_frames)
+    filtered = bandpass_audio(
+        audio[filter_start:filter_end],
+        sample_rate,
+        low_hz=low_hz,
+        high_hz=high_hz,
+    )
+    crop_start = int(target_slice.start or 0) - filter_start
+    crop_end = crop_start + (int(target_slice.stop or 0) - int(target_slice.start or 0))
+    return filtered[crop_start:crop_end], int(filter_end - filter_start)
 
 
 def projection_gain(target: np.ndarray, basis: np.ndarray) -> float:
@@ -294,8 +351,15 @@ def signed_projection_gain(target: np.ndarray, basis: np.ndarray, *, max_project
     return float(np.clip(gain, -max_projection_gain, max_projection_gain))
 
 
-def limit_active_region_peaks(audio: np.ndarray, active: np.ndarray) -> tuple[np.ndarray, float]:
-    limited = np.asarray(audio, dtype=np.float64).copy()
+def limit_active_region_peaks(
+    audio: np.ndarray,
+    active: np.ndarray,
+    *,
+    copy: bool = True,
+) -> tuple[np.ndarray, float]:
+    limited = np.asarray(audio, dtype=np.float32)
+    if copy:
+        limited = limited.copy()
     if active.shape[0] != limited.shape[0]:
         raise ValueError("active mask length must match audio frame count")
     if not np.any(active):
@@ -304,6 +368,35 @@ def limit_active_region_peaks(audio: np.ndarray, active: np.ndarray) -> tuple[np
     if active_peak > 1.0:
         limited[active] /= active_peak
     return limited, active_peak
+
+
+def masked_projection_gain(target: np.ndarray, basis: np.ndarray, active: np.ndarray) -> float:
+    numerator = 0.0
+    denominator = 0.0
+    chunk_frames = 262_144
+    for start in range(0, active.shape[0], chunk_frames):
+        end = min(active.shape[0], start + chunk_frames)
+        mask = active[start:end]
+        if not np.any(mask):
+            continue
+        target_chunk = np.asarray(target[start:end][mask], dtype=np.float64).reshape(-1)
+        basis_chunk = np.asarray(basis[start:end][mask], dtype=np.float64).reshape(-1)
+        numerator += float(np.dot(target_chunk, basis_chunk))
+        denominator += float(np.dot(basis_chunk, basis_chunk))
+    return float(abs(numerator) / (denominator + EPS))
+
+
+def gated_correction_rms(base: np.ndarray, repaired: np.ndarray, gate: np.ndarray) -> float:
+    sum_squares = 0.0
+    chunk_frames = 262_144
+    for start in range(0, gate.shape[0], chunk_frames):
+        end = min(gate.shape[0], start + chunk_frames)
+        correction = (
+            np.asarray(base[start:end], dtype=np.float64)
+            - np.asarray(repaired[start:end], dtype=np.float64)
+        ) * np.asarray(gate[start:end], dtype=np.float64).reshape(-1, 1)
+        sum_squares += float(np.sum(np.square(correction)))
+    return float(np.sqrt(sum_squares / max(1, base.size)))
 
 
 def apply_projection_repair(
@@ -394,34 +487,47 @@ def apply_segment_local_projection_repair(
     if not 0.0 < max_projection_gain <= MAX_ALLOWED_PROJECTION_GAIN:
         raise ValueError(f"max_projection_gain must be in (0, {MAX_ALLOWED_PROJECTION_GAIN:g}]")
 
-    guide = bandpass_audio(vocal_audio, sample_rate, low_hz=low_hz, high_hz=high_hz)
-    repaired = base_minus.astype(np.float64, copy=True)
-    combined_gate = np.zeros(base_minus.shape[0], dtype=np.float64)
+    repaired = base_minus.astype(np.float32, copy=True)
+    combined_gate = np.zeros(base_minus.shape[0], dtype=np.float32)
     window_metrics: list[dict[str, Any]] = []
+    max_local_working_frames = 0
 
     for window_index, window in enumerate(windows):
-        window_gate = build_time_gate(
+        window_slice, window_gate = build_window_gate_slice(
             frame_count=base_minus.shape[0],
             sample_rate=sample_rate,
-            windows=[window],
+            window=window,
             margin_sec=margin_sec,
             smoothing_sec=smoothing_sec,
         )
         active = window_gate > 1.0e-6
         if not np.any(active):
             continue
-        combined_gate = np.maximum(combined_gate, window_gate)
+        guide, local_working_frames = bandpass_audio_slice(
+            vocal_audio,
+            sample_rate,
+            target_slice=window_slice,
+            low_hz=low_hz,
+            high_hz=high_hz,
+        )
+        max_local_working_frames = max(max_local_working_frames, local_working_frames)
+        combined_gate_view = combined_gate[window_slice]
+        np.maximum(combined_gate_view, window_gate, out=combined_gate_view)
+        repaired_view = repaired[window_slice]
+        vocal_view = vocal_audio[window_slice]
         channel_gains: list[float] = []
-        before = projection_gain(repaired[active], vocal_audio[active])
+        before = projection_gain(repaired_view[active], vocal_view[active])
         for channel_index in range(repaired.shape[1]):
             gain = signed_projection_gain(
-                repaired[active, channel_index],
+                repaired_view[active, channel_index],
                 guide[active, channel_index],
                 max_projection_gain=max_projection_gain,
             )
             channel_gains.append(gain)
-            repaired[:, channel_index] -= float(strength) * gain * guide[:, channel_index] * window_gate
-        after = projection_gain(repaired[active], vocal_audio[active])
+            repaired_view[:, channel_index] -= (
+                float(strength) * gain * guide[:, channel_index] * window_gate
+            ).astype(np.float32)
+        after = projection_gain(repaired_view[active], vocal_view[active])
         window_metrics.append(
             {
                 "window_index": int(window_index),
@@ -445,14 +551,12 @@ def apply_segment_local_projection_repair(
             "projection_mode": "segment_local",
         }
 
-    repaired = np.nan_to_num(repaired, nan=0.0, posinf=0.0, neginf=0.0)
+    np.nan_to_num(repaired, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     active = combined_gate > 1.0e-6
-    repaired, active_peak = limit_active_region_peaks(repaired, active)
-    before = projection_gain(base_minus[active], vocal_audio[active])
-    after = projection_gain(repaired[active], vocal_audio[active])
-    gate_column = combined_gate.reshape(-1, 1)
-    correction = (base_minus - repaired) * gate_column
-    correction_rms = float(np.sqrt(np.mean(np.square(correction)))) if correction.size else 0.0
+    repaired, active_peak = limit_active_region_peaks(repaired, active, copy=False)
+    before = masked_projection_gain(base_minus, vocal_audio, active)
+    after = masked_projection_gain(repaired, vocal_audio, active)
+    correction_rms = gated_correction_rms(base_minus, repaired, combined_gate)
     applied_gain = max(
         abs(value)
         for item in window_metrics
@@ -473,6 +577,10 @@ def apply_segment_local_projection_repair(
         "active_peak_before_limit": round(float(active_peak), 9),
         "status": "segment_local_projection_repair_applied",
         "projection_mode": "segment_local",
+        "memory_strategy": "window_sliced_float32",
+        "full_track_gate_per_window": False,
+        "max_local_working_frames": int(max_local_working_frames),
+        "max_local_working_sec": round(float(max_local_working_frames) / float(sample_rate), 6),
     }
 
 
@@ -787,28 +895,32 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
         return manifest
     progress("judge_windows_selected", selected_window_count=len(selected_windows))
 
-    raw, raw_rate = read_audio(args.raw_audio_path)
+    raw_info = sf.info(str(args.raw_audio_path))
+    raw_rate = int(raw_info.samplerate)
     base_minus, base_rate = read_audio(args.base_minus_path)
     primary_vocals, primary_rate = read_audio(args.primary_vocals_path)
     base_minus = resample_audio(base_minus, base_rate, raw_rate)
     primary_vocals = resample_audio(primary_vocals, primary_rate, raw_rate)
-    raw, base_minus, primary_vocals = align_channels_and_length([raw, base_minus, primary_vocals])
+    base_minus, primary_vocals = align_channels_and_length(
+        [base_minus, primary_vocals],
+        target_channels=int(raw_info.channels),
+        target_frame_count=int(raw_info.frames),
+    )
     progress(
         "input_normalized",
         sample_rate=raw_rate,
         frames=int(base_minus.shape[0]),
         channels=int(base_minus.shape[1]),
+        audio_dtype=str(base_minus.dtype),
+        raw_audio_metadata_only=True,
     )
 
-    gate = build_time_gate(
-        frame_count=base_minus.shape[0],
-        sample_rate=raw_rate,
-        windows=selected_windows,
-        margin_sec=float(args.window_margin_sec),
-        smoothing_sec=float(args.gate_smoothing_sec),
-    )
-    progress("repair_start", gate_active_ratio=round(float(np.mean(gate > 1.0e-6)), 9))
     if str(args.projection_mode) == "segment_local":
+        progress(
+            "repair_start",
+            projection_mode="segment_local",
+            full_track_gate_allocated=False,
+        )
         repaired, repair_metrics = apply_segment_local_projection_repair(
             base_minus=base_minus,
             vocal_audio=primary_vocals,
@@ -822,6 +934,19 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
             high_hz=float(args.band_high_hz),
         )
     else:
+        gate = build_time_gate(
+            frame_count=base_minus.shape[0],
+            sample_rate=raw_rate,
+            windows=selected_windows,
+            margin_sec=float(args.window_margin_sec),
+            smoothing_sec=float(args.gate_smoothing_sec),
+        )
+        progress(
+            "repair_start",
+            projection_mode="global",
+            full_track_gate_allocated=True,
+            gate_active_ratio=round(float(np.mean(gate > 1.0e-6)), 9),
+        )
         repaired, repair_metrics = apply_projection_repair(
             base_minus=base_minus,
             vocal_audio=primary_vocals,
@@ -882,13 +1007,13 @@ def build_judge_guided_minus_vocal_leakage_repair(args: argparse.Namespace) -> d
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
-    runtime = cli_runtime_contract(allow_native_runtime=bool(args.allow_native_runtime))
     require_docker_runtime(
         tool_name="apply_judge_guided_minus_vocal_leakage_repair.py",
         entrypoint_path="/app/tools/apply_judge_guided_minus_vocal_leakage_repair.py",
-        allow_native_macos_diagnostic=bool(args.allow_native_runtime),
+        allow_native_macos_diagnostic="--allow-native-runtime" in (list(argv) if argv is not None else sys.argv[1:]),
     )
+    args = parse_args(argv)
+    runtime = cli_runtime_contract(allow_native_runtime=bool(args.allow_native_runtime))
     args.runtime_environment = str(runtime["runtime_environment"])
     args.native_runtime_allowed = bool(runtime["native_runtime_allowed"])
     manifest = build_judge_guided_minus_vocal_leakage_repair(args)

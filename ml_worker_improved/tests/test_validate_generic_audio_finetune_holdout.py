@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from tools import validate_generic_audio_finetune_holdout as holdout_module
 from tools.validate_generic_audio_finetune_holdout import select_holdout_examples, validate_generic_audio_finetune_holdout
 
 
@@ -31,6 +32,17 @@ def _write_audio(path: Path, audio: np.ndarray, sample_rate: int = 8_000) -> Pat
 
 def _stem_path(manifest: dict, stem: str = "vocal") -> Path:
     return Path(manifest["stems"][stem]["path"])
+
+
+def test_holdout_progress_records_mps_as_gpu_inference(tmp_path: Path) -> None:
+    progress_path = tmp_path / "progress.jsonl"
+
+    holdout_module.progress(progress_path, "start", device="mps")
+
+    row = _read_jsonl(progress_path)[0]
+    assert row["expected_acceleration_mode"] == "mps_gpu_inference_holdout"
+    assert row["gpu_inference_required"] is True
+    assert row["gpu_inference_skipped"] is False
 
 
 def test_select_holdout_examples_filters_source_candidate_family(tmp_path: Path) -> None:

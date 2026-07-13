@@ -62,6 +62,14 @@ powershell -ExecutionPolicy Bypass -File scripts\run-mac-batch-separation.ps1 `
 # Реальный запуск
 powershell -ExecutionPolicy Bypass -File scripts\run-mac-batch-separation.ps1 `
     -InputFolder "testing_stuff_music"
+
+# Полный mt017/c3 профиль: dedicated minus + two vocal proxies + learned repair
+powershell -ExecutionPolicy Bypass -File scripts\run-mac-batch-separation.ps1 `
+    -InputFolder "testing_stuff_music" `
+    -OutputRootAlias "c4" `
+    -Profile "mt017-c3" `
+    -Resume `
+    -ContinueOnError
 ```
 
 **Output:**
@@ -70,9 +78,9 @@ D:\AIMusicProject\artifacts\mac_batch\batch_20260705_143022\
 └── batch_manifest.json
 
 D:\AIMusicProject\artifacts\mac_quick\
-├── t_track1\
-├── t_track2\
-└── t_track3\
+├── c4t001\
+├── c4t002\
+└── c4t003\
 ```
 
 ---
@@ -174,8 +182,11 @@ Expected output: `writable`
 |----------|----------|---------|
 | `-InputFolder` | ✓ | — |
 | `-FilePattern` | ✗ | `*.mp3` |
+| `-OutputRootAlias` | ✗ | `batch_<timestamp>` |
+| `-Profile` | ✗ | `quick`; use `mt017-c3` for the learned three-route profile |
 | `-MaxFiles` | ✗ | `0` (без лимита) |
 | `-DryRun` | ✗ | `$false` |
+| `-Resume` | ✗ | `$false`; skips only outputs with a verified complete manifest |
 | `-ContinueOnError` | ✗ | `$false` |
 
 ---
@@ -203,8 +214,11 @@ docker compose run --rm ml-worker python /app/tools/adaptive_vocal_isolation.py 
 
 ### Model route
 
-- **MelBand RoFormer** (`melband_roformer_vocals`)
-- Один model route для vocal + instrumental pair
+- `quick`: **MelBand RoFormer** (`melband_roformer_vocals`), one model route.
+- `mt017-c3`: `melband_inst_fv7z` dedicated minus route plus `mdx23c_vocals`
+  and `melband_roformer_vocals`, followed by the pinned c3 teacher-mask checkpoint.
+- The `mt017-c3` batch preflights Mac API health and requires MPS evidence with
+  `fallback_used=false` for every completed item.
 - Instrumental output = alias для **minus product role**
 - **Не** production resurrection minus route
 

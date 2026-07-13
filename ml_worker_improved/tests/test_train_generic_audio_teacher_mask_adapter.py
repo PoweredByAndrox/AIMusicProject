@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from tools import train_generic_audio_teacher_mask_adapter as adapter_module
 from tools.train_generic_audio_teacher_mask_adapter import (
     fingerprint_rows,
     select_training_rows,
@@ -37,6 +38,17 @@ def _write_audio(path: Path, audio: np.ndarray, sample_rate: int = 8_000) -> Pat
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(path), audio.astype(np.float32), sample_rate, format="FLAC", subtype="PCM_24")
     return path
+
+
+def test_progress_records_mps_as_gpu_training(tmp_path: Path) -> None:
+    progress_path = tmp_path / "progress.jsonl"
+
+    adapter_module.progress(progress_path, "start", device="mps")
+
+    row = _read_jsonl(progress_path)[0]
+    assert row["expected_acceleration_mode"] == "mps_gpu_training"
+    assert row["gpu_training_required"] is True
+    assert row["gpu_training_skipped"] is False
 
 
 def test_adapter_fingerprint_changes_when_training_config_changes() -> None:
@@ -256,6 +268,23 @@ def test_trains_with_explicit_pseudo_teacher_rows_without_claiming_ground_truth(
     time = np.arange(sample_rate, dtype=np.float64) / sample_rate
     target = _stereo(0.22 * np.sin(2.0 * np.pi * 660.0 * time))
     source = target + _stereo(0.18 * np.sin(2.0 * np.pi * 160.0 * time))
+    conditioning_paths = [
+        str(
+            _write_audio(
+                tmp_path / "conditioning" / "p1.flac",
+                _stereo(0.16 * np.sin(2.0 * np.pi * 160.0 * time)),
+                sample_rate,
+            )
+        ),
+        str(
+            _write_audio(
+                tmp_path / "conditioning" / "p2.flac",
+                _stereo(0.14 * np.sin(2.0 * np.pi * 165.0 * time)),
+                sample_rate,
+            )
+        ),
+    ]
+    conditioning_model_ids = ["proxy-model-a", "proxy-model-b"]
     verified_rows = [
         {
             "id": "verified-a",
@@ -267,6 +296,8 @@ def test_trains_with_explicit_pseudo_teacher_rows_without_claiming_ground_truth(
             "split": "train",
             "human_verified": True,
             "reference_verified": False,
+            "conditioning_audio_paths": conditioning_paths,
+            "conditioning_model_ids": conditioning_model_ids,
         }
     ]
     pseudo_rows = [
@@ -282,6 +313,9 @@ def test_trains_with_explicit_pseudo_teacher_rows_without_claiming_ground_truth(
             "pseudo_teacher": True,
             "human_verified": False,
             "reference_verified": False,
+            "corruption": {"variant": "identity"},
+            "conditioning_audio_paths": conditioning_paths,
+            "conditioning_model_ids": conditioning_model_ids,
             "release_ready": False,
             "delivery_allowed": False,
         }
@@ -313,6 +347,14 @@ def test_trains_with_explicit_pseudo_teacher_rows_without_claiming_ground_truth(
     assert manifest["contract"]["pseudo_teacher_targets_used_at_training"] is True
     assert manifest["contract"]["dirty_stems_never_ground_truth"] is True
     assert manifest["contract"]["pseudo_teacher_targets_are_ground_truth"] is False
+    assert manifest["contract"]["source_preservation_scoped_to_declared_identity_examples"] is True
+    assert manifest["training"]["config"]["source_preservation_scope"] == "declared_identity_pairs_only"
+    assert manifest["training"]["config"]["identity_preservation_example_count"] == 1
+    assert manifest["conditioning_audio_count"] == 2
+    assert manifest["conditioning_model_ids"] == conditioning_model_ids
+    assert manifest["training"]["config"]["conditioning_audio_count"] == 2
+    assert manifest["contract"]["conditioning_audio_required_at_application"] is True
+    assert manifest["contract"]["conditioning_is_permutation_stable"] is True
     assert manifest["delivery_allowed"] is False
     assert manifest["release_ready"] is False
 

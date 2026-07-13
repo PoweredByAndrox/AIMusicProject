@@ -14,18 +14,13 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import soundfile as sf
+import yaml
 
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from docker_runtime import require_docker_runtime  # noqa: E402
-from export_dereverb_vocal_preview import (  # noqa: E402
-    copy_listen_file,
-    save_audio_window_as_wav,
-    write_config_with_overlap,
-)
-
 MODEL_ID = "scnet_xl_ihf_musdb18"
 MODEL_DISPLAY_NAME = "SCNet XL IHF MUSDB18 checkpoint"
 MODEL_TYPE = "scnet"
@@ -40,6 +35,30 @@ DEFAULT_SCNET_TIMEOUT_SEC = 180
 
 def _emit(message: str) -> None:
     print(f"[scnet_full] {message}", flush=True)
+
+
+def copy_listen_file(source_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, target_path)
+
+
+def save_audio_window_as_wav(
+    source_audio_path: Path,
+    output_wav_path: Path,
+    *,
+    start_sec: float,
+    end_sec: float | None,
+) -> tuple[int, int]:
+    # Keep the established decoder path, but avoid importing torchaudio for
+    # config/manifest-only consumers of this exporter.
+    from export_dereverb_vocal_preview import save_audio_window_as_wav as save_window
+
+    return save_window(
+        source_audio_path,
+        output_wav_path,
+        start_sec=start_sec,
+        end_sec=end_sec,
+    )
 
 
 def _native_macos_diagnostic_allowed() -> bool:
@@ -104,9 +123,12 @@ def verify_cuda_inference_device(device_id: int) -> dict[str, Any]:
         )
     return {
         "cuda_available": True,
+        "requested_device": f"cuda:{int(device_id)}",
+        "resolved_device": f"cuda:{int(device_id)}",
         "device_id": int(device_id),
         "device_count": device_count,
         "device_name": str(cuda.get_device_name(int(device_id))),
+        "acceleration_mode": "container_cuda",
     }
 
 
@@ -129,9 +151,54 @@ def _build_no_reference_contract() -> dict[str, Any]:
     }
 
 
+def write_runtime_config(
+    config_path: Path,
+    target_path: Path,
+    *,
+    num_overlap: int,
+    chunk_size: int | None = None,
+    batch_size: int | None = None,
+) -> dict[str, int]:
+    config = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.FullLoader)
+    if not isinstance(config, dict):
+        raise ValueError("SCNet config root must be a mapping")
+
+    audio = config.setdefault("audio", {})
+    inference = config.setdefault("inference", {})
+    if not isinstance(audio, dict) or not isinstance(inference, dict):
+        raise ValueError("SCNet audio and inference config sections must be mappings")
+    if int(num_overlap) <= 0:
+        raise ValueError(f"SCNet num_overlap must be positive: {num_overlap}")
+    if chunk_size is not None and int(chunk_size) <= 0:
+        raise ValueError(f"SCNet chunk_size must be positive: {chunk_size}")
+    if batch_size is not None and int(batch_size) <= 0:
+        raise ValueError(f"SCNet batch_size must be positive: {batch_size}")
+
+    if chunk_size is not None:
+        audio["chunk_size"] = int(chunk_size)
+    if batch_size is not None:
+        inference["batch_size"] = int(batch_size)
+    inference["num_overlap"] = int(num_overlap)
+
+    effective_chunk_size = int(audio.get("chunk_size", 0))
+    effective_batch_size = int(inference.get("batch_size", 0))
+    if effective_chunk_size <= 0:
+        raise ValueError("SCNet runtime config requires a positive audio.chunk_size")
+    if effective_batch_size <= 0:
+        raise ValueError("SCNet runtime config requires a positive inference.batch_size")
+
+    target_path.write_text(yaml.dump(config, sort_keys=False), encoding="utf-8")
+    return {
+        "chunk_size": effective_chunk_size,
+        "batch_size": effective_batch_size,
+        "num_overlap": int(num_overlap),
+    }
+
+
 def build_full_track_stem_manifest(
     *,
     source_audio_path: Path,
+    source_reference_path: Path,
     stem_flac_paths: dict[str, Path],
     raw_ref_flac_path: Path,
     repo_path: Path,
@@ -139,6 +206,8 @@ def build_full_track_stem_manifest(
     config_template_path: Path,
     runtime_config_path: Path,
     device_id: int,
+    chunk_size: int,
+    batch_size: int,
     num_overlap: int,
     sample_rate: int,
     frames: int,
@@ -160,17 +229,31 @@ def build_full_track_stem_manifest(
             "config_template_path": str(config_template_path),
             "model_path": str(model_path),
             "device_id": int(device_id),
+            "chunk_size": int(chunk_size),
+            "batch_size": int(batch_size),
             "num_overlap": int(num_overlap),
             "target_output": "multi_stem",
             "output_stems": list(SCNET_STEMS),
         },
         "contract": _build_no_reference_contract(),
         "execution_contract": {
-            "docker_runtime_required": True,
+            "docker_runtime_required": bool((cuda_preflight or {}).get("cuda_available")),
+            "runtime_mode": (
+                "native_macos_mps"
+                if (cuda_preflight or {}).get("resolved_device") == "mps"
+                else "container_cuda"
+            ),
             "expected_acceleration_mode": "gpu_inference_then_cpu_dsp_scoring",
             "gpu_inference_required": True,
             "gpu_inference_skipped": False,
             "cuda_preflight": dict(cuda_preflight or {}),
+        },
+        "source_reference": {
+            "path": str(source_reference_path),
+            "source_audio_path": str(source_audio_path),
+            "sha256": _sha256_file(source_reference_path),
+            "byte_size": int(source_reference_path.stat().st_size),
+            "exact_byte_copy": True,
         },
         "stems": {
             stem_name: {
@@ -197,6 +280,7 @@ def write_full_track_stem_manifest(
     *,
     output_dir: Path,
     source_audio_path: Path,
+    source_reference_path: Path,
     stem_flac_paths: dict[str, Path],
     raw_ref_flac_path: Path,
     repo_path: Path,
@@ -204,6 +288,8 @@ def write_full_track_stem_manifest(
     config_template_path: Path,
     runtime_config_path: Path,
     device_id: int,
+    chunk_size: int,
+    batch_size: int,
     num_overlap: int,
     sample_rate: int,
     frames: int,
@@ -212,6 +298,7 @@ def write_full_track_stem_manifest(
 ) -> Path:
     manifest = build_full_track_stem_manifest(
         source_audio_path=source_audio_path,
+        source_reference_path=source_reference_path,
         stem_flac_paths=stem_flac_paths,
         raw_ref_flac_path=raw_ref_flac_path,
         repo_path=repo_path,
@@ -219,6 +306,8 @@ def write_full_track_stem_manifest(
         config_template_path=config_template_path,
         runtime_config_path=runtime_config_path,
         device_id=device_id,
+        chunk_size=chunk_size,
+        batch_size=batch_size,
         num_overlap=num_overlap,
         sample_rate=sample_rate,
         frames=frames,
@@ -238,6 +327,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--device-id", type=int, default=0)
+    parser.add_argument("--chunk-size", type=int)
+    parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-overlap", type=int, default=4)
     parser.add_argument("--timeout-sec", type=int, default=DEFAULT_SCNET_TIMEOUT_SEC)
     parser.add_argument("--listen-dir", type=Path)
@@ -300,7 +391,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             end_sec=None,
         )
         _emit(f"prepared_full_track_wav sample_rate={sample_rate} frames={frames}")
-        write_config_with_overlap(config_path, runtime_config_path, num_overlap=int(args.num_overlap))
+        runtime_config = write_runtime_config(
+            config_path,
+            runtime_config_path,
+            num_overlap=int(args.num_overlap),
+            chunk_size=int(args.chunk_size) if args.chunk_size is not None else None,
+            batch_size=int(args.batch_size) if args.batch_size is not None else None,
+        )
+        _emit(
+            "runtime_config "
+            f"chunk_size={runtime_config['chunk_size']} "
+            f"batch_size={runtime_config['batch_size']} "
+            f"num_overlap={runtime_config['num_overlap']}"
+        )
 
         command = [
             sys.executable,
@@ -361,12 +464,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             sf.write(str(stem_flac_path), stem_audio, stem_sample_rate, subtype="PCM_24")
             stem_flac_paths[stem_name] = stem_flac_path
 
-        raw_ref_flac_path = output_dir / "00_raw_ref.flac"
+        raw_ref_flac_path = output_dir / "00_raw_ref.wav"
         shutil.copyfile(full_input_path, raw_ref_flac_path)
+        source_suffix = source_audio_path.suffix.lower() or ".bin"
+        source_reference_path = output_dir / f"source_ref{source_suffix}"
+        shutil.copyfile(source_audio_path, source_reference_path)
         elapsed_sec = time.time() - started_at
         manifest_path = write_full_track_stem_manifest(
             output_dir=output_dir,
             source_audio_path=source_audio_path,
+            source_reference_path=source_reference_path,
             stem_flac_paths=stem_flac_paths,
             raw_ref_flac_path=raw_ref_flac_path,
             repo_path=repo_path,
@@ -374,7 +481,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_template_path=config_path,
             runtime_config_path=runtime_config_path,
             device_id=int(args.device_id),
-            num_overlap=int(args.num_overlap),
+            chunk_size=runtime_config["chunk_size"],
+            batch_size=runtime_config["batch_size"],
+            num_overlap=runtime_config["num_overlap"],
             sample_rate=int(sample_rate),
             frames=int(frames),
             elapsed_sec=elapsed_sec,
@@ -387,14 +496,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if listen_stem not in stem_flac_paths:
                 raise KeyError(f"Requested listen stem is missing from SCNet output: {listen_stem}")
             listen_dir.mkdir(parents=True, exist_ok=True)
-            listen_raw_path = listen_dir / "00_raw_ref.flac"
+            listen_raw_path = listen_dir / "00_raw_ref.wav"
             listen_stem_path = listen_dir / str(args.listen_label)
             copy_listen_file(raw_ref_flac_path, listen_raw_path)
             copy_listen_file(stem_flac_paths[listen_stem], listen_stem_path)
             (listen_dir / "candidate_map.json").write_text(
                 json.dumps(
                     {
-                        "00_raw_ref.flac": str(raw_ref_flac_path),
+                        "00_raw_ref.wav": str(raw_ref_flac_path),
                         str(args.listen_label): str(stem_flac_paths[listen_stem]),
                     },
                     indent=2,

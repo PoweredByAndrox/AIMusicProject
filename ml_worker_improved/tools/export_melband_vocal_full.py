@@ -22,6 +22,10 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from docker_runtime import require_docker_runtime  # noqa: E402
+from audio_sample_rate_contract import (  # noqa: E402
+    load_configured_model_sample_rate,
+    resample_audio_to_layout,
+)
 from export_melband_vocal_preview import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     DEFAULT_MODEL_PATH,
@@ -94,10 +98,104 @@ def scatter_add_complex_mps_safe(target, dim, index, src):
         return torch.complex(real, imag)
     return torch.zeros_like(target).scatter_add_(dim, index, src)
 """
+VENDOR_LEGACY_COMPANION_BLOCK = """        vocals_output = res[instruments[0]].T
+        if original_mono:
+            vocals_output = vocals_output[:, 0]
+
+        original_mix, _ = sf.read(path)
+        instrumental = original_mix - vocals_output
+
+        instrumental_path = "{}/{}_instrumental.wav".format(args.store_dir, os.path.basename(path)[:-4])
+        sf.write(instrumental_path, instrumental, sr, subtype='FLOAT')
+"""
+VENDOR_TARGET_AWARE_COMPANION_BLOCK_V1 = """        target_output = res[instruments[0]].T
+        if original_mono:
+            target_output = target_output[:, 0]
+
+        original_mix, _ = sf.read(path)
+        companion_stem = 'vocals' if str(instruments[0]).strip().lower() == 'instrumental' else 'instrumental'
+        companion_output = original_mix - target_output
+
+        companion_path = "{}/{}_{}.wav".format(
+            args.store_dir,
+            os.path.basename(path)[:-4],
+            companion_stem,
+        )
+        sf.write(companion_path, companion_output, sr, subtype='FLOAT')
+"""
+VENDOR_TARGET_AWARE_COMPANION_BLOCK = """        if len(instruments) == 1:
+            target_output = res[instruments[0]].T
+            if original_mono:
+                target_output = target_output[:, 0]
+
+            original_mix, _ = sf.read(path)
+            companion_stem = 'vocals' if str(instruments[0]).strip().lower() == 'instrumental' else 'instrumental'
+            companion_output = original_mix - target_output
+
+            companion_path = "{}/{}_{}.wav".format(
+                args.store_dir,
+                os.path.basename(path)[:-4],
+                companion_stem,
+            )
+            sf.write(companion_path, companion_output, sr, subtype='FLOAT')
+"""
 
 
 def _emit(message: str) -> None:
     print(f"[melband_vocal_full] {message}", flush=True)
+
+
+def write_runtime_config(
+    config_path: Path,
+    target_path: Path,
+    *,
+    num_overlap: int,
+    inference_batch_size: int | None = None,
+    inference_chunk_size: int | None = None,
+) -> dict[str, int]:
+    config = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.FullLoader)
+    if not isinstance(config, dict):
+        raise ValueError("MelBand config root must be a mapping")
+    audio = config.setdefault("audio", {})
+    inference = config.setdefault("inference", {})
+    model = config.setdefault("model", {})
+    if not isinstance(audio, dict) or not isinstance(inference, dict) or not isinstance(model, dict):
+        raise ValueError("MelBand audio, model, and inference config sections must be mappings")
+    linear_transformer_depth = model.get("linear_transformer_depth")
+    if linear_transformer_depth is not None:
+        if int(linear_transformer_depth) != 0:
+            raise ValueError(
+                "MelBand runtime does not support non-zero model.linear_transformer_depth"
+            )
+        model.pop("linear_transformer_depth")
+    if int(num_overlap) <= 0:
+        raise ValueError(f"MelBand num_overlap must be positive: {num_overlap}")
+    if inference_batch_size is not None and int(inference_batch_size) <= 0:
+        raise ValueError(f"MelBand inference_batch_size must be positive: {inference_batch_size}")
+    if inference_chunk_size is not None and int(inference_chunk_size) <= 0:
+        raise ValueError(f"MelBand inference_chunk_size must be positive: {inference_chunk_size}")
+
+    if inference_batch_size is not None:
+        inference["batch_size"] = int(inference_batch_size)
+    elif inference.get("batch_size") is None:
+        inference["batch_size"] = 1
+    if inference_chunk_size is not None:
+        audio["chunk_size"] = int(inference_chunk_size)
+        inference["chunk_size"] = int(inference_chunk_size)
+    elif "chunk_size" not in inference and audio.get("chunk_size") is not None:
+        inference["chunk_size"] = int(audio["chunk_size"])
+    inference["num_overlap"] = int(num_overlap)
+
+    effective_batch_size = int(inference.get("batch_size", 0))
+    effective_chunk_size = int(inference.get("chunk_size", audio.get("chunk_size", 0)))
+    if effective_batch_size <= 0 or effective_chunk_size <= 0:
+        raise ValueError("MelBand runtime config requires positive batch_size and chunk_size")
+    target_path.write_text(yaml.dump(config, sort_keys=False), encoding="utf-8")
+    return {
+        "batch_size": effective_batch_size,
+        "chunk_size": effective_chunk_size,
+        "num_overlap": int(num_overlap),
+    }
 
 
 def _native_macos_diagnostic_allowed() -> bool:
@@ -167,6 +265,43 @@ def patch_vendor_inference_for_mps(repo_path: Path) -> dict[str, Any]:
         path,
         source,
         "melband_vendor_mps_device",
+        pre_patch_sha256=pre_patch_sha256,
+        patch_origin="tracked_exporter_runtime_patch",
+    )
+
+
+def patch_vendor_target_aware_companion(repo_path: Path) -> dict[str, Any]:
+    path = repo_path / "inference.py"
+    source = path.read_text(encoding="utf-8")
+    pre_patch_sha256 = _sha256_text(source)
+    replacement_marker = "companion_stem = 'vocals' if str(instruments[0]).strip().lower() == 'instrumental'"
+    if VENDOR_TARGET_AWARE_COMPANION_BLOCK in source:
+        post_patch_sha256 = _sha256_file(path)
+        return {
+            "patch_id": "melband_vendor_target_aware_companion",
+            "file": str(path),
+            "status": "already_present",
+            "sha256": post_patch_sha256,
+            "pre_patch_sha256": pre_patch_sha256,
+            "post_patch_sha256": post_patch_sha256,
+            "patch_origin": "validated_exact_runtime_patch",
+        }
+    if VENDOR_TARGET_AWARE_COMPANION_BLOCK_V1 in source:
+        source = source.replace(VENDOR_TARGET_AWARE_COMPANION_BLOCK_V1, VENDOR_TARGET_AWARE_COMPANION_BLOCK, 1)
+    elif replacement_marker in source:
+        raise RuntimeError(
+            "MelBand vendor inference.py has divergent target-aware companion patch; refusing prepatched state"
+        )
+    elif VENDOR_LEGACY_COMPANION_BLOCK in source:
+        source = source.replace(VENDOR_LEGACY_COMPANION_BLOCK, VENDOR_TARGET_AWARE_COMPANION_BLOCK, 1)
+    else:
+        raise RuntimeError(
+            "MelBand vendor inference.py missing expected legacy companion block; refusing ambiguous stem roles"
+        )
+    return _patch_text_file(
+        path,
+        source,
+        "melband_vendor_target_aware_companion",
         pre_patch_sha256=pre_patch_sha256,
         patch_origin="tracked_exporter_runtime_patch",
     )
@@ -288,12 +423,67 @@ def inspect_vendor_inference_runtime(
     }
 
 
+def _run_vendor_command(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        output_lines.append(line)
+        print(line, end="" if line.endswith("\n") else "\n", flush=True)
+    returncode = process.wait()
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout="".join(output_lines),
+        stderr="",
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def load_model_source_metadata(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Model source metadata must be an object: {path}")
+    return payload
+
+
+def verify_model_source_files(metadata: dict[str, Any], paths: list[Path]) -> dict[str, str]:
+    records = {
+        str(item.get("file") or ""): item
+        for item in metadata.get("files") or []
+        if isinstance(item, dict)
+    }
+    verified: dict[str, str] = {}
+    for path in paths:
+        actual = _sha256_file(path)
+        verified[path.name] = actual
+        if not metadata:
+            continue
+        record = records.get(path.name)
+        if record is None:
+            raise ValueError(f"Model source metadata is missing file: {path.name}")
+        expected = str(record.get("sha256") or record.get("expected_sha256") or "").lower()
+        if not expected:
+            raise ValueError(f"Model source metadata is missing sha256: {path.name}")
+        if actual.lower() != expected:
+            raise ValueError(f"Model source sha256 mismatch: {path.name}")
+    return verified
 
 
 def _audio_file_summary(path: Path) -> dict[str, Any]:
@@ -462,10 +652,16 @@ def build_full_track_stem_manifest(
     inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
     runtime_patches: list[dict[str, Any]] | None = None,
+    model_source: dict[str, Any] | None = None,
+    verified_model_sha256: dict[str, str] | None = None,
+    model_sample_rate: int | None = None,
+    model_input_frames: int | None = None,
 ) -> dict[str, Any]:
     stem_provenance = stem_provenance or {}
     inference_runtime = inference_runtime or {}
     runtime_patches = runtime_patches or []
+    model_source = model_source or {}
+    verified_model_sha256 = verified_model_sha256 or {}
     preflight_acceleration_mode = (cuda_preflight or {}).get("acceleration_mode")
     expected_inference_acceleration_mode = (
         inference_runtime.get("expected_acceleration_mode")
@@ -479,6 +675,13 @@ def build_full_track_stem_manifest(
     fallback_used = bool(inference_runtime.get("vendor_cpu_fallback_detected"))
     delivery_blocking_runtime = bool(inference_runtime.get("delivery_blocking"))
     target_stem = choose_primary_stem(primary_stem=primary_stem, stem_provenance=stem_provenance)
+    runtime_config = (
+        yaml.load(runtime_config_path.read_text(encoding="utf-8"), Loader=yaml.FullLoader)
+        if runtime_config_path.is_file()
+        else {}
+    )
+    runtime_audio = runtime_config.get("audio", {}) if isinstance(runtime_config, dict) else {}
+    runtime_inference = runtime_config.get("inference", {}) if isinstance(runtime_config, dict) else {}
     target_audio_path = instrumental_flac_path if target_stem == "instrumental" else vocals_flac_path
     vocals_summary = {
         "path": str(vocals_flac_path),
@@ -513,9 +716,16 @@ def build_full_track_stem_manifest(
             "config_path": str(runtime_config_path),
             "config_template_path": str(config_template_path),
             "model_path": str(model_path),
+            "runtime_config_sha256": _sha256_file(runtime_config_path) if runtime_config_path.is_file() else "",
+            "verified_sha256": dict(verified_model_sha256),
             "device_id": int(device_id),
+            "chunk_size": int(runtime_inference.get("chunk_size", runtime_audio.get("chunk_size", 0))),
+            "batch_size": int(runtime_inference.get("batch_size", 0)),
             "num_overlap": int(num_overlap),
+            "configured_sample_rate": int(model_sample_rate or sample_rate),
         },
+        "model_source": model_source,
+        "model_production_allowed": model_source.get("production_allowed") is True if model_source else None,
         "contract": {
             "full_track": True,
             "preview": False,
@@ -564,6 +774,15 @@ def build_full_track_stem_manifest(
             "sample_rate": int(sample_rate),
             "frames": int(frames),
             "duration_sec": round(float(frames) / float(sample_rate), 6) if sample_rate else 0.0,
+            "model_input_sample_rate": int(model_sample_rate or sample_rate),
+            "model_input_frames": int(model_input_frames or frames),
+            "sample_rate_conversion": {
+                "performed": int(model_sample_rate or sample_rate) != int(sample_rate),
+                "source_sample_rate": int(sample_rate),
+                "model_sample_rate": int(model_sample_rate or sample_rate),
+                "resampler": "soxr_hq" if int(model_sample_rate or sample_rate) != int(sample_rate) else "none",
+                "target_output_restored_to_source_rate": True,
+            },
         },
         "elapsed_sec": round(float(elapsed_sec), 3),
         "delivery_allowed": False,
@@ -599,6 +818,10 @@ def write_full_track_stem_manifest(
     inference_runtime: dict[str, Any] | None = None,
     primary_stem: str | None = None,
     runtime_patches: list[dict[str, Any]] | None = None,
+    model_source: dict[str, Any] | None = None,
+    verified_model_sha256: dict[str, str] | None = None,
+    model_sample_rate: int | None = None,
+    model_input_frames: int | None = None,
 ) -> Path:
     manifest = build_full_track_stem_manifest(
         source_audio_path=source_audio_path,
@@ -623,6 +846,10 @@ def write_full_track_stem_manifest(
         inference_runtime=inference_runtime,
         primary_stem=primary_stem,
         runtime_patches=runtime_patches,
+        model_source=model_source,
+        verified_model_sha256=verified_model_sha256,
+        model_sample_rate=model_sample_rate,
+        model_input_frames=model_input_frames,
     )
     manifest_path = output_dir / "stem_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -722,6 +949,7 @@ def materialize_missing_companion_stems(
         for stem_name in tuple(output_contract.get("expected_model_stems") or ())
     }
     allow_residual = bool(output_contract.get("allow_residual_companion_materialization"))
+    vendor_residual_companions: set[str] = set()
 
     if expected_model_stems == {"instrumental"} and instrumental_audio is None:
         raise RuntimeError("MelBand output contract expected instrumental output but it is missing")
@@ -731,6 +959,45 @@ def materialize_missing_companion_stems(
         raise FileNotFoundError("MelBand vocals output is missing")
     if expected_model_stems != {"vocals"} and instrumental_audio is None and not allow_residual:
         raise FileNotFoundError("MelBand instrumental output is missing")
+
+    if expected_model_stems == {"instrumental"} and vocals_audio is not None:
+        assert instrumental_audio is not None
+        _require_matching_audio_layout(
+            raw_audio=raw_audio,
+            raw_sample_rate=raw_sample_rate,
+            stem_audio=instrumental_audio,
+            stem_sample_rate=instrumental_sample_rate,
+            stem_name="instrumental",
+        )
+        _require_matching_audio_layout(
+            raw_audio=raw_audio,
+            raw_sample_rate=raw_sample_rate,
+            stem_audio=vocals_audio,
+            stem_sample_rate=vocals_sample_rate,
+            stem_name="vocals",
+        )
+        if not np.allclose(vocals_audio, raw_audio - instrumental_audio, rtol=1e-5, atol=1e-6):
+            raise RuntimeError("MelBand vendor vocals companion is not raw minus instrumental target")
+        vendor_residual_companions.add("vocals")
+    if expected_model_stems == {"vocals"} and instrumental_audio is not None:
+        assert vocals_audio is not None
+        _require_matching_audio_layout(
+            raw_audio=raw_audio,
+            raw_sample_rate=raw_sample_rate,
+            stem_audio=vocals_audio,
+            stem_sample_rate=vocals_sample_rate,
+            stem_name="vocals",
+        )
+        _require_matching_audio_layout(
+            raw_audio=raw_audio,
+            raw_sample_rate=raw_sample_rate,
+            stem_audio=instrumental_audio,
+            stem_sample_rate=instrumental_sample_rate,
+            stem_name="instrumental",
+        )
+        if not np.allclose(instrumental_audio, raw_audio - vocals_audio, rtol=1e-5, atol=1e-6):
+            raise RuntimeError("MelBand vendor instrumental companion is not raw minus vocals target")
+        vendor_residual_companions.add("instrumental")
 
     if vocals_audio is None:
         assert instrumental_audio is not None
@@ -748,6 +1015,14 @@ def materialize_missing_companion_stems(
             "source": "residual_from_raw_minus_instrumental",
             "model_output": False,
             "residual_companion": True,
+        }
+    elif "vocals" in vendor_residual_companions:
+        residual_companion_materialized = True
+        stem_provenance["vocals"] = {
+            "source": "vendor_residual_from_raw_minus_instrumental",
+            "model_output": False,
+            "residual_companion": True,
+            "residual_verified": True,
         }
     else:
         stem_provenance["vocals"] = {"source": "model_output", "model_output": True}
@@ -768,6 +1043,14 @@ def materialize_missing_companion_stems(
             "source": "residual_from_raw_minus_vocals",
             "model_output": False,
             "residual_companion": True,
+        }
+    elif "instrumental" in vendor_residual_companions:
+        residual_companion_materialized = True
+        stem_provenance["instrumental"] = {
+            "source": "vendor_residual_from_raw_minus_vocals",
+            "model_output": False,
+            "residual_companion": True,
+            "residual_verified": True,
         }
     else:
         stem_provenance["instrumental"] = {"source": "model_output", "model_output": True}
@@ -852,10 +1135,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--manifest-model-id", default=MODEL_ID)
     parser.add_argument("--manifest-model-display-name", default=MODEL_DISPLAY_NAME)
+    parser.add_argument("--model-source-metadata-path")
     parser.add_argument("--device-id", type=int, default=0)
     parser.add_argument("--listen-dir")
     parser.add_argument("--listen-label", default="01_melband_roformer_vocals_full.flac")
     parser.add_argument("--num-overlap", type=int, default=2)
+    parser.add_argument("--inference-batch-size", type=int)
+    parser.add_argument("--inference-chunk-size", type=int)
     parser.add_argument("--light-debleed-strength", type=float, default=0.0)
     parser.add_argument("--light-debleed-start-hz", type=float, default=2600.0)
     parser.add_argument("--light-debleed-margin", type=float, default=1.08)
@@ -908,6 +1194,7 @@ def main() -> None:
     repo_path = Path(args.repo_path)
     model_path = Path(args.model_path)
     config_path = Path(args.config_path)
+    model_source_metadata_path = Path(args.model_source_metadata_path) if args.model_source_metadata_path else None
     listen_dir = Path(args.listen_dir) if args.listen_dir else None
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -919,6 +1206,11 @@ def main() -> None:
         raise FileNotFoundError(f"MelBand checkpoint is missing: {model_path}")
     if not config_path.exists():
         raise FileNotFoundError(f"MelBand config is missing: {config_path}")
+    if model_source_metadata_path is not None and not model_source_metadata_path.exists():
+        raise FileNotFoundError(f"MelBand model source metadata is missing: {model_source_metadata_path}")
+
+    model_source = load_model_source_metadata(model_source_metadata_path)
+    verified_model_sha256 = verify_model_source_files(model_source, [model_path, config_path])
 
     cuda_preflight = verify_cuda_inference_device(int(args.device_id))
     _emit(
@@ -927,7 +1219,13 @@ def main() -> None:
         f"device_count={cuda_preflight['device_count']} "
         f"device_name={cuda_preflight['device_name']}"
     )
-    runtime_patches = apply_vendor_mps_runtime_patches(repo_path, cuda_preflight)
+    runtime_patches: list[dict[str, Any]] = []
+    vendor_inference_path = repo_path / "inference.py"
+    if vendor_inference_path.is_file():
+        runtime_patches.append(patch_vendor_target_aware_companion(repo_path))
+    elif cuda_preflight.get("acceleration_mode"):
+        raise FileNotFoundError(f"MelBand vendor inference entrypoint is missing: {vendor_inference_path}")
+    runtime_patches.extend(apply_vendor_mps_runtime_patches(repo_path, cuda_preflight))
     for runtime_patch in runtime_patches:
         _emit(
             "vendor_runtime_patch "
@@ -944,18 +1242,52 @@ def main() -> None:
         input_dir = Path(input_dir_str)
         model_output_dir = Path(model_output_dir_str)
         config_dir = Path(config_dir_str)
+        native_input_path = config_dir / "raw_source.wav"
         full_input_path = input_dir / f"{MODEL_INPUT_STEM}.wav"
         runtime_config_path = config_dir / "config_runtime.yaml"
 
         _emit(f"ENTER source_audio={source_audio_path} output_dir={output_dir} full_track=true")
         sample_rate, frames = save_audio_window_as_wav(
             source_audio_path,
-            full_input_path,
+            native_input_path,
             start_sec=0.0,
             end_sec=None,
         )
-        _emit(f"prepared_full_track_wav sample_rate={sample_rate} frames={frames}")
-        write_config_with_overlap(config_path, runtime_config_path, num_overlap=int(args.num_overlap))
+        raw_audio, raw_sr = sf.read(str(native_input_path), always_2d=True)
+        if int(raw_sr) != int(sample_rate) or int(raw_audio.shape[0]) != int(frames):
+            raise RuntimeError("MelBand native input decode metadata mismatch")
+        runtime_config = write_runtime_config(
+            config_path,
+            runtime_config_path,
+            num_overlap=int(args.num_overlap),
+            inference_batch_size=(
+                int(args.inference_batch_size) if args.inference_batch_size is not None else None
+            ),
+            inference_chunk_size=(
+                int(args.inference_chunk_size) if args.inference_chunk_size is not None else None
+            ),
+        )
+        _emit(
+            "runtime_config "
+            f"chunk_size={runtime_config['chunk_size']} "
+            f"batch_size={runtime_config['batch_size']} "
+            f"num_overlap={runtime_config['num_overlap']}"
+        )
+        model_sample_rate = load_configured_model_sample_rate(runtime_config_path)
+        model_input_frames = max(1, int(round(frames * model_sample_rate / sample_rate)))
+        model_input_audio = resample_audio_to_layout(
+            raw_audio,
+            source_sample_rate=sample_rate,
+            target_sample_rate=model_sample_rate,
+            target_frames=model_input_frames,
+        )
+        sf.write(str(full_input_path), model_input_audio, model_sample_rate, subtype="FLOAT")
+        _emit(
+            "prepared_full_track_wav "
+            f"source_sample_rate={sample_rate} source_frames={frames} "
+            f"model_sample_rate={model_sample_rate} model_frames={model_input_frames} "
+            f"resampled={model_sample_rate != sample_rate}"
+        )
         output_contract = load_melband_output_contract(runtime_config_path)
 
         command = [
@@ -974,17 +1306,10 @@ def main() -> None:
             "--device_ids",
             str(args.device_id),
         ]
-        completed = subprocess.run(
+        completed = _run_vendor_command(
             command,
             cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            check=False,
         )
-        if completed.stdout.strip():
-            print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n", flush=True)
-        if completed.stderr.strip():
-            print(completed.stderr, end="" if completed.stderr.endswith("\n") else "\n", flush=True)
         if completed.returncode != 0:
             raise RuntimeError(f"MelBand vendor inference failed with returncode={completed.returncode}")
         inference_runtime = inspect_vendor_inference_runtime(
@@ -1012,7 +1337,27 @@ def main() -> None:
         instrumental_audio, instrumental_sr = (
             sf.read(str(instrumental_wav), always_2d=True) if instrumental_wav is not None else (None, None)
         )
-        raw_audio, raw_sr = sf.read(str(full_input_path), always_2d=True)
+        expected_model_stems = set(output_contract.get("expected_model_stems") or ())
+        if expected_model_stems == {"instrumental"}:
+            vocals_audio, vocals_sr = None, None
+        elif expected_model_stems == {"vocals"}:
+            instrumental_audio, instrumental_sr = None, None
+        if vocals_audio is not None:
+            vocals_audio = resample_audio_to_layout(
+                vocals_audio,
+                source_sample_rate=int(vocals_sr or model_sample_rate),
+                target_sample_rate=int(raw_sr),
+                target_frames=int(raw_audio.shape[0]),
+            )
+            vocals_sr = int(raw_sr)
+        if instrumental_audio is not None:
+            instrumental_audio = resample_audio_to_layout(
+                instrumental_audio,
+                source_sample_rate=int(instrumental_sr or model_sample_rate),
+                target_sample_rate=int(raw_sr),
+                target_frames=int(raw_audio.shape[0]),
+            )
+            instrumental_sr = int(raw_sr)
         resolved_stems = materialize_missing_companion_stems(
             output_contract=output_contract,
             raw_audio=raw_audio,
@@ -1128,6 +1473,10 @@ def main() -> None:
             inference_runtime=inference_runtime,
             primary_stem=target_stem,
             runtime_patches=runtime_patches,
+            model_source=model_source,
+            verified_model_sha256=verified_model_sha256,
+            model_sample_rate=model_sample_rate,
+            model_input_frames=model_input_frames,
         )
 
         if listen_dir is not None:

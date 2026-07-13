@@ -37,6 +37,80 @@ def _neutral_audio(audio: np.ndarray, *_args, **_kwargs) -> np.ndarray:
     return audio
 
 
+def test_model_sample_rate_contract_rejects_missing_or_conflicting_config(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("audio:\n  sample_rate: 44100\nmodel:\n  sample_rate: 44100\n", encoding="utf-8")
+    assert module.load_configured_model_sample_rate(config_path) == 44100
+
+    config_path.write_text("audio:\n  sample_rate: 48000\nmodel:\n  sample_rate: 44100\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="conflicting model sample_rate"):
+        module.load_configured_model_sample_rate(config_path)
+
+    config_path.write_text("audio:\n  chunk_size: 44100\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="missing model sample_rate"):
+        module.load_configured_model_sample_rate(config_path)
+
+
+def test_resample_audio_to_layout_restores_exact_source_frame_count() -> None:
+    module = _load_melband_full_module()
+    source_rate = 48000
+    model_rate = 44100
+    frames = 24000
+    time_axis = np.arange(frames, dtype=np.float32) / source_rate
+    source = np.stack(
+        [np.sin(2.0 * np.pi * 440.0 * time_axis), np.sin(2.0 * np.pi * 880.0 * time_axis)],
+        axis=1,
+    ).astype(np.float32)
+
+    model_frames = round(frames * model_rate / source_rate)
+    model_audio = module.resample_audio_to_layout(
+        source,
+        source_sample_rate=source_rate,
+        target_sample_rate=model_rate,
+        target_frames=model_frames,
+    )
+    restored = module.resample_audio_to_layout(
+        model_audio,
+        source_sample_rate=model_rate,
+        target_sample_rate=source_rate,
+        target_frames=frames,
+    )
+
+    assert model_audio.shape == (model_frames, 2)
+    assert restored.shape == source.shape
+    assert np.isfinite(restored).all()
+    assert np.corrcoef(source[:, 0], restored[:, 0])[0, 1] > 0.9999
+
+
+def test_audio_window_decode_uses_float_wav_without_pcm16_quantization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_melband_full_module()
+    captured: dict[str, object] = {}
+
+    class FakeTorchaudio:
+        @staticmethod
+        def load(_path: str):
+            return np.zeros((2, 8), dtype=np.float32), 48000
+
+        @staticmethod
+        def save(path: str, waveform: np.ndarray, sample_rate: int, **kwargs):
+            captured.update(path=path, waveform=waveform, sample_rate=sample_rate, kwargs=kwargs)
+
+    monkeypatch.setitem(sys.modules, "torchaudio", FakeTorchaudio)
+    sample_rate, frames = module.save_audio_window_as_wav(
+        tmp_path / "source.flac",
+        tmp_path / "target.wav",
+        start_sec=0.0,
+        end_sec=None,
+    )
+
+    assert sample_rate == 48000
+    assert frames == 8
+    assert captured["kwargs"] == {"encoding": "PCM_F", "bits_per_sample": 32}
+
+
 def test_full_track_manifest_is_quality_gate_compatible(tmp_path: Path) -> None:
     module = _load_melband_full_module()
     source_audio_path = tmp_path / "source.flac"
@@ -411,6 +485,41 @@ def test_vendor_mps_runtime_patch_rejects_divergent_complex_scatter_helper(tmp_p
         module.patch_vendor_complex_scatter_for_mps(repo_path)
 
 
+def test_vendor_target_aware_companion_patch_prevents_case_insensitive_role_collision(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    inference_path = repo_path / "inference.py"
+    inference_path.write_text(
+        "def run_folder():\n" + module.VENDOR_LEGACY_COMPANION_BLOCK,
+        encoding="utf-8",
+    )
+
+    patch = module.patch_vendor_target_aware_companion(repo_path)
+    patched = inference_path.read_text(encoding="utf-8")
+
+    assert patch["patch_id"] == "melband_vendor_target_aware_companion"
+    assert patch["status"] == "applied"
+    assert module.VENDOR_LEGACY_COMPANION_BLOCK not in patched
+    assert module.VENDOR_TARGET_AWARE_COMPANION_BLOCK in patched
+    assert "if len(instruments) == 1:" in patched
+    assert "companion_stem = 'vocals'" in patched
+    assert "{}_instrumental.wav" not in patched
+
+    repeat = module.patch_vendor_target_aware_companion(repo_path)
+    assert repeat["status"] == "already_present"
+
+
+def test_vendor_target_aware_companion_patch_rejects_ambiguous_vendor_source(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "inference.py").write_text("def run_folder():\n    pass\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="refusing ambiguous stem roles"):
+        module.patch_vendor_target_aware_companion(repo_path)
+
+
 def test_melband_preflight_accepts_explicit_native_macos_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_melband_full_module()
 
@@ -523,6 +632,79 @@ def test_manifest_can_record_registered_checkpoint_identity_without_changing_exp
     assert manifest["model"]["name"] == "Becruily MelBand RoFormer karaoke checkpoint"
 
 
+def test_model_source_metadata_verifies_checkpoint_and_config_sha256(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    model_path = tmp_path / "model.ckpt"
+    config_path = tmp_path / "config.yaml"
+    metadata_path = tmp_path / "source.json"
+    model_path.write_bytes(b"model-bytes")
+    config_path.write_bytes(b"config-bytes")
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "production_allowed": False,
+                "files": [
+                    {"file": model_path.name, "expected_sha256": module._sha256_file(model_path)},
+                    {"file": config_path.name, "expected_sha256": module._sha256_file(config_path)},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = module.load_model_source_metadata(metadata_path)
+    verified = module.verify_model_source_files(metadata, [model_path, config_path])
+
+    assert verified == {
+        model_path.name: module._sha256_file(model_path),
+        config_path.name: module._sha256_file(config_path),
+    }
+
+    model_path.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="Model source sha256 mismatch"):
+        module.verify_model_source_files(metadata, [model_path, config_path])
+
+
+def test_manifest_records_verified_model_source_and_blocks_unlicensed_production(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    source_audio_path = tmp_path / "source.flac"
+    output_dir = tmp_path / "candidate"
+    vocals_path = output_dir / "vocals.flac"
+    instrumental_path = output_dir / "instrumental.flac"
+    raw_ref_path = output_dir / "raw_ref.flac"
+    runtime_config_path = tmp_path / "runtime.yaml"
+    output_dir.mkdir()
+    for path in (source_audio_path, vocals_path, instrumental_path, raw_ref_path):
+        _write_tiny_flac(path)
+    runtime_config_path.write_text("inference:\n  batch_size: 1\n", encoding="utf-8")
+    verified_sha256 = {"model.ckpt": "abc", "config.yaml": "def"}
+
+    manifest = module.build_full_track_stem_manifest(
+        source_audio_path=source_audio_path,
+        vocals_flac_path=vocals_path,
+        instrumental_flac_path=instrumental_path,
+        raw_ref_flac_path=raw_ref_path,
+        repo_path=Path("/repo"),
+        model_path=Path("/model.ckpt"),
+        config_template_path=Path("/config.yaml"),
+        runtime_config_path=runtime_config_path,
+        device_id=0,
+        num_overlap=2,
+        sample_rate=44100,
+        frames=44100,
+        elapsed_sec=1.0,
+        postprocess={"name": None},
+        model_source={"status": "verified_downloaded_diagnostic_only", "production_allowed": False},
+        verified_model_sha256=verified_sha256,
+    )
+
+    assert manifest["model"]["verified_sha256"] == verified_sha256
+    assert manifest["model"]["runtime_config_sha256"] == module._sha256_file(runtime_config_path)
+    assert manifest["model_source"]["status"] == "verified_downloaded_diagnostic_only"
+    assert manifest["model_production_allowed"] is False
+    assert manifest["delivery_allowed"] is False
+
+
 def test_single_stem_instrumental_output_materializes_vocal_residual_with_provenance() -> None:
     module = _load_melband_full_module()
     raw_audio = np.array([[0.7, -0.7], [0.2, -0.2]], dtype=np.float32)
@@ -550,6 +732,63 @@ def test_single_stem_instrumental_output_materializes_vocal_residual_with_proven
     assert resolved["stem_provenance"]["instrumental"]["source"] == "model_output"
     assert resolved["stem_provenance"]["vocals"]["source"] == "residual_from_raw_minus_instrumental"
     assert resolved["residual_companion_materialized"] is True
+
+
+def test_single_stem_vendor_companion_is_verified_and_not_claimed_as_model_output() -> None:
+    module = _load_melband_full_module()
+    raw_audio = np.array([[0.7, -0.7], [0.2, -0.2]], dtype=np.float32)
+    instrumental_audio = np.array([[0.3, -0.4], [0.1, -0.1]], dtype=np.float32)
+    vocals_audio = raw_audio - instrumental_audio
+
+    resolved = module.materialize_missing_companion_stems(
+        output_contract={
+            "num_stems": 1,
+            "target_instrument": "Instrumental",
+            "expected_model_stems": ("instrumental",),
+            "allow_residual_companion_materialization": True,
+        },
+        raw_audio=raw_audio,
+        raw_sample_rate=44100,
+        vocals_audio=vocals_audio,
+        vocals_sample_rate=44100,
+        instrumental_audio=instrumental_audio,
+        instrumental_sample_rate=44100,
+    )
+
+    assert resolved["stem_provenance"]["instrumental"] == {"source": "model_output", "model_output": True}
+    assert resolved["stem_provenance"]["vocals"] == {
+        "source": "vendor_residual_from_raw_minus_instrumental",
+        "model_output": False,
+        "residual_companion": True,
+        "residual_verified": True,
+    }
+    assert resolved["residual_companion_materialized"] is True
+
+
+def test_two_stem_outputs_remain_model_outputs_without_residual_relabeling() -> None:
+    module = _load_melband_full_module()
+    vocals_audio = np.array([[0.4, -0.4], [0.1, -0.1]], dtype=np.float32)
+    instrumental_audio = np.array([[0.3, -0.3], [0.1, -0.1]], dtype=np.float32)
+    raw_audio = vocals_audio + instrumental_audio
+
+    resolved = module.materialize_missing_companion_stems(
+        output_contract={
+            "num_stems": 2,
+            "target_instrument": None,
+            "expected_model_stems": ("vocals", "instrumental"),
+            "allow_residual_companion_materialization": False,
+        },
+        raw_audio=raw_audio,
+        raw_sample_rate=44100,
+        vocals_audio=vocals_audio,
+        vocals_sample_rate=44100,
+        instrumental_audio=instrumental_audio,
+        instrumental_sample_rate=44100,
+    )
+
+    assert resolved["stem_provenance"]["vocals"]["model_output"] is True
+    assert resolved["stem_provenance"]["instrumental"]["model_output"] is True
+    assert resolved["residual_companion_materialized"] is False
 
 
 def test_two_stem_contract_rejects_missing_vocal_output_without_residual_materialization() -> None:
@@ -609,7 +848,7 @@ def test_main_rejects_two_stem_config_when_model_omits_vocals(tmp_path: Path, mo
     config_path.write_text(
         yaml.dump(
             {
-                "audio": {"chunk_size": 44100},
+                "audio": {"chunk_size": 44100, "sample_rate": 44100},
                 "model": {"num_stems": 2},
                 "training": {"instruments": ["Vocals", "Instrumental"]},
                 "inference": {"num_overlap": 2},
@@ -634,7 +873,7 @@ def test_main_rejects_two_stem_config_when_model_omits_vocals(tmp_path: Path, mo
     monkeypatch.setattr(module, "require_docker_runtime", lambda **_kwargs: None)
     monkeypatch.setattr(module, "verify_cuda_inference_device", lambda _device_id: {"device_id": 0, "device_count": 1, "device_name": "test"})
     monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_vendor_command", fake_run)
     monkeypatch.setattr(module, "apply_light_debleed_presence", _neutral_audio)
     monkeypatch.setattr(module, "apply_peak_note_debleed", _neutral_audio)
     monkeypatch.setattr(module, "apply_windowed_note_notch", _neutral_audio)
@@ -673,7 +912,7 @@ def test_main_uses_current_python_for_vendor_inference(tmp_path: Path, monkeypat
     config_path.write_text(
         yaml.dump(
             {
-                "audio": {"chunk_size": 44100},
+                "audio": {"chunk_size": 44100, "sample_rate": 44100},
                 "model": {"num_stems": 2},
                 "training": {"instruments": ["Vocals", "Instrumental"]},
                 "inference": {"num_overlap": 2},
@@ -702,7 +941,7 @@ def test_main_uses_current_python_for_vendor_inference(tmp_path: Path, monkeypat
     monkeypatch.setattr(module, "require_docker_runtime", lambda **_kwargs: None)
     monkeypatch.setattr(module, "verify_cuda_inference_device", lambda _device_id: {"device_id": 0, "device_count": 1, "device_name": "test"})
     monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_vendor_command", fake_run)
     monkeypatch.setattr(module, "apply_light_debleed_presence", _neutral_audio)
     monkeypatch.setattr(module, "apply_peak_note_debleed", _neutral_audio)
     monkeypatch.setattr(module, "apply_windowed_note_notch", _neutral_audio)
@@ -739,12 +978,16 @@ def test_main_prints_vendor_output_before_nonzero_runtime_error(
     model_path = tmp_path / "model.ckpt"
     config_path = tmp_path / "config.yaml"
     repo_path.mkdir()
+    (repo_path / "inference.py").write_text(
+        "def run_folder():\n" + module.VENDOR_LEGACY_COMPANION_BLOCK,
+        encoding="utf-8",
+    )
     model_path.write_text("stub checkpoint", encoding="utf-8")
     _write_tiny_flac(source_audio_path, sample_rate=44100, frames=8)
     config_path.write_text(
         yaml.dump(
             {
-                "audio": {"chunk_size": 44100},
+                "audio": {"chunk_size": 44100, "sample_rate": 44100},
                 "model": {"num_stems": 2},
                 "training": {"instruments": ["Vocals", "Instrumental"]},
                 "inference": {"num_overlap": 2},
@@ -760,6 +1003,8 @@ def test_main_prints_vendor_output_before_nonzero_runtime_error(
         return 44100, int(raw_audio.shape[0])
 
     def fake_run(command: list[str], *_args, **_kwargs):
+        print("vendor stdout before failure")
+        print("vendor stderr before failure")
         return module.subprocess.CompletedProcess(
             command,
             17,
@@ -779,7 +1024,7 @@ def test_main_prints_vendor_output_before_nonzero_runtime_error(
         },
     )
     monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_vendor_command", fake_run)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -974,7 +1219,7 @@ def test_main_listen_copy_uses_instrumental_for_single_stem_instrumental_contrac
     config_path.write_text(
         yaml.dump(
             {
-                "audio": {"chunk_size": 44100},
+                "audio": {"chunk_size": 44100, "sample_rate": 44100},
                 "model": {"num_stems": 1},
                 "training": {"target_instrument": "Instrumental"},
                 "inference": {"num_overlap": 2},
@@ -999,7 +1244,7 @@ def test_main_listen_copy_uses_instrumental_for_single_stem_instrumental_contrac
     monkeypatch.setattr(module, "require_docker_runtime", lambda **_kwargs: None)
     monkeypatch.setattr(module, "verify_cuda_inference_device", lambda _device_id: {"device_id": 0, "device_count": 1, "device_name": "test"})
     monkeypatch.setattr(module, "save_audio_window_as_wav", fake_save_audio_window_as_wav)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_vendor_command", fake_run)
     monkeypatch.setattr(module, "apply_light_debleed_presence", _neutral_audio)
     monkeypatch.setattr(module, "apply_peak_note_debleed", _neutral_audio)
     monkeypatch.setattr(module, "apply_windowed_note_notch", _neutral_audio)
@@ -1078,3 +1323,58 @@ def test_melband_config_normalization_adds_missing_inference_chunk_size(tmp_path
     runtime_config = yaml.load(runtime_config_path.read_text(encoding="utf-8"), Loader=yaml.FullLoader)
     assert runtime_config["inference"]["chunk_size"] == 485100
     assert runtime_config["inference"]["num_overlap"] == 2
+
+
+def test_melband_runtime_config_applies_memory_safe_batch_without_shrinking_chunk(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    config_path = tmp_path / "config.yaml"
+    runtime_config_path = tmp_path / "runtime.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "audio": {"chunk_size": 352800},
+                "model": {"linear_transformer_depth": 0},
+                "inference": {"batch_size": 4, "num_overlap": 2},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    effective = module.write_runtime_config(
+        config_path,
+        runtime_config_path,
+        num_overlap=2,
+        inference_batch_size=1,
+    )
+    runtime_config = yaml.load(runtime_config_path.read_text(encoding="utf-8"), Loader=yaml.FullLoader)
+
+    assert effective == {"batch_size": 1, "chunk_size": 352800, "num_overlap": 2}
+    assert runtime_config["audio"]["chunk_size"] == 352800
+    assert runtime_config["inference"]["chunk_size"] == 352800
+    assert runtime_config["inference"]["batch_size"] == 1
+    assert "linear_transformer_depth" not in runtime_config["model"]
+
+
+def test_melband_runtime_config_rejects_nonzero_unsupported_linear_transformer(tmp_path: Path) -> None:
+    module = _load_melband_full_module()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "audio": {"chunk_size": 352800},
+                "model": {"linear_transformer_depth": 1},
+                "inference": {"batch_size": 1, "num_overlap": 2},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="non-zero model.linear_transformer_depth"):
+        module.write_runtime_config(
+            config_path,
+            tmp_path / "runtime.yaml",
+            num_overlap=2,
+            inference_batch_size=1,
+        )

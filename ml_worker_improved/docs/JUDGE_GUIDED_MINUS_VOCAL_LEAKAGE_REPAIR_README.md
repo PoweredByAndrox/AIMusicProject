@@ -29,6 +29,16 @@ Projection can run in two modes:
   `candidate_only` and still requires a post-render minus self-judge before any
   delivery wrapper can accept it.
 
+`segment_local` is implemented as bounded window-sliced DSP: audio stays in
+`float32`, the source mix is inspected through metadata instead of being decoded
+into an unused full-track array, and each gate/filter/projection working set is
+limited to the selected window plus deterministic filter context. The manifest
+metrics record `memory_strategy=window_sliced_float32`,
+`full_track_gate_per_window=false`, and the maximum local working span. This keeps
+peak memory proportional to full-track audio plus one local window rather than
+full-track length multiplied by selected-window count; it does not change how
+judge windows are selected and does not introduce track names or fixed timestamps.
+
 `--max-projection-gain` is a processing bound, not an acceptance gate. The
 default remains conservative, but the route allows higher bounded gains for
 low-energy vocal guides where the mathematically required projection coefficient

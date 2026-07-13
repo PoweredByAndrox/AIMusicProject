@@ -19,7 +19,6 @@ from docker_runtime import require_docker_runtime  # noqa: E402
 import librosa
 import numpy as np
 import soundfile as sf
-import torchaudio
 import yaml
 
 
@@ -39,11 +38,19 @@ def _save_preview_wav(
     start_sec: float,
     end_sec: float | None,
 ) -> tuple[int, int]:
+    import torchaudio
+
     waveform, sample_rate = torchaudio.load(str(source_audio_path))
     start_frame = max(0, int(round(start_sec * sample_rate)))
     end_frame = waveform.shape[1] if end_sec is None else max(start_frame, int(round(end_sec * sample_rate)))
     preview = waveform[:, start_frame:end_frame]
-    torchaudio.save(str(output_wav_path), preview, sample_rate)
+    torchaudio.save(
+        str(output_wav_path),
+        preview,
+        sample_rate,
+        encoding="PCM_F",
+        bits_per_sample=32,
+    )
     return int(sample_rate), int(preview.shape[1])
 
 

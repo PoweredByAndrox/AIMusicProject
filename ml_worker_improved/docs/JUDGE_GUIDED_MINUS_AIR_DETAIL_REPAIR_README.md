@@ -42,6 +42,17 @@ The repair adds bounded band-limited `source_mix - base_minus` detail inside a s
 If `--vocal-guide-path` is supplied, the added detail layer is projected against the vocal guide and
 suppressed before writing the candidate. This is a guardrail, not an acceptance gate.
 
+Vocal suppression supports two modes:
+
+- `--vocal-suppression-mode global` (default) uses one bounded projection over all selected windows;
+- `--vocal-suppression-mode segment_local` computes a bounded projection independently for each
+  selected judge window, preventing opposite local gains from cancelling each other.
+
+Both modes apply suppression through the smooth repair gate, so unselected audio is not modified.
+The manifest records the selected mode and per-window projection metrics. Segment-local mode is the
+preferred retune when a global repair reduces aggregate projection but introduces a local vocal
+proxy blocker.
+
 ## Output Names
 
 Use `--short-output-names` for generated loop/listen/debug artifacts. In that
@@ -76,6 +87,18 @@ After post-render self-judge, compare pre/post evidence with
 decrease, unsafe vocal/full-mix proxy issues increase, or any post-repair
 self-judge blocker remains, the repair remains blocked and cannot advance to
 listen-preview evaluation.
+
+## Independent Non-Vocal Support
+
+When an independent 6-stem lane is available, its non-vocal sum may be passed to
+`instrumental_self_judge_gate.py --diagnostic-non-vocal-support <path>`. This support audio is
+diagnostic evidence only and must never be exported or presented as the production minus.
+
+The self-judge may explain only a `presence_loss_proxy`, and only when the candidate closely matches
+the support in correlation, RMS, and presence while the separate vocal correlation and projection
+checks remain safe. The manifest records the support path, SHA-256, and
+`diagnostic_non_vocal_support_is_production_minus=false`. The self-judge remains non-deliverable;
+normal result-judge, selector, and listen-preview gates still apply.
 
 ## Example
 

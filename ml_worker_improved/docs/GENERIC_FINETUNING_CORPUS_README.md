@@ -308,10 +308,12 @@ matrix experiments:
   still a training/evaluation candidate only; holdout improvement gates remain
   unchanged.
 - `source_preservation_weight` adds an explicit loss term against moving the
-  learned mask away from source identity. It is intended for candidate-
-  conditioned stems that are already strong baselines and must not be damaged by
-  a shared adapter. The default is `0.0`; enabling it does not lower any holdout
-  gate and does not publish fallback/no-op audio.
+  learned mask away from source identity. Generic dataset training scopes this
+  term only to rows explicitly marked `corruption.variant=identity`; repair rows
+  such as `vocal_leak`, `detail_dip`, and `combined` remain free to learn their
+  target correction. Direct legacy callers that do not provide pair roles keep
+  the previous all-pairs behavior. The default is `0.0`; enabling it does not
+  lower any holdout gate and does not publish fallback/no-op audio.
 - `source_feature_memory_projection_dim` stores a deterministic seed-derived
   projection matrix in the checkpoint and applies KNN in that projected space.
 - `source_feature_memory_max_frames` stores only a deterministic frame subset

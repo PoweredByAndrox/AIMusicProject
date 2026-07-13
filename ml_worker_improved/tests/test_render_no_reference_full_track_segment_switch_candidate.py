@@ -45,20 +45,34 @@ def candidate_row(tmp_path: Path, candidate_id: str, *, vocal_value: float, minu
     }
 
 
-def judge_row(candidate_id: str, scores: list[float]) -> dict:
+def window_metric(
+    index: int,
+    score: float,
+    *,
+    decision: str | None = None,
+    reasons: list[str] | None = None,
+    duration_sec: float = 1.0,
+) -> dict:
+    window = {
+        "start_sec": float(index),
+        "duration_sec": duration_sec,
+        "minus_score": score,
+        "vocal_score": score,
+        "window_fitness": score,
+        "reasons": list(reasons or ["no_reference_proxy_passed"]),
+    }
+    if decision is not None:
+        window["window_decision"] = decision
+    return window
+
+
+def judge_row(candidate_id: str, scores: list[float | dict]) -> dict:
     return {
         "track_id": "track-a",
         "candidate_id": candidate_id,
         "window_metrics": [
-            {
-                "start_sec": float(index),
-                "duration_sec": 1.0,
-                "minus_score": score,
-                "vocal_score": score,
-                "window_fitness": score,
-                "reasons": ["no_reference_proxy_passed"],
-            }
-            for index, score in enumerate(scores)
+            item if isinstance(item, dict) else window_metric(index, float(item))
+            for index, item in enumerate(scores)
         ],
     }
 
@@ -147,6 +161,89 @@ def test_full_track_segment_switch_blocks_missing_base_minus_provenance(tmp_path
     assert result["rendered_minus_candidate_path"] == ""
 
 
+def test_full_track_segment_switch_prefers_safe_base_over_higher_score_alternate(tmp_path: Path) -> None:
+    base = candidate_row(tmp_path, "base", vocal_value=0.1, minus_value=0.2)
+    alt = candidate_row(tmp_path, "alt", vocal_value=0.7, minus_value=0.8)
+
+    result = build_full_track_segment_switch_candidate(
+        [base, alt],
+        [
+            judge_row("base", [window_metric(0, 0.81, decision="accept_candidate")]),
+            judge_row("alt", [window_metric(0, 0.98, decision="select_alternative_candidate")]),
+        ],
+        output_dir=tmp_path / "out",
+        base_candidate_id="base",
+        min_window_score=0.72,
+        crossfade_ms=0,
+        selection_decision_field="window_decision",
+        allow_select_alternative=True,
+        prefer_base_when_safe=True,
+    )
+
+    assert result["selection_prefers_safe_base"] is True
+    assert result["render_status"] == "blocked_no_alternate_window_selected"
+    assert result["dominant_failure_reason"] == "no_full_track_overlay_improvement"
+    assert result["selected_window_count"] == 1
+    assert result["overlay_window_count"] == 0
+    assert result["selected_windows"][0]["candidate_id"] == "base"
+    assert result["selected_windows"][0]["selected_candidate_id"] == "base"
+    assert result["blocked_window_count"] == 0
+
+
+def test_full_track_segment_switch_selects_alternate_when_base_decision_blocked(tmp_path: Path) -> None:
+    base = candidate_row(tmp_path, "base", vocal_value=0.1, minus_value=0.2)
+    alt = candidate_row(tmp_path, "alt", vocal_value=0.7, minus_value=0.8)
+
+    result = build_full_track_segment_switch_candidate(
+        [base, alt],
+        [
+            judge_row("base", [window_metric(0, 0.94, decision="reject_candidate")]),
+            judge_row("alt", [window_metric(0, 0.82, decision="select_alternative_candidate")]),
+        ],
+        output_dir=tmp_path / "out",
+        base_candidate_id="base",
+        min_window_score=0.72,
+        crossfade_ms=0,
+        selection_decision_field="window_decision",
+        allow_select_alternative=True,
+        prefer_base_when_safe=True,
+    )
+
+    assert result["selection_prefers_safe_base"] is True
+    assert result["render_status"] == "rendered_full_track_candidate"
+    assert result["selected_window_count"] == 1
+    assert result["overlay_window_count"] == 1
+    assert result["selected_windows"][0]["candidate_id"] == "alt"
+    assert result["selected_windows"][0]["selected_candidate_id"] == "alt"
+    assert result["blocked_window_count"] == 0
+
+
+def test_full_track_segment_switch_default_does_not_prefer_base_when_flag_absent(tmp_path: Path) -> None:
+    base = candidate_row(tmp_path, "base", vocal_value=0.1, minus_value=0.2)
+    alt = candidate_row(tmp_path, "alt", vocal_value=0.7, minus_value=0.8)
+
+    result = build_full_track_segment_switch_candidate(
+        [base, alt],
+        [
+            judge_row("base", [window_metric(0, 0.81, decision="accept_candidate")]),
+            judge_row("alt", [window_metric(0, 0.98, decision="select_alternative_candidate")]),
+        ],
+        output_dir=tmp_path / "out",
+        base_candidate_id="base",
+        min_window_score=0.72,
+        crossfade_ms=0,
+        selection_decision_field="window_decision",
+        allow_select_alternative=True,
+    )
+
+    assert result["selection_prefers_safe_base"] is False
+    assert result["render_status"] == "rendered_full_track_candidate"
+    assert result["selected_window_count"] == 1
+    assert result["overlay_window_count"] == 1
+    assert result["selected_windows"][0]["candidate_id"] == "alt"
+    assert result["selected_windows"][0]["selected_candidate_id"] == "alt"
+
+
 def test_full_track_segment_switch_cli_writes_deterministic_manifest(tmp_path: Path) -> None:
     base = candidate_row(tmp_path, "base", vocal_value=0.1, minus_value=0.2)
     alt = candidate_row(tmp_path, "alt", vocal_value=0.7, minus_value=0.8)
@@ -183,4 +280,49 @@ def test_full_track_segment_switch_cli_writes_deterministic_manifest(tmp_path: P
     assert Path(payload["rendered_vocal_candidate_path"]).name == "fts_voc.wav"
     assert Path(payload["rendered_minus_candidate_path"]).name == "fts_min.wav"
     assert Path(payload["candidate_row_jsonl"]).name == "fts_row.jsonl"
+    assert payload["selection_prefers_safe_base"] is False
     assert "- render_status: rendered_full_track_candidate" in summary_md.read_text(encoding="utf-8")
+
+
+def test_full_track_segment_switch_cli_sets_prefer_base_manifest_flag(tmp_path: Path) -> None:
+    base = candidate_row(tmp_path, "base", vocal_value=0.1, minus_value=0.2)
+    alt = candidate_row(tmp_path, "alt", vocal_value=0.7, minus_value=0.8)
+    candidates_jsonl = write_jsonl(tmp_path / "candidates.jsonl", [alt, base])
+    judge_jsonl = write_jsonl(
+        tmp_path / "judge.jsonl",
+        [
+            judge_row("base", [window_metric(0, 0.81, decision="accept_candidate")]),
+            judge_row("alt", [window_metric(0, 0.98, decision="select_alternative_candidate")]),
+        ],
+    )
+    out_dir = tmp_path / "out"
+    manifest_json = out_dir / "manifest.json"
+    summary_md = out_dir / "summary.md"
+    args = [
+        "--candidate-pool-jsonl",
+        str(candidates_jsonl),
+        "--windowed-judge-jsonl",
+        str(judge_jsonl),
+        "--output-dir",
+        str(out_dir),
+        "--manifest-json",
+        str(manifest_json),
+        "--summary-md",
+        str(summary_md),
+        "--base-candidate-id",
+        "base",
+        "--crossfade-ms",
+        "0",
+        "--selection-decision-field",
+        "window_decision",
+        "--allow-select-alternative",
+        "--prefer-base-when-safe",
+    ]
+
+    assert main(args) == 0
+    payload = json.loads(manifest_json.read_text(encoding="utf-8"))
+
+    assert payload["selection_prefers_safe_base"] is True
+    assert payload["render_status"] == "blocked_no_alternate_window_selected"
+    assert payload["selected_window_count"] == 1
+    assert payload["selected_windows"][0]["candidate_id"] == "base"

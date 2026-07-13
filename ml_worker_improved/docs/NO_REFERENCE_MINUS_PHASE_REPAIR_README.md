@@ -26,7 +26,14 @@ Generated variants:
 
 - `minus_mid_mono`
 - `minus_side_attenuate_25`
+- `minus_side_attenuate_45`
+- `minus_side_attenuate_46`
+- `minus_side_attenuate_47`
 - `minus_side_attenuate_50`
+
+The dense `0.45`-`0.47` band covers the narrow crossover where a candidate may
+retain enough stereo detail while also clearing the phase-stability gate. Every
+variant remains diagnostic-only and must pass the same downstream judges.
 
 The manifest always keeps:
 

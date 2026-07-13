@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tools import run_generic_audio_finetune_matrix as matrix_module
 from tools.run_generic_audio_finetune_matrix import run_generic_audio_finetune_matrix
 from tools.train_teacher_mask_separator import TeacherMaskTrainConfig
 
@@ -23,6 +24,19 @@ def _read_json(path: Path) -> dict:
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_matrix_progress_records_mps_as_required_gpu(tmp_path: Path) -> None:
+    progress_path = tmp_path / "progress.jsonl"
+
+    matrix_module.progress(progress_path, "start", device="mps", require_gpu=True)
+
+    row = _read_jsonl(progress_path)[0]
+    assert row["expected_acceleration_mode"] == "mps_gpu_training_and_holdout"
+    assert row["gpu_training_required"] is True
+    assert row["gpu_inference_required"] is True
+    assert row["gpu_training_skipped"] is False
+    assert "gpu_skip_reason" not in row
 
 
 def test_direct_script_help_runs_inside_docker() -> None:

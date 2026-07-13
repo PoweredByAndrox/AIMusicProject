@@ -30,21 +30,36 @@ from mac_windows_mount_preflight import (  # noqa: E402
     DEFAULT_WINDOWS_PROJECT_ROOT,
     preflight_mac_windows_project_mount,
 )
+from mac_mps_worker_client import send_request  # noqa: E402
 
 
 DEFAULT_MODEL_NAME = "htdemucs_6s"
 DEMUX_ROUTE_IDS = {"htdemucs_6s", "demucs_htdemucs_6s"}
 MDX23C_ROUTE_ID = "mdx23c_vocals"
 MELBAND_ROUTE_ID = "melband_roformer_vocals"
+VIPERX_MELBAND_ROUTE_ID = "audio_separator_melband_roformer_viperx_vocals"
+BECRUILY_KARAOKE_ROUTE_ID = "becruily_karaoke_vocals"
 BECRUILY_INSTRUMENTAL_ROUTE_ID = "becruily_instrumental_vocals"
+FV7Z_INSTRUMENTAL_ROUTE_ID = "melband_inst_fv7z"
 SCNET_ROUTE_ID = "scnet_xl_ihf_musdb18"
+LARGE_INST_ROUTE_ID = "bs_roformer_large_inst"
+RESURRECTION_INST_ROUTE_ID = "bs_roformer_inst_res"
 SUPPORTED_ROUTE_IDS = DEMUX_ROUTE_IDS | {
     MDX23C_ROUTE_ID,
     MELBAND_ROUTE_ID,
+    VIPERX_MELBAND_ROUTE_ID,
+    BECRUILY_KARAOKE_ROUTE_ID,
     BECRUILY_INSTRUMENTAL_ROUTE_ID,
+    FV7Z_INSTRUMENTAL_ROUTE_ID,
     SCNET_ROUTE_ID,
+    LARGE_INST_ROUTE_ID,
+    RESURRECTION_INST_ROUTE_ID,
 }
 SCNET_MPS_TIMEOUT_SEC = "900"
+SCNET_MPS_CHUNK_SIZE = "485100"
+SCNET_MPS_BATCH_SIZE = "1"
+SCNET_MPS_NUM_OVERLAP = "4"
+DEFAULT_ROUTE_TIMEOUT_SEC = 1800
 
 
 @dataclass(frozen=True)
@@ -54,6 +69,9 @@ class MacMpsApiConfig:
     python_bin: Path
     mac_windows_project_mount: Optional[Path] = None
     windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT
+    large_inst_worker_socket: Optional[Path] = None
+    large_inst_worker_timeout_sec: int = 600
+    route_timeout_sec: int = DEFAULT_ROUTE_TIMEOUT_SEC
 
 
 def build_config(
@@ -63,6 +81,9 @@ def build_config(
     python_bin: Path,
     mac_windows_project_mount: Optional[Path] = None,
     windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT,
+    large_inst_worker_socket: Optional[Path] = None,
+    large_inst_worker_timeout_sec: int = 600,
+    route_timeout_sec: int = DEFAULT_ROUTE_TIMEOUT_SEC,
 ) -> MacMpsApiConfig:
     resolved_mount = Path(mac_windows_project_mount or CANONICAL_MAC_WINDOWS_PROJECT_MOUNT).expanduser().resolve()
     resolved_artifacts_root = Path(artifacts_root).expanduser().resolve()
@@ -80,12 +101,26 @@ def build_config(
         raise ValueError("mac_mps_api_artifacts_root_outside_windows_project_mount") from exc
     if not relative_artifacts_root.parts or relative_artifacts_root.parts[0] != "artifacts":
         raise ValueError("mac_mps_api_artifacts_root_must_be_under_windows_artifacts")
+    resolved_worker_socket = (
+        Path(large_inst_worker_socket).expanduser()
+        if large_inst_worker_socket is not None
+        else None
+    )
+    if resolved_worker_socket is not None and not resolved_worker_socket.is_socket():
+        raise ValueError(f"mac_mps_api_large_inst_worker_socket_unavailable:{resolved_worker_socket}")
+    if int(large_inst_worker_timeout_sec) <= 0:
+        raise ValueError("mac_mps_api_large_inst_worker_timeout_must_be_positive")
+    if int(route_timeout_sec) <= 0:
+        raise ValueError("mac_mps_api_route_timeout_must_be_positive")
     return MacMpsApiConfig(
         project_root=Path(project_root).expanduser().resolve(),
         artifacts_root=resolved_artifacts_root,
         python_bin=Path(python_bin).expanduser(),
         mac_windows_project_mount=resolved_mount,
         windows_project_root=str(windows_project_root),
+        large_inst_worker_socket=resolved_worker_socket,
+        large_inst_worker_timeout_sec=int(large_inst_worker_timeout_sec),
+        route_timeout_sec=int(route_timeout_sec),
     )
 
 
@@ -124,6 +159,26 @@ def resolve_job_output_dir(config: MacMpsApiConfig, requested_output: Any) -> Pa
     return output_dir
 
 
+def resolve_request_timeout_sec(payload: Mapping[str, Any], *, maximum_sec: int) -> int:
+    raw_value = payload.get("timeout_sec")
+    if raw_value in (None, "", 0, "0"):
+        return int(maximum_sec)
+    try:
+        timeout_sec = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timeout_sec must be an integer") from exc
+    if timeout_sec <= 0:
+        raise ValueError("timeout_sec must be positive")
+    if timeout_sec > int(maximum_sec):
+        raise ValueError(f"timeout_sec exceeds configured maximum: {maximum_sec}")
+    return timeout_sec
+
+
+def reserve_output_dir(output_dir: Path) -> None:
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(exist_ok=False)
+
+
 def build_demucs_export_command(
     *,
     config: MacMpsApiConfig,
@@ -151,6 +206,7 @@ def build_demucs_export_command(
 def _diagnostic_env() -> dict[str, str]:
     env = dict(os.environ)
     env["AIMUSIC_ALLOW_NATIVE_MAC_DIAGNOSTIC"] = "1"
+    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
     return env
 
 
@@ -164,6 +220,7 @@ def build_separator_export_command(
     route_id: str,
     source_audio_path: Path,
     output_dir: Path,
+    timeout_sec: Optional[int] = None,
 ) -> tuple[list[str], dict[str, str]]:
     normalized_route = str(route_id or "").strip()
     if normalized_route not in SUPPORTED_ROUTE_IDS:
@@ -180,6 +237,9 @@ def build_separator_export_command(
     repo_path = _vendor_path(config, "music_source_separation_training")
     command = [str(config.python_bin)]
     if normalized_route == MDX23C_ROUTE_ID:
+        mdx23c_timeout_sec = int(config.route_timeout_sec if timeout_sec is None else timeout_sec)
+        if mdx23c_timeout_sec <= 0:
+            raise ValueError("mdx23c timeout_sec must be positive")
         command.extend(
             [
                 str(tools_dir / "export_mdx23c_vocal_full.py"),
@@ -193,6 +253,8 @@ def build_separator_export_command(
                 str(_vendor_path(config, "mdx23c_vocals_official", "model_vocals_mdx23c_sdr_10.17.ckpt")),
                 "--device-id",
                 "0",
+                "--timeout-sec",
+                str(mdx23c_timeout_sec),
             ]
         )
     elif normalized_route == MELBAND_ROUTE_ID:
@@ -218,6 +280,60 @@ def build_separator_export_command(
                 "0",
             ]
         )
+    elif normalized_route == VIPERX_MELBAND_ROUTE_ID:
+        command.extend(
+            [
+                str(tools_dir / "export_melband_vocal_full.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--repo-path",
+                str(_vendor_path(config, "mel_band_roformer_vocal_model")),
+                "--config-path",
+                str(
+                    _vendor_path(
+                        config,
+                        "melband_roformer_viperx_11436",
+                        "model_mel_band_roformer_ep_3005_sdr_11.4360.yaml",
+                    )
+                ),
+                "--model-path",
+                str(
+                    _vendor_path(
+                        config,
+                        "melband_roformer_viperx_11436",
+                        "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+                    )
+                ),
+                "--manifest-model-id",
+                VIPERX_MELBAND_ROUTE_ID,
+                "--manifest-model-display-name",
+                "Audio Separator MelBand RoFormer ViperX-11.436 checkpoint",
+                "--inference-batch-size",
+                "1",
+                "--device-id",
+                "0",
+            ]
+        )
+    elif normalized_route == BECRUILY_KARAOKE_ROUTE_ID:
+        command.extend(
+            [
+                str(tools_dir / "export_melband_vocal_full.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--repo-path",
+                str(_vendor_path(config, "mel_band_roformer_vocal_model")),
+                "--config-path",
+                str(_vendor_path(config, "becruily_karaoke", "config_karaoke_becruily.yaml")),
+                "--model-path",
+                str(_vendor_path(config, "becruily_karaoke", "mel_band_roformer_karaoke_becruily.ckpt")),
+                "--manifest-model-id",
+                BECRUILY_KARAOKE_ROUTE_ID,
+                "--manifest-model-display-name",
+                "Becruily MelBand RoFormer karaoke checkpoint",
+                "--device-id",
+                "0",
+            ]
+        )
     elif normalized_route == BECRUILY_INSTRUMENTAL_ROUTE_ID:
         command.extend(
             [
@@ -238,6 +354,35 @@ def build_separator_export_command(
                 "0",
             ]
         )
+    elif normalized_route == FV7Z_INSTRUMENTAL_ROUTE_ID:
+        model_root = _vendor_path(config, "melband_inst_fv7z_diag")
+        command.extend(
+            [
+                str(tools_dir / "export_melband_vocal_full.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--repo-path",
+                str(_vendor_path(config, "mel_band_roformer_vocal_model")),
+                "--config-path",
+                str(model_root / "config.yaml"),
+                "--model-path",
+                str(model_root / "mel_band_roformer_instrumental_fv7z_gabox.ckpt"),
+                "--model-source-metadata-path",
+                str(model_root / "source.json"),
+                "--manifest-model-id",
+                FV7Z_INSTRUMENTAL_ROUTE_ID,
+                "--manifest-model-display-name",
+                "MelBand RoFormer FV7z dedicated instrumental checkpoint",
+                "--inference-chunk-size",
+                "485100",
+                "--inference-batch-size",
+                "1",
+                "--num-overlap",
+                "2",
+                "--device-id",
+                "0",
+            ]
+        )
     elif normalized_route == SCNET_ROUTE_ID:
         command.extend(
             [
@@ -252,8 +397,89 @@ def build_separator_export_command(
                 str(_vendor_path(config, "scnet_xl_ihf", "model_scnet_ep_36_sdr_10.0891.ckpt")),
                 "--device-id",
                 "0",
+                "--chunk-size",
+                SCNET_MPS_CHUNK_SIZE,
+                "--batch-size",
+                SCNET_MPS_BATCH_SIZE,
+                "--num-overlap",
+                SCNET_MPS_NUM_OVERLAP,
                 "--timeout-sec",
                 SCNET_MPS_TIMEOUT_SEC,
+            ]
+        )
+    elif normalized_route == LARGE_INST_ROUTE_ID:
+        model_root = _vendor_path(config, "bs_roformer_large_inst_diag")
+        command.extend(
+            [
+                str(tools_dir / "export_instrumental_resurrection_minus.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--runtime-repo",
+                str(repo_path),
+                "--config-path",
+                str(model_root / "config.yaml"),
+                "--model-path",
+                str(model_root / "bs_large_v2_inst.ckpt"),
+                "--model-implementation-path",
+                str(model_root / "bs_roformer.py"),
+                "--model-source-metadata-path",
+                str(model_root / "source.json"),
+                "--model-name",
+                LARGE_INST_ROUTE_ID,
+                "--target-instrument",
+                "instrument",
+                "--device",
+                "mps",
+                "--inference-chunk-size",
+                "529200",
+                "--inference-batch-size",
+                "1",
+                "--inference-num-overlap",
+                "1",
+                "--minus-output-name",
+                "instrumental.flac",
+                "--progress-name",
+                "progress.jsonl",
+            ]
+        )
+        if config.large_inst_worker_socket is not None:
+            command.extend(
+                [
+                    "--resident-worker-socket",
+                    str(config.large_inst_worker_socket),
+                    "--resident-worker-timeout-sec",
+                    str(config.large_inst_worker_timeout_sec),
+                ]
+            )
+    elif normalized_route == RESURRECTION_INST_ROUTE_ID:
+        model_root = _vendor_path(config, "bs_roformer_instrumental_resurrection_manual")
+        command.extend(
+            [
+                str(tools_dir / "export_instrumental_resurrection_minus.py"),
+                str(source_audio_path),
+                str(output_dir),
+                "--runtime-repo",
+                str(repo_path),
+                "--config-path",
+                str(model_root / "config_bs_roformer_instrumental_resurrection_unwa.yaml"),
+                "--model-path",
+                str(model_root / "bs_roformer_instrumental_resurrection_unwa.ckpt"),
+                "--model-name",
+                RESURRECTION_INST_ROUTE_ID,
+                "--target-instrument",
+                "other",
+                "--device",
+                "mps",
+                "--inference-chunk-size",
+                "176400",
+                "--inference-batch-size",
+                "1",
+                "--inference-num-overlap",
+                "2",
+                "--minus-output-name",
+                "instrumental.flac",
+                "--progress-name",
+                "progress.jsonl",
             ]
         )
     return command, _diagnostic_env()
@@ -327,6 +553,7 @@ def _summarize_stems(run_dir: Path) -> dict[str, Any]:
             "peak": info.get("peak"),
             "role": info.get("role"),
             "source": info.get("source"),
+            "source_stems": info.get("source_stems"),
             "model_output": info.get("model_output"),
             "residual_companion": info.get("residual_companion"),
             "alias_of": info.get("alias_of"),
@@ -354,6 +581,25 @@ def _summarize_stems(run_dir: Path) -> dict[str, Any]:
 
 def _source_info_for_requested_stem(summary: Mapping[str, Any], stem: str) -> dict[str, Any] | None:
     available = summary.get("stems") if isinstance(summary.get("stems"), dict) else {}
+    if stem == "instrumental":
+        instrumental_info = available.get("instrumental") if isinstance(available, dict) else None
+        if isinstance(instrumental_info, dict):
+            return instrumental_info
+        minus_info = available.get("minus") if isinstance(available, dict) else None
+        source_stems = (
+            [str(value) for value in minus_info.get("source_stems") or []]
+            if isinstance(minus_info, dict)
+            else []
+        )
+        if (
+            isinstance(minus_info, dict)
+            and str(summary.get("target_stem") or "").strip() == "minus"
+            and str(minus_info.get("source") or "") == "instrumental_resurrection_model_output"
+            and tuple(source_stems) in {("instrument",), ("other",)}
+            and str(minus_info.get("role") or "") != "product_alias"
+        ):
+            return minus_info
+        return None
     if stem != "minus":
         info = available.get(stem) if isinstance(available, dict) else None
         return info if isinstance(info, dict) else None
@@ -396,6 +642,21 @@ def _source_info_for_requested_stem(summary: Mapping[str, Any], stem: str) -> di
     return None
 
 
+def _resident_worker_evidence(run_dir: Path) -> dict[str, Any] | None:
+    manifest_path = run_dir / "stem_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    execution = manifest.get("execution_contract")
+    if not isinstance(execution, dict):
+        return None
+    evidence = execution.get("resident_worker_evidence")
+    return dict(evidence) if isinstance(evidence, dict) else None
+
+
 def _persistent_separator_response(
     *,
     output_dir: Path,
@@ -410,6 +671,9 @@ def _persistent_separator_response(
     mount_preflight: Optional[dict[str, Any]] = None,
     missing_stems: Optional[list[str]] = None,
     copied_stems: Optional[dict[str, str]] = None,
+    resident_backend_used: bool = False,
+    resident_capable: bool = False,
+    resident_worker_evidence: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     response = {
         "schema": "persistent_separator_response.v1",
@@ -429,8 +693,8 @@ def _persistent_separator_response(
         "require_gpu": bool(require_gpu),
         "elapsed_sec": float(elapsed_sec),
         "mac_mps_backend_used": True,
-        "resident_backend_used": False,
-        "resident_capable": False,
+        "resident_backend_used": bool(resident_backend_used),
+        "resident_capable": bool(resident_capable),
         "delivery_allowed": False,
         "can_accept_delivery": False,
         "presentation_status": "diagnostic_mps_api_only",
@@ -439,6 +703,8 @@ def _persistent_separator_response(
         response["mount_preflight"] = mount_preflight
         response["mac_windows_project_mount"] = str(mount_preflight.get("mac_windows_project_mount") or "")
         response["windows_output_path"] = str(mount_preflight.get("windows_output_path") or "")
+    if resident_worker_evidence is not None:
+        response["resident_worker_evidence"] = resident_worker_evidence
     return response
 
 
@@ -468,11 +734,30 @@ class MacMpsJobRunner:
         self.config = config
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._access_log_lock = threading.Lock()
+        self._access_log_failure_count = 0
+        self._access_log_last_error = ""
+
+    @property
+    def access_log_path(self) -> Path:
+        return self.config.artifacts_root / "mac_api" / "server.log"
+
+    def record_access_log(self, message: str) -> None:
+        try:
+            with self._access_log_lock:
+                self.access_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.access_log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(message.rstrip("\n") + "\n")
+        except OSError as exc:
+            with self._lock:
+                self._access_log_failure_count += 1
+                self._access_log_last_error = f"{type(exc).__name__}: {exc}"
 
     def start_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         source_audio_path = Path(str(payload["source_audio_path"])).expanduser().resolve()
         route_id = str(payload.get("route_id") or payload.get("model_name") or DEFAULT_MODEL_NAME)
         model_name = str(payload.get("model_name") or route_id)
+        timeout_sec = resolve_request_timeout_sec(payload, maximum_sec=self.config.route_timeout_sec)
         job_id = make_job_id(str(source_audio_path))
         output_subdir = str(payload.get("output_subdir") or f"mac_api/{job_id}")
         output_dir = resolve_job_output_dir(self.config, output_subdir)
@@ -497,6 +782,24 @@ class MacMpsJobRunner:
             with self._lock:
                 self._jobs[job_id] = manifest
             return manifest
+        try:
+            reserve_output_dir(output_dir)
+        except FileExistsError:
+            manifest = build_job_manifest(
+                job_id=job_id,
+                status="blocked",
+                source_audio_path=source_audio_path,
+                output_dir=output_dir,
+                model_name=model_name,
+                route_id=route_id,
+                returncode=73,
+                error="output_dir_already_exists",
+                mount_preflight=mount_preflight,
+            )
+            manifest["blocked_reason"] = "output_dir_already_exists"
+            with self._lock:
+                self._jobs[job_id] = manifest
+            return manifest
         manifest = build_job_manifest(
             job_id=job_id,
             status="queued",
@@ -506,13 +809,12 @@ class MacMpsJobRunner:
             route_id=route_id,
             mount_preflight=mount_preflight,
         )
-        output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(output_dir / "manifest.json", manifest)
         with self._lock:
             self._jobs[job_id] = manifest
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, source_audio_path, output_dir, model_name, route_id, mount_preflight),
+            args=(job_id, source_audio_path, output_dir, model_name, route_id, mount_preflight, timeout_sec),
             daemon=True,
         )
         thread.start()
@@ -532,6 +834,43 @@ class MacMpsJobRunner:
                 return candidate
         return None
 
+    def health(self) -> dict[str, Any]:
+        with self._lock:
+            access_log_failure_count = self._access_log_failure_count
+            access_log_last_error = self._access_log_last_error
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "schema": "mac_mps_separator_api_health.v1",
+            "large_inst_worker_configured": self.config.large_inst_worker_socket is not None,
+            "access_log": {
+                "path": str(self.access_log_path),
+                "status": "ok" if access_log_failure_count == 0 else "degraded",
+                "write_failure_count": access_log_failure_count,
+                "last_error": access_log_last_error,
+            },
+        }
+        if access_log_failure_count:
+            payload["status"] = "degraded"
+        if self.config.large_inst_worker_socket is None:
+            return payload
+        try:
+            worker_health = send_request(
+                self.config.large_inst_worker_socket,
+                {"action": "health"},
+                2.0,
+            )
+        except Exception as exc:
+            payload["status"] = "degraded"
+            payload["large_inst_worker"] = {
+                "status": "unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            return payload
+        payload["large_inst_worker"] = worker_health
+        if worker_health.get("status") != "ready":
+            payload["status"] = "degraded"
+        return payload
+
     def separate(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         started_at = time.perf_counter()
         route_id = str(payload.get("route_id") or payload.get("model_name") or DEFAULT_MODEL_NAME)
@@ -541,7 +880,20 @@ class MacMpsJobRunner:
         stems = [str(stem) for stem in payload.get("stems") or []]
         requested_device = str(payload.get("device") or "").strip().lower()
         require_gpu = bool(payload.get("require_gpu", True))
-        timeout_sec = int(payload.get("timeout_sec") or 0)
+        try:
+            timeout_sec = resolve_request_timeout_sec(payload, maximum_sec=self.config.route_timeout_sec)
+        except ValueError as exc:
+            return 400, _persistent_separator_response(
+                output_dir=output_dir,
+                route_id=route_id,
+                stems=stems,
+                status="blocked",
+                returncode=64,
+                reason=str(exc),
+                elapsed_sec=round(time.perf_counter() - started_at, 6),
+                requested_device=requested_device,
+                require_gpu=require_gpu,
+            )
         if not output_dir_raw:
             return 400, _persistent_separator_response(
                 output_dir=output_dir,
@@ -572,9 +924,23 @@ class MacMpsJobRunner:
                 require_gpu=require_gpu,
                 mount_preflight=mount_preflight,
             )
-            _write_json(output_dir / "persistent_separator.json", response)
             return 400, response
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            reserve_output_dir(output_dir)
+        except FileExistsError:
+            response = _persistent_separator_response(
+                output_dir=output_dir,
+                route_id=route_id,
+                stems=stems,
+                status="blocked",
+                returncode=73,
+                reason="output_dir_already_exists",
+                elapsed_sec=round(time.perf_counter() - started_at, 6),
+                requested_device=requested_device,
+                require_gpu=require_gpu,
+                mount_preflight=mount_preflight,
+            )
+            return 409, response
         progress_path = output_dir / "progress.jsonl"
         _append_progress(
             progress_path,
@@ -609,6 +975,7 @@ class MacMpsJobRunner:
                 route_id=route_id,
                 source_audio_path=source_audio_path,
                 output_dir=run_dir,
+                timeout_sec=timeout_sec,
             )
         except ValueError as exc:
             response = _persistent_separator_response(
@@ -628,18 +995,43 @@ class MacMpsJobRunner:
             return 400, response
         run_log_path = output_dir / "run.log"
         _append_progress(progress_path, "mps_export", "start", command=command, timeout_sec=timeout_sec)
-        with run_log_path.open("w", encoding="utf-8") as log_handle:
-            completed = subprocess.run(
-                command,
-                cwd=str(self.config.project_root / "ml_worker_improved"),
-                env=env,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-                timeout=timeout_sec if timeout_sec > 0 else None,
+        try:
+            with run_log_path.open("w", encoding="utf-8") as log_handle:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(self.config.project_root / "ml_worker_improved"),
+                    env=env,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    timeout=timeout_sec,
+                )
+        except subprocess.TimeoutExpired:
+            response = _persistent_separator_response(
+                output_dir=output_dir,
+                route_id=route_id,
+                stems=stems,
+                status="blocked",
+                returncode=124,
+                reason=f"export_timeout:{timeout_sec}s",
+                elapsed_sec=round(time.perf_counter() - started_at, 6),
+                requested_device=requested_device,
+                require_gpu=require_gpu,
+                mount_preflight=mount_preflight,
             )
+            _write_json(output_dir / "persistent_separator.json", response)
+            _append_progress(
+                progress_path,
+                "mps_export",
+                "timeout",
+                timeout_sec=timeout_sec,
+                elapsed_sec=response["elapsed_sec"],
+            )
+            return 504, response
         copied, missing = _copy_stems_for_persistent_response(run_dir, output_dir, stems)
+        resident_evidence = _resident_worker_evidence(run_dir)
+        resident_used = resident_evidence is not None
         status = "ok" if completed.returncode == 0 and not missing else "blocked"
         reason = "" if status == "ok" else ("missing_required_stems" if completed.returncode == 0 else f"export failed rc={completed.returncode}")
         response = _persistent_separator_response(
@@ -655,6 +1047,11 @@ class MacMpsJobRunner:
             mount_preflight=mount_preflight,
             missing_stems=missing,
             copied_stems=copied,
+            resident_backend_used=resident_used,
+            resident_capable=(
+                route_id == LARGE_INST_ROUTE_ID and self.config.large_inst_worker_socket is not None
+            ),
+            resident_worker_evidence=resident_evidence,
         )
         _write_json(output_dir / "persistent_separator.json", response)
         _append_progress(
@@ -675,6 +1072,7 @@ class MacMpsJobRunner:
         model_name: str,
         route_id: str,
         mount_preflight: dict[str, Any],
+        timeout_sec: int,
     ) -> None:
         progress_path = output_dir / "progress.jsonl"
         run_dir = output_dir / "run"
@@ -713,19 +1111,44 @@ class MacMpsJobRunner:
             route_id=route_id,
             source_audio_path=source_audio_path,
             output_dir=run_dir,
+            timeout_sec=timeout_sec,
         )
-        _append_progress(progress_path, "mps_export", "start", command=command)
+        _append_progress(progress_path, "mps_export", "start", command=command, timeout_sec=timeout_sec)
         started_at = time.perf_counter()
-        with run_log_path.open("w", encoding="utf-8") as log_handle:
-            completed = subprocess.run(
-                command,
-                cwd=str(self.config.project_root / "ml_worker_improved"),
-                env=env,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
+        try:
+            with run_log_path.open("w", encoding="utf-8") as log_handle:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(self.config.project_root / "ml_worker_improved"),
+                    env=env,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    timeout=timeout_sec,
+                )
+        except subprocess.TimeoutExpired:
+            elapsed_sec = round(time.perf_counter() - started_at, 3)
+            error = f"export_timeout:{timeout_sec}s"
+            _append_progress(
+                progress_path,
+                "mps_export",
+                "timeout",
+                timeout_sec=timeout_sec,
+                elapsed_sec=elapsed_sec,
             )
+            self._finish(
+                job_id,
+                source_audio_path,
+                output_dir,
+                model_name,
+                route_id,
+                status="failed",
+                returncode=124,
+                error=error,
+                mount_preflight=mount_preflight,
+            )
+            return
         elapsed_sec = round(time.perf_counter() - started_at, 3)
         _append_progress(
             progress_path,
@@ -771,7 +1194,15 @@ class MacMpsJobRunner:
             error=error,
             mount_preflight=mount_preflight,
         )
-        manifest.update(_summarize_stems(output_dir / "run"))
+        run_dir = output_dir / "run"
+        manifest.update(_summarize_stems(run_dir))
+        resident_evidence = _resident_worker_evidence(run_dir)
+        manifest["resident_capable"] = (
+            route_id == LARGE_INST_ROUTE_ID and self.config.large_inst_worker_socket is not None
+        )
+        manifest["resident_backend_used"] = resident_evidence is not None
+        if resident_evidence is not None:
+            manifest["resident_worker_evidence"] = resident_evidence
         _write_json(output_dir / "manifest.json", manifest)
         with self._lock:
             self._jobs[job_id] = manifest
@@ -779,6 +1210,10 @@ class MacMpsJobRunner:
 
 class MacMpsApiHandler(BaseHTTPRequestHandler):
     runner: MacMpsJobRunner
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        message = f"{self.address_string()} - - [{self.log_date_time_string()}] {fmt % args}"
+        self.runner.record_access_log(message)
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -791,7 +1226,7 @@ class MacMpsApiHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler API
         parsed = urlparse(self.path)
         if parsed.path == "/health":
-            self._send_json(200, {"status": "ok", "schema": "mac_mps_separator_api_health.v1"})
+            self._send_json(200, self.runner.health())
             return
         if parsed.path.startswith("/jobs/"):
             job_id = parsed.path.rsplit("/", 1)[-1]
@@ -841,6 +1276,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python-bin", type=Path, required=True)
     parser.add_argument("--mac-windows-project-mount", type=Path, default=Path(CANONICAL_MAC_WINDOWS_PROJECT_MOUNT))
     parser.add_argument("--windows-project-root", default=DEFAULT_WINDOWS_PROJECT_ROOT)
+    parser.add_argument("--large-inst-worker-socket", type=Path)
+    parser.add_argument("--large-inst-worker-timeout-sec", type=int, default=600)
+    parser.add_argument("--route-timeout-sec", type=int, default=DEFAULT_ROUTE_TIMEOUT_SEC)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser.parse_args()
@@ -855,6 +1293,9 @@ def main() -> None:
             python_bin=args.python_bin,
             mac_windows_project_mount=args.mac_windows_project_mount,
             windows_project_root=args.windows_project_root,
+            large_inst_worker_socket=args.large_inst_worker_socket,
+            large_inst_worker_timeout_sec=args.large_inst_worker_timeout_sec,
+            route_timeout_sec=args.route_timeout_sec,
         ),
         host=str(args.host),
         port=int(args.port),

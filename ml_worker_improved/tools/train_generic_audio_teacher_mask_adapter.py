@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -16,14 +17,21 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 from docker_runtime import require_docker_runtime  # noqa: E402
+from mac_windows_mount_preflight import (  # noqa: E402
+    DEFAULT_WINDOWS_PROJECT_ROOT,
+    preflight_mac_windows_project_mount,
+)
 from pseudo_teacher_contract import PSEUDO_TEACHER_SCHEMA  # noqa: E402
 from train_teacher_mask_separator import (  # noqa: E402
     TeacherMaskTrainConfig,
     _require_cuda_memory_available,
     _select_device,
+    acceleration_mode,
     apply_teacher_mask,
     audio_summary,
+    fit_audio_frames,
     fit_audio_pair,
+    is_accelerator_device,
     read_audio,
     resample_audio,
     save_checkpoint,
@@ -64,11 +72,11 @@ def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
 
 
 def progress(path: Path, event: str, *, device: str, **fields: Any) -> None:
-    uses_gpu = str(device) == "cuda"
+    uses_gpu = is_accelerator_device(device)
     payload = {
         "event": event,
         "elapsed_sec": round(time.monotonic() - START_TIME, 3),
-        "expected_acceleration_mode": "gpu_training" if uses_gpu else "cpu_diagnostic_training",
+        "expected_acceleration_mode": acceleration_mode(device, phase="training"),
         "gpu_training_required": uses_gpu,
         "gpu_training_skipped": not uses_gpu,
     }
@@ -189,6 +197,9 @@ def _fingerprint_payload(
                 "source_audio_path": str(row.get("source_audio_path") or ""),
                 "target_audio_path": str(row.get("target_audio_path") or ""),
                 "pseudo_teacher": row.get("pseudo_teacher") is True,
+                "identity_preservation_example": _is_identity_preservation_row(row),
+                "conditioning_audio_paths": [str(path) for path in _conditioning_audio_paths(row)],
+                "conditioning_model_ids": [str(value) for value in row.get("conditioning_model_ids") or []],
             }
         )
     payload.append(
@@ -246,8 +257,9 @@ def load_training_pairs(
     *,
     progress_path: Path,
     device: str,
-) -> tuple[list[tuple[np.ndarray, np.ndarray]], list[dict[str, Any]]]:
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], list[list[np.ndarray]], list[dict[str, Any]]]:
     pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    conditioning_groups: list[list[np.ndarray]] = []
     summaries: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         source_path = resolve_existing_path(row["source_audio_path"])
@@ -259,7 +271,18 @@ def load_training_pairs(
             target_audio = resample_audio(target_audio, target_sample_rate, source_sample_rate)
             target_resampled = True
         source_audio, target_audio = fit_audio_pair(source_audio, target_audio)
+        conditioning_audio: list[np.ndarray] = []
+        conditioning_paths: list[str] = []
+        for raw_conditioning_path in _conditioning_audio_paths(row):
+            conditioning_path = resolve_existing_path(raw_conditioning_path)
+            conditioning, conditioning_sample_rate = read_audio(conditioning_path)
+            if conditioning_sample_rate != source_sample_rate:
+                conditioning = resample_audio(conditioning, conditioning_sample_rate, source_sample_rate)
+            conditioning = fit_audio_frames(conditioning, int(source_audio.shape[0]))
+            conditioning_audio.append(conditioning)
+            conditioning_paths.append(str(conditioning_path))
         pairs.append((source_audio, target_audio))
+        conditioning_groups.append(conditioning_audio)
         summary = {
             "index": index,
             "id": str(row.get("id") or row.get("example_id") or ""),
@@ -271,11 +294,27 @@ def load_training_pairs(
             "target_resampled_to_source": target_resampled,
             "frame_count": int(source_audio.shape[0]),
             "pseudo_teacher": row.get("pseudo_teacher") is True,
+            "identity_preservation_example": _is_identity_preservation_row(row),
+            "conditioning_audio_paths": conditioning_paths,
+            "conditioning_model_ids": [str(value) for value in row.get("conditioning_model_ids") or []],
+            "conditioning_audio_count": len(conditioning_audio),
             "schema": str(row.get("schema") or ""),
         }
         summaries.append(summary)
         progress(progress_path, "audio_pair_loaded", device=device, **summary)
-    return pairs, summaries
+    return pairs, conditioning_groups, summaries
+
+
+def _is_identity_preservation_row(row: dict[str, Any]) -> bool:
+    corruption = row.get("corruption")
+    return isinstance(corruption, dict) and str(corruption.get("variant") or "").strip().lower() == "identity"
+
+
+def _conditioning_audio_paths(row: dict[str, Any]) -> list[str]:
+    raw_paths = row.get("conditioning_audio_paths") or []
+    if not isinstance(raw_paths, list):
+        raise ValueError("conditioning_audio_paths must be a list")
+    return [str(path) for path in raw_paths]
 
 
 def train_generic_audio_teacher_mask_adapter(
@@ -313,9 +352,28 @@ def train_generic_audio_teacher_mask_adapter(
     source_candidate_family_filter: str = "",
     seed: int = TeacherMaskTrainConfig.seed,
     device: str = TeacherMaskTrainConfig.device,
+    mac_windows_project_mount: Path | None = None,
+    windows_project_root: str = DEFAULT_WINDOWS_PROJECT_ROOT,
     command_args: list[str] | None = None,
 ) -> dict[str, Any]:
     stem = validate_stem_name(stem)
+    if str(device).strip().lower() == "mps":
+        if mac_windows_project_mount is None:
+            env_mount = str(os.environ.get("AIMUSIC_MAC_PROJECT_ROOT") or "").strip()
+            mac_windows_project_mount = Path(env_mount) if env_mount else None
+        mount_preflight = preflight_mac_windows_project_mount(
+            mac_windows_project_mount=mac_windows_project_mount,
+            output_path=output_dir,
+            windows_project_root=windows_project_root,
+        )
+        if mount_preflight.get("preflight_status") != "passed":
+            raise RuntimeError(str(mount_preflight.get("blocked_reason") or "Mac mount preflight failed"))
+    else:
+        mount_preflight = {
+            "schema": "mac_windows_project_mount_preflight.v1",
+            "preflight_status": "not_required_non_mps",
+            "probe_status": "not_run",
+        }
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / PROGRESS_NAME
     exclude_holdout_track_ids = set(exclude_holdout_track_ids or set())
@@ -364,6 +422,11 @@ def train_generic_audio_teacher_mask_adapter(
         source_candidate_family_filter=str(source_candidate_family_filter or ""),
     )
     selected_rows = selected_verified_rows + selected_pseudo_rows
+    identity_pair_flags = [_is_identity_preservation_row(row) for row in selected_rows]
+    conditioning_model_id_rows = [tuple(str(value) for value in row.get("conditioning_model_ids") or []) for row in selected_rows]
+    conditioning_model_ids = list(conditioning_model_id_rows[0]) if conditioning_model_id_rows else []
+    if any(list(model_ids) != conditioning_model_ids for model_ids in conditioning_model_id_rows):
+        raise ValueError("all selected rows must use the same ordered conditioning_model_ids")
     training_track_ids = sorted({row_training_group_id(row) for row in selected_rows if row_training_group_id(row)})
     pseudo_teacher_track_ids = sorted(
         {row_training_group_id(row) for row in selected_pseudo_rows if row_training_group_id(row)}
@@ -388,6 +451,7 @@ def train_generic_audio_teacher_mask_adapter(
         excluded_holdout_track_ids=sorted(exclude_holdout_track_ids),
         max_examples_per_track=int(max_examples_per_track),
         source_candidate_family_filter=str(source_candidate_family_filter or ""),
+        identity_preservation_example_count=sum(identity_pair_flags),
     )
     if len(training_track_ids) < int(min_unique_tracks):
         raise ValueError(f"insufficient unique tracks for shared adapter: {len(training_track_ids)} < {min_unique_tracks}")
@@ -400,13 +464,20 @@ def train_generic_audio_teacher_mask_adapter(
             "stem": stem,
             "scope": scope,
             "device": str(device),
-            "expected_acceleration_mode": "gpu_training" if str(device) == "cuda" else "cpu_diagnostic_training",
-            "gpu_training_required": str(device) == "cuda",
-            "gpu_training_skipped": str(device) != "cuda",
+            "expected_acceleration_mode": acceleration_mode(device, phase="training"),
+            "gpu_training_required": is_accelerator_device(device),
+            "gpu_training_skipped": not is_accelerator_device(device),
         },
         phase="generic_audio_shared_adapter_training",
     )
-    pairs, example_summaries = load_training_pairs(selected_rows, progress_path=progress_path, device=str(device))
+    pairs, conditioning_groups, example_summaries = load_training_pairs(
+        selected_rows,
+        progress_path=progress_path,
+        device=str(device),
+    )
+    conditioning_audio_count = len(conditioning_groups[0]) if conditioning_groups else 0
+    if conditioning_audio_count != len(conditioning_model_ids):
+        raise ValueError("conditioning_model_ids must match conditioning_audio_paths")
     adapter_fingerprint = fingerprint_rows(
         selected_rows,
         stem=stem,
@@ -421,8 +492,16 @@ def train_generic_audio_teacher_mask_adapter(
         progress_path=progress_path,
         progress_context={"adapter_id": adapter_id, "stem": stem, "scope": scope},
         max_frames_per_pair=int(max_frames_per_pair),
+        identity_pair_flags=identity_pair_flags,
+        conditioning_audio_groups=conditioning_groups,
     )
-    preview_audio, apply_diagnostics = apply_teacher_mask(pairs[0][0], model=model, metadata=metadata, config=config)
+    preview_audio, apply_diagnostics = apply_teacher_mask(
+        pairs[0][0],
+        model=model,
+        metadata=metadata,
+        config=config,
+        conditioning_audio=conditioning_groups[0],
+    )
     preview_path = output_dir / f"01_shared_teacher_mask_training_preview_{stem}.flac"
     write_flac(preview_path, preview_audio, int(example_summaries[0]["source_sample_rate"]))
     checkpoint_path = output_dir / f"{stem}_shared_teacher_mask_adapter.pt"
@@ -448,11 +527,16 @@ def train_generic_audio_teacher_mask_adapter(
         "verified_training_example_count": len(selected_verified_rows),
         "pseudo_teacher_training_example_count": len(selected_pseudo_rows),
         "pseudo_teacher_track_ids": pseudo_teacher_track_ids,
+        "conditioning_audio_count": conditioning_audio_count,
+        "conditioning_model_ids": conditioning_model_ids,
         "source_audio_path": str(selected_rows[0]["source_audio_path"]),
         "target_audio_path": str(selected_rows[0]["target_audio_path"]),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": checkpoint_sha256,
         "output_dir": str(output_dir),
+        "mount_preflight": mount_preflight,
+        "mac_windows_project_mount": str(mac_windows_project_mount or ""),
+        "windows_project_root": str(windows_project_root),
         "manifest_path": str(output_dir / MANIFEST_NAME),
         "output_stem_paths": [str(preview_path)],
         "device_used": float(train_diagnostics.get("device_used", 0.0)),
@@ -479,6 +563,8 @@ def train_generic_audio_teacher_mask_adapter(
         "training_track_ids": training_track_ids,
         "training_source_candidate_families": training_source_candidate_families,
         "pseudo_teacher_track_ids": pseudo_teacher_track_ids,
+        "conditioning_audio_count": conditioning_audio_count,
+        "conditioning_model_ids": conditioning_model_ids,
         "excluded_holdout_track_ids": sorted(exclude_holdout_track_ids),
         "adapter_fingerprint": adapter_fingerprint,
         "checkpoint_path": str(checkpoint_path),
@@ -501,6 +587,11 @@ def train_generic_audio_teacher_mask_adapter(
                 "leakage_suppression_weight": float(config.leakage_suppression_weight),
                 "magnitude_loss_weight": float(config.magnitude_loss_weight),
                 "source_preservation_weight": float(config.source_preservation_weight),
+                "source_preservation_scope": str(train_diagnostics.get("source_preservation_scope") or ""),
+                "identity_preservation_example_count": int(sum(identity_pair_flags)),
+                "conditioning_audio_count": conditioning_audio_count,
+                "conditioning_model_ids": conditioning_model_ids,
+                "conditioning_feature_schema": str(train_diagnostics.get("conditioning_feature_schema") or "none"),
                 "source_feature_memory_neighbors": int(config.source_feature_memory_neighbors),
                 "source_feature_memory_chunk_size": int(config.source_feature_memory_chunk_size),
                 "source_feature_memory_projection_dim": int(config.source_feature_memory_projection_dim),
@@ -528,6 +619,10 @@ def train_generic_audio_teacher_mask_adapter(
             "source_candidate_family_specialist": bool(str(source_candidate_family_filter or "")),
             "source_feature_memory_generalization_claim": int(config.source_feature_memory_neighbors) > 0,
             "production_no_reference_generalization_claim": False,
+            "source_preservation_scoped_to_declared_identity_examples": True,
+            "conditioning_audio_required_at_application": conditioning_audio_count > 0,
+            "conditioning_audio_count": conditioning_audio_count,
+            "conditioning_is_permutation_stable": True,
         },
         "training_started": True,
         "fine_tune_started": True,
@@ -600,6 +695,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-candidate-family-filter", default="")
     parser.add_argument("--seed", type=int, default=TeacherMaskTrainConfig.seed)
     parser.add_argument("--device", default=TeacherMaskTrainConfig.device)
+    parser.add_argument("--mac-windows-project-mount", type=Path)
+    parser.add_argument("--windows-project-root", default=DEFAULT_WINDOWS_PROJECT_ROOT)
     return parser
 
 
@@ -646,6 +743,8 @@ def main(argv: list[str] | None = None) -> int:
         source_candidate_family_filter=str(args.source_candidate_family_filter or ""),
         seed=int(args.seed),
         device=str(args.device),
+        mac_windows_project_mount=args.mac_windows_project_mount,
+        windows_project_root=str(args.windows_project_root),
         command_args=command_args,
     )
     print(json.dumps({"manifest_path": str(args.output_dir / MANIFEST_NAME), "adapter_id": manifest["adapter_id"]}, indent=2))

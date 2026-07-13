@@ -186,9 +186,13 @@ def build_full_track_segment_switch_candidate(
     allow_select_alternative: bool = False,
     block_severe_reasons: bool = True,
     allow_low_activity_proxy_gap: bool = False,
+    prefer_base_when_safe: bool = False,
 ) -> dict[str, Any]:
     candidates_by_id = {str(row.get("candidate_id") or ""): row for row in candidate_rows if row.get("candidate_id")}
-    manifest = base_manifest(candidate_rows, base_candidate_id, output_dir)
+    manifest = {
+        **base_manifest(candidate_rows, base_candidate_id, output_dir),
+        "selection_prefers_safe_base": bool(prefer_base_when_safe),
+    }
     base_row = candidates_by_id.get(base_candidate_id)
     if base_row is None:
         return {
@@ -213,6 +217,27 @@ def build_full_track_segment_switch_candidate(
         block_severe_reasons=block_severe_reasons,
         allow_low_activity_proxy_gap=allow_low_activity_proxy_gap,
     )
+    if prefer_base_when_safe:
+        base_selected, _ = best_safe_windows_for_score(
+            [row for row in windowed_judge_rows if str(row.get("candidate_id") or "") == base_candidate_id],
+            min_window_score=min_window_score,
+            score_field=selection_score_field,
+            decision_field=selection_decision_field,
+            allow_select_alternative=allow_select_alternative,
+            block_severe_reasons=block_severe_reasons,
+            allow_low_activity_proxy_gap=allow_low_activity_proxy_gap,
+        )
+        base_by_window = {
+            (float(row["window_start_sec"]), float(row["window_duration_sec"])): row
+            for row in base_selected
+        }
+        selected = [
+            base_by_window.get(
+                (float(row["window_start_sec"]), float(row["window_duration_sec"])),
+                row,
+            )
+            for row in selected
+        ]
     selected = [
         {
             **row,
@@ -358,6 +383,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--allow-select-alternative", action="store_true")
     parser.add_argument("--allow-low-activity-proxy-gap", action="store_true")
     parser.add_argument("--ignore-severe-reasons-for-selection", action="store_true")
+    parser.add_argument("--prefer-base-when-safe", action="store_true")
     args = parser.parse_args(argv)
     manifest = build_full_track_segment_switch_candidate(
         list(iter_jsonl(args.candidate_pool_jsonl)),
@@ -371,6 +397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         allow_select_alternative=args.allow_select_alternative,
         block_severe_reasons=not args.ignore_severe_reasons_for_selection,
         allow_low_activity_proxy_gap=args.allow_low_activity_proxy_gap,
+        prefer_base_when_safe=args.prefer_base_when_safe,
     )
     write_json(args.manifest_json, manifest)
     args.summary_md.parent.mkdir(parents=True, exist_ok=True)

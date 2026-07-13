@@ -233,6 +233,7 @@ def segment_metrics(
     candidate_instrumental_path: Path,
     window_sec: Sequence[float],
     candidate_vocal_path: Path | None,
+    diagnostic_non_vocal_support_path: Path | None,
     selector_segment_features: dict[str, float] | None,
 ) -> dict[str, float]:
     start_sec, end_sec = float(window_sec[0]), float(window_sec[1])
@@ -284,7 +285,62 @@ def segment_metrics(
         for key in ("vocal_stem_corr_abs", "vocal_projection_db_vs_instrumental"):
             if key in selector_segment_features:
                 metrics[key] = round(float(selector_segment_features[key]), 9)
+
+    if diagnostic_non_vocal_support_path is not None:
+        support_audio, support_sr = _read_window(diagnostic_non_vocal_support_path, start_sec, end_sec)
+        candidate_for_support = _resample_to(candidate_audio, candidate_sr, support_sr)
+        aligned_support_frames = min(support_audio.size, candidate_for_support.size)
+        support_rms = _rms(support_audio)
+        candidate_support_rms = _rms(candidate_for_support)
+        support_delta_rms = _rms(
+            support_audio[:aligned_support_frames] - candidate_for_support[:aligned_support_frames]
+        )
+        metrics.update(
+            {
+                "non_vocal_support_corr_abs": round(
+                    _correlation_abs(support_audio, candidate_for_support),
+                    9,
+                ),
+                "non_vocal_support_delta_rms_ratio": round(
+                    support_delta_rms / max(support_rms, 1e-12),
+                    9,
+                ),
+                "rms_ratio_db_vs_non_vocal_support": round(
+                    _db_ratio(candidate_support_rms, support_rms),
+                    6,
+                ),
+                "presence_ratio_db_vs_non_vocal_support": round(
+                    _db_ratio(
+                        _band_energy(candidate_for_support, support_sr, 1800.0, 6000.0),
+                        _band_energy(support_audio, support_sr, 1800.0, 6000.0),
+                    ),
+                    6,
+                ),
+            }
+        )
     return metrics
+
+
+def _presence_loss_explained_by_non_vocal_support(metrics: dict[str, float]) -> bool:
+    required_metrics = {
+        "vocal_stem_corr_abs",
+        "vocal_projection_db_vs_instrumental",
+        "non_vocal_support_corr_abs",
+        "non_vocal_support_delta_rms_ratio",
+        "rms_ratio_db_vs_non_vocal_support",
+        "presence_ratio_db_vs_non_vocal_support",
+    }
+    if not required_metrics.issubset(metrics):
+        return False
+    return (
+        float(metrics.get("presence_ratio_db_vs_source", 0.0)) < -9.0
+        and float(metrics["vocal_stem_corr_abs"]) <= 0.05
+        and float(metrics["vocal_projection_db_vs_instrumental"]) <= -24.0
+        and float(metrics["non_vocal_support_corr_abs"]) >= 0.90
+        and float(metrics["non_vocal_support_delta_rms_ratio"]) <= 0.45
+        and abs(float(metrics["rms_ratio_db_vs_non_vocal_support"])) <= 3.0
+        and float(metrics["presence_ratio_db_vs_non_vocal_support"]) >= -3.0
+    )
 
 
 def classify_issues(metrics: dict[str, float]) -> tuple[list[str], dict[str, float]]:
@@ -321,6 +377,10 @@ def classify_issues(metrics: dict[str, float]) -> tuple[list[str], dict[str, flo
         "vocal_stem_corr": vocal_corr_risk,
         "vocal_projection": vocal_projection_risk,
     }
+    presence_loss_explained = _presence_loss_explained_by_non_vocal_support(metrics)
+    metrics["presence_loss_explained_by_non_vocal_support"] = 1.0 if presence_loss_explained else 0.0
+    if presence_loss_explained:
+        severities["presence_loss"] = 0.0
     issues: list[str] = []
     if severities["low_rms_ratio"] > 0.0:
         issues.append("low_rms_muffling_proxy")
@@ -343,6 +403,7 @@ def judge_instrumental(
     candidate_instrumental_path: Path,
     output_dir: Path,
     candidate_vocal_path: Path | None = None,
+    diagnostic_non_vocal_support_path: Path | None = None,
     dataset_manifest_path: Path | None = None,
     selector_manifest_path: Path | None = None,
     candidate_label: str = "candidate",
@@ -362,6 +423,11 @@ def judge_instrumental(
         source_audio_path=str(source_audio_path),
         candidate_instrumental_path=str(candidate_instrumental_path),
         candidate_vocal_path=str(candidate_vocal_path) if candidate_vocal_path is not None else None,
+        diagnostic_non_vocal_support_path=(
+            str(diagnostic_non_vocal_support_path)
+            if diagnostic_non_vocal_support_path is not None
+            else None
+        ),
         dataset_manifest_path=str(dataset_manifest_path) if dataset_manifest_path is not None else None,
         selector_manifest_path=str(selector_manifest_path) if selector_manifest_path is not None else None,
         expected_acceleration_mode="cpu_dsp_self_judge",
@@ -387,6 +453,7 @@ def judge_instrumental(
             candidate_instrumental_path=candidate_instrumental_path,
             window_sec=window_sec,
             candidate_vocal_path=candidate_vocal_path,
+            diagnostic_non_vocal_support_path=diagnostic_non_vocal_support_path,
             selector_segment_features=selector_features.get(segment_id),
         )
         issues, severities = classify_issues(metrics)
@@ -439,6 +506,17 @@ def judge_instrumental(
             "instrumental_sha256": sha256_file(candidate_instrumental_path),
             "vocal_path": str(candidate_vocal_path) if candidate_vocal_path is not None else None,
             "vocal_sha256": sha256_file(candidate_vocal_path) if candidate_vocal_path is not None else None,
+            "diagnostic_non_vocal_support_path": (
+                str(diagnostic_non_vocal_support_path)
+                if diagnostic_non_vocal_support_path is not None
+                else None
+            ),
+            "diagnostic_non_vocal_support_sha256": (
+                sha256_file(diagnostic_non_vocal_support_path)
+                if diagnostic_non_vocal_support_path is not None
+                else None
+            ),
+            "diagnostic_non_vocal_support_is_production_minus": False,
         },
         "dataset_manifest_path": str(dataset_manifest_path) if dataset_manifest_path is not None else None,
         "selector_manifest_path": str(selector_manifest_path) if selector_manifest_path is not None else None,
@@ -490,6 +568,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("candidate_instrumental")
     parser.add_argument("output_dir")
     parser.add_argument("--candidate-vocal-stem")
+    parser.add_argument("--diagnostic-non-vocal-support")
     parser.add_argument("--dataset-manifest")
     parser.add_argument("--selector-manifest")
     parser.add_argument("--candidate-label", default="candidate")
@@ -505,6 +584,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidate_instrumental_path=Path(args.candidate_instrumental),
         output_dir=Path(args.output_dir),
         candidate_vocal_path=Path(args.candidate_vocal_stem) if args.candidate_vocal_stem else None,
+        diagnostic_non_vocal_support_path=(
+            Path(args.diagnostic_non_vocal_support)
+            if args.diagnostic_non_vocal_support
+            else None
+        ),
         dataset_manifest_path=Path(args.dataset_manifest) if args.dataset_manifest else None,
         selector_manifest_path=Path(args.selector_manifest) if args.selector_manifest else None,
         candidate_label=str(args.candidate_label),
